@@ -60,3 +60,33 @@ def test_diff_identical_for_same_run(artifacts):
     res = runner.invoke(app, ["diff", str(a_json), str(a_json)])
     assert res.exit_code == 0, res.output
     assert "IDENTICAL" in res.output
+
+
+def test_query_finds_failure_in_only_one_trace(artifacts):
+    a_json, b_json = artifacts
+    res = runner.invoke(app, ["query", "tool-failure", str(a_json), str(b_json)])
+    assert res.exit_code == 0, res.output
+    assert "A" in res.output and "call_tool" in res.output
+    # B (the ok run) must not appear as a match line
+    assert "1 match(es)" in res.output
+
+
+def test_query_directory_and_no_match(artifacts):
+    a_json, _ = artifacts
+    folder = a_json.parent
+    res = runner.invoke(app, ["query", "plan-then-tool-failure", str(folder)])
+    assert res.exit_code == 0, res.output
+    assert "call_tool" in res.output
+
+
+def test_query_unknown_preset_errors(artifacts):
+    a_json, _ = artifacts
+    res = runner.invoke(app, ["query", "nope", str(a_json)])
+    assert res.exit_code != 0
+    assert "unknown preset" in res.output
+
+
+def test_presets_lists_patterns():
+    res = runner.invoke(app, ["presets"])
+    assert res.exit_code == 0
+    assert "tool-failure" in res.output

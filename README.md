@@ -38,6 +38,9 @@ tracegraph ingest --sqlite trace.db --thread B -o B.json
 tracegraph inspect A.json            # render the causal tree (errors in red)
 tracegraph explain A.json <step_id>  # raw causal chain back to the root cause
 tracegraph diff A.json B.json        # structural regression diff (AHU isomorphism)
+
+tracegraph presets                   # list cross-trace query patterns
+tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
 ```
 
 ```text
@@ -54,6 +57,10 @@ A (langgraph)
 $ tracegraph diff A.json B.json
 NOT IDENTICAL
   • diverges at CHAIN > CHAIN > plan > call_tool: A='handle_error' B='respond'
+
+$ tracegraph query tool-failure A.json B.json
+A: call_tool
+1 match(es) across 1 trace(s)
 ```
 
 ## Status
@@ -63,19 +70,20 @@ NOT IDENTICAL
 - **Phase 0 (frozen contract):** `RawTrace` vs `NormalizedTrace`, portable JSON artifact (system of record), `validate_raw` → projection → `validate_tree`/`validate_normalized`, in-memory store, `explain`.
 - **Phase 1 (ingestion):** `LangGraphCheckpointAdapter` reads any `BaseCheckpointSaver` (root namespace), reconstructs the causal chain from `parent_config`; `examples/tiny_agent.py` generates real traces.
 - **Phase 2 (analysis + CLI):** AHU rooted-tree diff and the Typer CLI.
+- **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend.
 
 Caveats: this is a **checkpoint-level** view (one node per super-step); node names/kinds are
 best-effort display metadata. Cross-namespace/subgraph ingestion is deferred (the adapter
 refuses it loudly rather than guessing).
 
-Next: optional Cypher backend (`tracegraph[cypher]`) for cross-trace pattern queries; the
-OTLP/OpenInference adapter.
+Next: an optional Cypher backend (`tracegraph[cypher]`, Kùzu) that compiles the same
+`PathPattern` spec to openCypher; the OTLP/OpenInference adapter.
 
 ## Develop
 
 ```bash
 uv sync
-uv run pytest          # 41 tests, headless
+uv run pytest          # 52 tests, headless
 ```
 
 The optional Cypher accelerator (`tracegraph[cypher]`, Kùzu) is **not** required for

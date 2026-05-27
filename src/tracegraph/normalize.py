@@ -35,7 +35,12 @@ def _check_steps(trace_id: str, steps: list[Step]) -> None:
 
 
 def _check_caused_by(steps: dict[str, Step], edges: list[Edge]) -> None:
-    """Validate the raw CAUSED_BY layer: typed, endpoints known/distinct, cause precedes effect."""
+    """Validate the raw CAUSED_BY layer: typed, endpoints known/distinct, cause precedes effect.
+
+    Also rejects duplicate edges — a repeated ``(src, dst)`` would double-count in pattern
+    matches and child traversals.
+    """
+    seen: set[tuple[str, str]] = set()
     for e in edges:
         if e.type is not EdgeType.CAUSED_BY:
             raise ValueError(f"raw causal edges must all be CAUSED_BY, got {e.type.value}")
@@ -45,6 +50,9 @@ def _check_caused_by(steps: dict[str, Step], edges: list[Edge]) -> None:
             raise ValueError(f"CAUSED_BY dst {e.dst!r} is not a known step")
         if e.src == e.dst:
             raise ValueError(f"self-causal edge on step {e.src!r}")
+        if (e.src, e.dst) in seen:
+            raise ValueError(f"duplicate CAUSED_BY edge {e.src!r} -> {e.dst!r}")
+        seen.add((e.src, e.dst))
         if not steps[e.dst].seq < steps[e.src].seq:
             raise ValueError(
                 f"cause {e.dst!r} (seq {steps[e.dst].seq}) does not precede effect "

@@ -15,8 +15,10 @@ from rich.tree import Tree
 
 from tracegraph import artifact
 from tracegraph.adapters import LangGraphCheckpointAdapter
+from tracegraph.analysis import PRESETS
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
+from tracegraph.analysis import search as pattern_search
 from tracegraph.analysis import structure_only
 from tracegraph.model import EdgeType, NormalizedTrace, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
@@ -35,6 +37,16 @@ def _load(path: Path) -> NormalizedTrace:
     nt = artifact.load(path)
     validate_normalized(nt)
     return nt
+
+
+def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
+    """Expand files and directories (``*.json``) into a list of validated traces."""
+    files: list[Path] = []
+    for p in paths:
+        files.extend(sorted(p.glob("*.json")) if p.is_dir() else [p])
+    if not files:
+        raise typer.BadParameter("no artifact files found")
+    return [_load(f) for f in files]
 
 
 def _label(step) -> str:
@@ -146,6 +158,37 @@ def diff(
         console.print(f"  • {line}")
     console.print("[dim](divergence localization is heuristic; the identical/not verdict is exact)[/]")
     raise typer.Exit(1)
+
+
+@app.command()
+def presets() -> None:
+    """List the named cross-trace query patterns."""
+    for name, pattern in PRESETS.items():
+        console.print(f"[bold]{name}[/]  [dim]{pattern.description}[/]")
+        console.print(f"    {pattern}")
+
+
+@app.command()
+def query(
+    preset: str = typer.Argument(..., help="Preset pattern name (see `tracegraph presets`)."),
+    artifacts: list[Path] = typer.Argument(..., help="Artifact JSON files and/or directories."),
+) -> None:
+    """Find a causal pattern across one or many traces. Exits 1 if no match is found."""
+    pattern = PRESETS.get(preset)
+    if pattern is None:
+        raise typer.BadParameter(
+            f"unknown preset {preset!r}; available: {', '.join(PRESETS)}"
+        )
+    traces = _load_many(artifacts)
+    matches = pattern_search(traces, pattern)
+    console.print(f"[bold]{preset}[/]: {pattern}  [dim](over {len(traces)} trace(s))[/]\n")
+    if not matches:
+        console.print("[dim]no matches[/]")
+        raise typer.Exit(1)
+    for m in matches:
+        console.print(f"[green]{m.trace_id}[/]: " + " → ".join(m.labels))
+    console.print(f"\n[dim]{len(matches)} match(es) across "
+                  f"{len({m.trace_id for m in matches})} trace(s)[/]")
 
 
 def main() -> None:

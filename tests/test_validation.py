@@ -42,6 +42,18 @@ def test_cause_must_precede_effect():
         normalize(raw)
 
 
+def test_duplicate_caused_by_edge_rejected():
+    raw = _raw(
+        _steps(("a", 0), ("b", 1)),
+        [
+            Edge(type=EdgeType.CAUSED_BY, src="b", dst="a"),
+            Edge(type=EdgeType.CAUSED_BY, src="b", dst="a"),
+        ],
+    )
+    with pytest.raises(ValueError, match="duplicate CAUSED_BY"):
+        normalize(raw)
+
+
 def test_non_caused_by_edge_in_raw_rejected():
     raw = _raw(_steps(("a", 0), ("b", 1)), [Edge(type=EdgeType.TREE_PARENT, src="b", dst="a")])
     with pytest.raises(ValueError, match="CAUSED_BY"):

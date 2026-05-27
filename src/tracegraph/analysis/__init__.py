@@ -16,6 +16,14 @@ from tracegraph.analysis.ahu import (
     structure_only,
 )
 from tracegraph.analysis.explain import Explanation, explain
+from tracegraph.analysis.patterns import (
+    PRESETS,
+    Match,
+    PathPattern,
+    StepPredicate,
+    find_matches,
+    search,
+)
 
 __all__ = [
     "Explanation",
@@ -26,4 +34,10 @@ __all__ = [
     "diff",
     "is_isomorphic",
     "structure_only",
+    "PRESETS",
+    "Match",
+    "PathPattern",
+    "StepPredicate",
+    "find_matches",
+    "search",
 ]
