@@ -102,6 +102,29 @@ def ingest(
     console.print(f"[green]ingested {len(nt.steps)} steps[/] → {target}")
 
 
+@app.command(name="ingest-otlp")
+def ingest_otlp(
+    file: Path = typer.Option(..., "--file", "-f", help="OTLP/JSON span export (resourceSpans)."),
+    trace: str = typer.Option(None, "--trace", "-t", help="traceId to ingest (default: the file's only trace)."),
+    out: Path = typer.Option(None, "--out", "-o", help="Artifact path (default <traceId>.json)."),
+) -> None:
+    """Ingest one trace from an OpenInference/OTLP span export into a portable artifact."""
+    from tracegraph.adapters import OTLPSpanAdapter
+
+    adapter = OTLPSpanAdapter.from_file(file)
+    if trace is None:
+        ids = adapter.discover()
+        if len(ids) != 1:
+            raise typer.BadParameter(
+                f"file holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
+            )
+        trace = ids[0]
+    nt = normalize(adapter.ingest(trace))
+    target = out or Path(f"{trace}.json")
+    artifact.save(nt, target)
+    console.print(f"[green]ingested {len(nt.steps)} spans[/] → {target}")
+
+
 @app.command()
 def inspect(artifact_path: Path = typer.Argument(..., help="Artifact JSON from `ingest`.")) -> None:
     """Render a trace's derived causal tree."""
