@@ -73,16 +73,38 @@ def validate_raw(raw: RawTrace) -> None:
 
 
 def validate_normalized(nt: NormalizedTrace) -> None:
-    """Validate a :class:`NormalizedTrace` end to end: raw ``CAUSED_BY`` layer **and** tree.
+    """Validate a :class:`NormalizedTrace` end to end: raw layer **and** that the whole
+    artifact is *exactly* what :func:`normalize` would produce from its raw layer.
 
-    Because the artifact JSON is the system of record, a hand-edited or corrupt artifact
-    must be rejected at the load boundary — not silently accepted and then blow up inside
-    ``explain``/``ancestors``. This re-runs the raw checks (on the ``CAUSED_BY`` subset of
-    the edges) plus :func:`validate_tree`.
+    The strong check — re-deriving and comparing — is what makes the artifact a true
+    system of record. Without it, a hand-edited or partly-corrupt artifact (missing
+    ``BELONGS_TO``, missing ``TREE_PARENT``, wrong ``projection_lossy``, or simply edges
+    in non-canonical order) would pass the cheap structural checks and then silently
+    drift: a backend rebuilding from the raw layer would emit different artifact bytes
+    on the next save. Rejecting here keeps every loader (InMemoryStore, KuzuStore, future
+    caches) honest about "the JSON is what normalize() produces, full stop."
     """
     _check_steps(nt.trace.trace_id, nt.steps)
     _check_caused_by(nt.steps_by_id(), nt.edges_of(EdgeType.CAUSED_BY))
     validate_tree(nt)
+
+    # Reconstruct what the canonical form should look like from the raw layer alone. We
+    # strip projection_lossy from the steps so normalize() resets it from scratch —
+    # otherwise a corrupt input flag would survive into the "expected" side and the
+    # check would tautologically pass.
+    raw = RawTrace(
+        trace=nt.trace,
+        steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
+        causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
+    )
+    expected = normalize(raw)
+    if expected != nt:
+        raise ValueError(
+            "normalized trace is not in canonical form: derived edges, projection_lossy "
+            "flags, or step/edge ordering do not match what normalize() produces from "
+            "the raw CAUSED_BY layer. The JSON artifact must be the output of normalize() "
+            "verbatim — anything else would drift on the next save."
+        )
 
 
 def _parents_of(step_id: str, caused_by: list[Edge]) -> list[str]:
@@ -107,17 +129,34 @@ def _primary_parent(parent_ids: list[str], steps: dict[str, Step]) -> str:
 def normalize(raw: RawTrace) -> NormalizedTrace:
     """Validate a raw trace and return its normalized form (raw + derived layers).
 
-    Deterministic. The returned :class:`NormalizedTrace` carries the original
-    ``CAUSED_BY`` edges (system of record), plus derived ``BELONGS_TO`` and
-    ``TREE_PARENT`` edges, with ``projection_lossy`` set on collapsed steps.
+    Deterministic and **canonically ordered**: the returned trace's steps and edges are
+    in a fixed, input-independent order so two semantically-equivalent ``RawTrace`` inputs
+    (e.g. the same trace from two adapters, or the same artifact reloaded through any
+    backend) produce byte-identical artifacts. The canonical layout is:
+
+    * **steps** — sorted by ``(seq, step_id)``;
+    * **CAUSED_BY** edges — sorted by ``(effect.seq, cause.seq, src, dst)`` (the order a
+      walk-forward-in-time would discover them);
+    * **BELONGS_TO** then **TREE_PARENT** for each step, emitted in the canonical step order.
+
+    This guarantee — not "the adapter happened to enumerate canonically" — is what makes
+    the optional Kùzu cache a true accelerator: any backend that rebuilds a trace from
+    its raw layer lands on the same artifact bytes.
     """
     validate_raw(raw)
     steps_by_id = raw.steps_by_id()
-    caused_by = raw.causal_edges
+
+    # Canonicalize the raw inputs ONCE; derived edges then fall out in canonical order
+    # naturally because they're emitted per-step in the same loop.
+    steps_canonical = sorted(raw.steps, key=lambda s: (s.seq, s.step_id))
+    caused_by = sorted(
+        raw.causal_edges,
+        key=lambda e: (steps_by_id[e.src].seq, steps_by_id[e.dst].seq, e.src, e.dst),
+    )
 
     edges: list[Edge] = list(caused_by)  # carry the raw layer through unchanged
     new_steps: list[Step] = []
-    for step in raw.steps:
+    for step in steps_canonical:
         parents = _parents_of(step.step_id, caused_by)
         # Flag lossiness on a copy so we never mutate the caller's objects.
         step = step.model_copy(update={"projection_lossy": len(parents) > 1})

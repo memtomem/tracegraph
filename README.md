@@ -71,20 +71,22 @@ A: call_tool
 - **Phase 1 (ingestion):** `LangGraphCheckpointAdapter` reads any `BaseCheckpointSaver` (root namespace), reconstructs the causal chain from `parent_config`; `examples/tiny_agent.py` generates real traces.
 - **Phase 2 (analysis + CLI):** AHU rooted-tree diff and the Typer CLI.
 - **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend.
+- **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests exported spans (Phoenix/Langfuse/Collector) into the same causal model — the source that actually exercises the raw/derived split.
+- **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `KuzuStore` that compiles the **same** `PathPattern` spec to openCypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
 
 Caveats: this is a **checkpoint-level** view (one node per super-step); node names/kinds are
 best-effort display metadata. Cross-namespace/subgraph ingestion is deferred (the adapter
 refuses it loudly rather than guessing).
 
-Next: an optional Cypher backend (`tracegraph[cypher]`, Kùzu) that compiles the same
-`PathPattern` spec to openCypher; the OTLP/OpenInference adapter.
-
 ## Develop
 
 ```bash
-uv sync
-uv run pytest          # 52 tests, headless
+uv sync                    # core only
+uv sync --extra cypher     # include the optional Kùzu backend
+uv run pytest              # headless
 ```
 
-The optional Cypher accelerator (`tracegraph[cypher]`, Kùzu) is **not** required for
-the core and is pinned because its upstream was archived in Oct 2025.
+The optional Cypher accelerator (`tracegraph[cypher]`, Kùzu) is **not** required for the
+core; its tests are marked `@pytest.mark.cypher` and skip cleanly without the extra. Kùzu
+is pinned because its upstream was archived in Oct 2025 — the embedded format isn't
+load-bearing here (the JSON artifact is).

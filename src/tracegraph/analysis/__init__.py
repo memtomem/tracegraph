@@ -18,9 +18,11 @@ from tracegraph.analysis.ahu import (
 from tracegraph.analysis.explain import Explanation, explain
 from tracegraph.analysis.patterns import (
     PRESETS,
+    CompiledQuery,
     Match,
     PathPattern,
     StepPredicate,
+    compile_to_cypher,
     find_matches,
     search,
 )
@@ -35,9 +37,11 @@ __all__ = [
     "is_isomorphic",
     "structure_only",
     "PRESETS",
+    "CompiledQuery",
     "Match",
     "PathPattern",
     "StepPredicate",
+    "compile_to_cypher",
     "find_matches",
     "search",
 ]

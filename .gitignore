@@ -8,3 +8,6 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local Codex/dev-trio review artifacts (logs, manifests, run metadata).
+.dev-trio/

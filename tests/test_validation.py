@@ -4,7 +4,7 @@ import pytest
 
 from tracegraph import artifact
 from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, Trace
-from tracegraph.normalize import normalize, validate_tree
+from tracegraph.normalize import normalize, validate_normalized, validate_tree
 from tracegraph.store import InMemoryStore
 
 
@@ -20,6 +20,32 @@ def test_unknown_cause_rejected():
     raw = _raw(_steps(("a", 0), ("b", 1)), [Edge(type=EdgeType.CAUSED_BY, src="b", dst="ghost")])
     with pytest.raises(ValueError, match="not a known step"):
         normalize(raw)
+
+
+def test_normalize_output_is_canonically_ordered_independent_of_input_order():
+    """The contract Kùzu (and any other cache) relies on: ``normalize`` produces the same
+    artifact bytes regardless of how the adapter happened to enumerate steps and edges.
+
+    We feed the SAME logical trace twice — once in canonical (seq-ASC) order, once
+    deliberately scrambled — and assert the two normalized outputs are identical."""
+    s = _steps(("a", 0), ("b", 1), ("c", 2))
+    canonical_edges = [
+        Edge(type=EdgeType.CAUSED_BY, src="b", dst="a"),
+        Edge(type=EdgeType.CAUSED_BY, src="c", dst="b"),
+    ]
+    scrambled_edges = list(reversed(canonical_edges))
+    scrambled_steps = list(reversed(s))
+
+    nt_canonical = normalize(_raw(s, canonical_edges))
+    nt_scrambled = normalize(_raw(scrambled_steps, scrambled_edges))
+
+    assert nt_canonical == nt_scrambled
+    # And the canonical layout itself: steps in seq order, CAUSED_BY before derived edges.
+    assert [step.step_id for step in nt_canonical.steps] == ["a", "b", "c"]
+    assert [(e.type, e.src, e.dst) for e in nt_canonical.edges_of(EdgeType.CAUSED_BY)] == [
+        (EdgeType.CAUSED_BY, "b", "a"),
+        (EdgeType.CAUSED_BY, "c", "b"),
+    ]
 
 
 def test_unknown_effect_rejected():
@@ -120,6 +146,61 @@ def test_from_trace_rejects_non_forest():
     )
     with pytest.raises(ValueError, match="more than one TREE_PARENT"):
         InMemoryStore.from_trace(nt)
+
+
+# --- "is exactly what normalize() would produce" boundary tests -----------------------
+#
+# These guard the stronger validate_normalized contract: a NormalizedTrace at the load
+# boundary must equal normalize(raw_layer). Anything less and a backend rebuilding from
+# the raw layer (KuzuStore) would silently emit different bytes — drift the artifact
+# format is meant to prevent.
+
+
+def _canonical_two_step() -> NormalizedTrace:
+    return normalize(
+        _raw(_steps(("a", 0), ("b", 1)), [Edge(type=EdgeType.CAUSED_BY, src="b", dst="a")])
+    )
+
+
+def test_validate_normalized_rejects_missing_belongs_to():
+    nt = _canonical_two_step()
+    stripped = nt.model_copy(
+        update={"edges": [e for e in nt.edges if e.type is not EdgeType.BELONGS_TO]}
+    )
+    with pytest.raises(ValueError, match="canonical form"):
+        validate_normalized(stripped)
+
+
+def test_validate_normalized_rejects_missing_tree_parent():
+    nt = _canonical_two_step()
+    stripped = nt.model_copy(
+        update={"edges": [e for e in nt.edges if e.type is not EdgeType.TREE_PARENT]}
+    )
+    with pytest.raises(ValueError, match="canonical form"):
+        validate_normalized(stripped)
+
+
+def test_validate_normalized_rejects_wrong_projection_lossy_flag():
+    # The flag is a derived signal; a hand-edited artifact that claims a single-cause step
+    # was lossy (or vice versa) would mislead RCA — catch it at the boundary.
+    nt = _canonical_two_step()
+    tampered_steps = [
+        s.model_copy(update={"projection_lossy": True}) if s.step_id == "b" else s
+        for s in nt.steps
+    ]
+    tampered = nt.model_copy(update={"steps": tampered_steps})
+    with pytest.raises(ValueError, match="canonical form"):
+        validate_normalized(tampered)
+
+
+def test_validate_normalized_rejects_non_canonical_edge_order():
+    # Same logical trace, edges shuffled out of canonical order — must be rejected so the
+    # KuzuStore (which sorts queries canonically) can't silently disagree with a backend
+    # that walked the edges in input order.
+    nt = _canonical_two_step()
+    shuffled = nt.model_copy(update={"edges": list(reversed(nt.edges))})
+    with pytest.raises(ValueError, match="canonical form"):
+        validate_normalized(shuffled)
 
 
 def _corrupt_normalized() -> NormalizedTrace:
