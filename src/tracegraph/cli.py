@@ -40,13 +40,30 @@ def _load(path: Path) -> NormalizedTrace:
 
 
 def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
-    """Expand files and directories (``*.json``) into a list of validated traces."""
+    """Expand files and directories (``*.json``) into a list of validated traces.
+
+    Rejects duplicate ``trace_id`` across the input set. The portable artifact is a
+    system of record keyed by ``trace_id``, so two files claiming the same id are
+    ambiguous — and ``query --explain`` looks up the originating trace by id when
+    rendering an ancestor chain, so silently keeping the last-loaded copy would
+    attach matches from one artifact to a different artifact's causal graph.
+    """
     files: list[Path] = []
     for p in paths:
         files.extend(sorted(p.glob("*.json")) if p.is_dir() else [p])
     if not files:
         raise typer.BadParameter("no artifact files found")
-    return [_load(f) for f in files]
+    traces = [_load(f) for f in files]
+    seen: dict[str, Path] = {}
+    for tr, f in zip(traces, files):
+        tid = tr.trace.trace_id
+        if tid in seen:
+            raise typer.BadParameter(
+                f"duplicate trace_id {tid!r}: {seen[tid]} and {f}. Each artifact "
+                "must carry a unique trace_id — rename or deduplicate before querying."
+            )
+        seen[tid] = f
+    return traces
 
 
 def _label(step) -> str:
@@ -195,6 +212,19 @@ def presets() -> None:
 def query(
     preset: str = typer.Argument(..., help="Preset pattern name (see `tracegraph presets`)."),
     artifacts: list[Path] = typer.Argument(..., help="Artifact JSON files and/or directories."),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Cap total matches across all traces (useful when scanning hundreds). "
+             "Match order is unchanged — the cap simply truncates the tail.",
+    ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help="For each match, render the raw causal ancestor chain of the matched "
+             "effect (the last step in the path) — same shape as `tracegraph explain`.",
+    ),
 ) -> None:
     """Find a causal pattern across one or many traces. Exits 1 if no match is found."""
     pattern = PRESETS.get(preset)
@@ -202,16 +232,59 @@ def query(
         raise typer.BadParameter(
             f"unknown preset {preset!r}; available: {', '.join(PRESETS)}"
         )
+    if limit is not None and limit <= 0:
+        raise typer.BadParameter("--limit must be a positive integer")
     traces = _load_many(artifacts)
     matches = pattern_search(traces, pattern)
+    total = len(matches)
+    truncated = limit is not None and total > limit
+    if truncated:
+        matches = matches[:limit]
     console.print(f"[bold]{preset}[/]: {pattern}  [dim](over {len(traces)} trace(s))[/]\n")
     if not matches:
         console.print("[dim]no matches[/]")
         raise typer.Exit(1)
+
+    # Lazily build stores only for the traces that actually appear in the (possibly
+    # truncated) match set — --explain over a 10-of-500 cap shouldn't pay 500 store loads.
+    traces_by_id = {nt.trace.trace_id: nt for nt in traces}
+    stores: dict[str, InMemoryStore] = {}
+
     for m in matches:
         console.print(f"[green]{m.trace_id}[/]: " + " → ".join(m.labels))
-    console.print(f"\n[dim]{len(matches)} match(es) across "
-                  f"{len({m.trace_id for m in matches})} trace(s)[/]")
+        if explain:
+            store = stores.get(m.trace_id)
+            if store is None:
+                store = InMemoryStore.from_trace(traces_by_id[m.trace_id])
+                stores[m.trace_id] = store
+            # The effect (last step in the matched path) is what we trace back from —
+            # the rest of the match is by construction part of its causal chain, but
+            # explain() surfaces every cause including ones the pattern didn't constrain.
+            result = explain_chain(store, m.step_ids[-1])
+            if not result.chain:
+                console.print("    [dim]← (no causes — matched effect is a root step)[/]")
+            for s in result.chain:
+                flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
+                # Fallback label matches `tracegraph explain` (s.name or s.source.value)
+                # so the two renderings agree for nameless LangGraph checkpoints.
+                console.print(f"    ← {s.name or s.source.value} (step {s.seq}){flag}")
+            # Causal-honesty signal: when the matched effect (or anything in the chain)
+            # has more than one real cause, the single-parent tree projection dropped
+            # at least one. `tracegraph explain` surfaces this same warning — `query
+            # --explain` must too, or a fan-in effect's lossiness becomes invisible
+            # (target lossiness doesn't show up in the per-step ⚠ flags above, since
+            # we only flag chain ancestors there).
+            if result.is_lossy:
+                console.print(
+                    "    [yellow]⚠ some steps in this match had multiple real causes — "
+                    "trust this raw chain, not the tree.[/]"
+                )
+
+    n_traces = len({m.trace_id for m in matches})
+    suffix = f" — truncated from {total}" if truncated else ""
+    console.print(
+        f"\n[dim]{len(matches)} match(es) across {n_traces} trace(s){suffix}[/]"
+    )
 
 
 def main() -> None:
