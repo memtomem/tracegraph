@@ -1,0 +1,80 @@
+name: tests
+
+# Locks in the contracts the repo's design hinges on:
+#   - Default install is hermetic — pure Python core works with no optional deps.
+#   - The optional [cypher] extra (Kùzu) installs cleanly and the equivalence
+#     tests (Kùzu vs pure-Python matcher) pass on a fresh runner.
+# A two-job matrix is the minimum that proves both: dropping the base job would
+# let a stray `import kuzu` outside the optional-extra gate go unnoticed; dropping
+# the cypher job would let the Kùzu wheel rot until a user hits it.
+
+on:
+  push:
+  pull_request:
+
+# Read-only by default — pytest doesn't need write access to anything in the repo,
+# and tightening here makes a compromised dependency strictly less dangerous.
+permissions:
+  contents: read
+
+jobs:
+  base:
+    name: pure-python core
+    runs-on: ubuntu-latest
+    steps:
+      # First-party actions (actions/*) stay tag-pinned: a tag rotation would
+      # require a GitHub-owned org compromise. Third-party actions below are
+      # SHA-pinned because their tag-mutation surface is unilateral.
+      - uses: actions/checkout@v4
+
+      # Pinned to the v4.2.0 commit SHA (not the mutable `v4` tag) so a hijacked
+      # tag can't silently swap the action body under us. Bump deliberately.
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # `--locked` rejects any drift from uv.lock: CI should fail the PR that
+      # forgot to commit a regenerated lockfile, not silently resolve a new one
+      # and pass against it.
+      - name: Install (no optional extras)
+        run: uv sync --locked
+
+      # The whole point of this job is to assert the optional-extra gate works.
+      # `pytest.importorskip("kuzu")` skips the cypher tests transparently, so a
+      # transitive dep that quietly pulled kuzu into the default install would
+      # turn that skip into a run and the gate would silently break. Catch it
+      # here, before pytest, with a one-liner that fails loud.
+      - name: Assert kuzu is NOT installed in the default environment
+        run: |
+          uv run --no-sync python -c "import importlib.util, sys; \
+            spec = importlib.util.find_spec('kuzu'); \
+            sys.exit(0) if spec is None else sys.exit(f'kuzu leaked into the default install at {spec.origin!r}')"
+
+      # `--no-sync` so pytest runs against exactly what `uv sync --locked` put
+      # in the venv (no re-resolve possible mid-job).
+      - name: pytest
+        run: uv run --no-sync pytest -v
+
+  cypher:
+    name: with [cypher] extra (Kùzu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install with cypher extra
+        run: uv sync --locked --extra cypher
+
+      - name: pytest (cypher tests included)
+        run: uv run --no-sync --extra cypher pytest -v
