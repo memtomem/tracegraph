@@ -78,8 +78,10 @@ def _store_cls(backend: QueryBackend) -> type[Any]:
     if backend is QueryBackend.MEMORY:
         return InMemoryStore
     try:
-        from tracegraph.store import KuzuStore
-    except ImportError as exc:
+        from tracegraph.store.kuzu import KuzuStore
+    except ModuleNotFoundError as exc:
+        if exc.name != "kuzu":
+            raise
         raise typer.BadParameter(
             "--backend kuzu requires the optional tracegraph[cypher] dependency"
         ) from exc

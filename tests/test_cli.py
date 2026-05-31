@@ -1,11 +1,16 @@
 """CLI smoke test: ingest a real SqliteSaver DB, then inspect / explain / diff."""
 
+import builtins
+import sys
+
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
+import typer
 from tiny_agent import run
 from typer.testing import CliRunner
 
 from tracegraph import artifact
+from tracegraph import cli as cli_mod
 from tracegraph.cli import app
 from tracegraph.model import (
     Edge,
@@ -130,6 +135,37 @@ def test_presets_lists_patterns():
     res = runner.invoke(app, ["presets"])
     assert res.exit_code == 0
     assert "tool-failure" in res.output
+
+
+def test_kuzu_backend_missing_optional_dependency_reports_bad_parameter(monkeypatch):
+    monkeypatch.delitem(sys.modules, "tracegraph.store.kuzu", raising=False)
+    monkeypatch.delitem(sys.modules, "kuzu", raising=False)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "kuzu":
+            raise ModuleNotFoundError("No module named 'kuzu'", name="kuzu")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(typer.BadParameter, match=r"tracegraph\[cypher\]"):
+        cli_mod._store_cls(cli_mod.QueryBackend.KUZU)
+
+
+def test_kuzu_backend_broken_import_is_not_hidden(monkeypatch):
+    monkeypatch.delitem(sys.modules, "tracegraph.store.kuzu", raising=False)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "tracegraph.store.kuzu":
+            raise ImportError("backend broken")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ImportError, match="backend broken"):
+        cli_mod._store_cls(cli_mod.QueryBackend.KUZU)
 
 
 # --- query --limit / --explain ------------------------------------------------------
