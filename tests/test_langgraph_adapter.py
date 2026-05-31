@@ -161,9 +161,15 @@ def test_parent_continuation_uses_subgraph_terminal_cause():
         "sub",
         1,
         "003-sub-step",
-        channel_values={"branch:to:wrong_parent": True},
+        channel_values={"branch:to:wrong_parent": True, "error": "boom"},
     )
-    root_after = _ck("005-root-after", "", 2, "001-root-before")
+    root_after = _ck(
+        "005-root-after",
+        "",
+        2,
+        "001-root-before",
+        channel_values={"error": "boom"},
+    )
 
     raw = LangGraphCheckpointAdapter(
         _StubSaver([root_after, sub_done, sub_step, sub_input, root_before])
@@ -173,6 +179,8 @@ def test_parent_continuation_uses_subgraph_terminal_cause():
     assert ("005-root-after", "sub:004-sub-done") in caused
     assert ("005-root-after", "001-root-before") not in caused
     assert next(s for s in raw.steps if s.step_id == "005-root-after").name == "after"
+    errors = [s.step_id for s in raw.steps if s.status is StepStatus.ERROR]
+    assert errors == ["sub:004-sub-done"]
     nt = normalize(raw)
     assert [s.step_id for s in nt.steps] == [
         "001-root-before",

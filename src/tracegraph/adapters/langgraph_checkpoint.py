@@ -175,7 +175,11 @@ class LangGraphCheckpointAdapter:
                 step.name = name
                 if "tool" in name.lower():
                     step.kind = StepKind.TOOL
-            err = self._error_introduced(checkpoints[step_id], parent_cp)
+            causal_parent_ids = parents_by_step.get(step_id, [])
+            error_parent_cp = (
+                checkpoints.get(causal_parent_ids[0]) if causal_parent_ids else None
+            )
+            err = self._error_introduced(checkpoints[step_id], error_parent_cp)
             if err is not None:
                 step.status = StepStatus.ERROR
                 step.error_msg = err
