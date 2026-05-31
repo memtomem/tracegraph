@@ -7,8 +7,11 @@ the parent-checkpoint links become ``CAUSED_BY`` edges (effect → cause).
 All checkpoint namespaces for the requested thread are ingested. Root-namespace
 checkpoints keep their checkpoint id as ``step_id``; non-root checkpoints use
 ``"<checkpoint_ns>:<checkpoint_id>"`` so subgraph checkpoint ids cannot collide with root
-ids. Causality comes from ``parent_config`` first; subgraph namespace roots also use
-LangGraph's declared ``metadata.parents`` when there is no direct ``parent_config``.
+ids. Causality comes from ``parent_config`` first; subgraph namespace roots also use the
+closest LangGraph-declared ``metadata.parents`` entry when there is no direct
+``parent_config``. When a parent namespace continues after a subgraph, LangGraph records
+the parent namespace checkpoint as its ``parent_config``; this adapter expands that
+namespace-level shortcut through the terminal checkpoint inside the subgraph namespace.
 
 A few facts about the checkpoint stream this relies on (verified against
 langgraph-checkpoint 4.x):
@@ -124,8 +127,17 @@ class LangGraphCheckpointAdapter:
                 status=StepStatus.OK,
             )
 
+        chrono_rank = self._chrono_rank(checkpoints)
+        causal_parent_keys = self._with_subgraph_exit_edges(
+            parent_keys,
+            key_by_step_id,
+            step_id_by_key,
+            chrono_rank,
+        )
+
         parents_by_step: dict[str, list[str]] = {}
-        for step_id, refs in parent_keys.items():
+        display_parent_by_step: dict[str, str] = {}
+        for step_id, refs in causal_parent_keys.items():
             for parent_key in refs:
                 parent_id = step_id_by_key.get(parent_key)
                 if parent_id is None:
@@ -137,6 +149,12 @@ class LangGraphCheckpointAdapter:
                         "checkpoint history is partial/corrupt"
                     )
                 parents_by_step.setdefault(step_id, []).append(parent_id)
+
+        for step_id, refs in parent_keys.items():
+            if refs:
+                display_parent_id = step_id_by_key.get(refs[0])
+                if display_parent_id is not None:
+                    display_parent_by_step[step_id] = display_parent_id
 
         if not self._metadata_seq_is_valid(original_seq, parents_by_step):
             global_seq = self._topo_seq(steps, parents_by_step, original_seq)
@@ -150,8 +168,8 @@ class LangGraphCheckpointAdapter:
         ]
 
         for step_id, step in steps.items():
-            parent_ids = parents_by_step.get(step_id, [])
-            parent_cp = checkpoints.get(parent_ids[0]) if parent_ids else None
+            display_parent_id = display_parent_by_step.get(step_id)
+            parent_cp = checkpoints.get(display_parent_id) if display_parent_id else None
             name = self._producing_node(parent_cp)
             if name:
                 step.name = name
@@ -193,15 +211,87 @@ class LangGraphCheckpointAdapter:
         parents = md.get("parents") or {}
         if not isinstance(parents, dict):
             return []
-        out: list[_CheckpointKey] = []
-        seen: set[_CheckpointKey] = set()
-        for parent_ns, checkpoint_id in sorted(parents.items()):
-            if checkpoint_id is None:
+        closest = LangGraphCheckpointAdapter._closest_parent_ns(ns, parents)
+        if closest is None:
+            return []
+        checkpoint_id = parents[closest]
+        return [] if checkpoint_id is None else [(closest or _ROOT_NS, checkpoint_id)]
+
+    @staticmethod
+    def _closest_parent_ns(ns: str, parents: dict[str, str]) -> str | None:
+        candidates = [
+            parent_ns or _ROOT_NS
+            for parent_ns in parents
+            if parent_ns == _ROOT_NS or ns.startswith(f"{parent_ns}|")
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda parent_ns: (parent_ns.count("|"), len(parent_ns)))
+
+    @staticmethod
+    def _chrono_rank(checkpoints: dict[str, dict]) -> dict[str, int]:
+        return {
+            step_id: i
+            for i, step_id in enumerate(
+                sorted(
+                    checkpoints,
+                    key=lambda sid: (
+                        checkpoints[sid].get("id") or sid,
+                        checkpoints[sid].get("ts") or "",
+                        sid,
+                    ),
+                )
+            )
+        }
+
+    @staticmethod
+    def _with_subgraph_exit_edges(
+        parent_keys: dict[str, list[_CheckpointKey]],
+        key_by_step_id: dict[str, _CheckpointKey],
+        step_id_by_key: dict[_CheckpointKey, str],
+        chrono_rank: dict[str, int],
+    ) -> dict[str, list[_CheckpointKey]]:
+        entry_parent_by_ns: dict[str, _CheckpointKey] = {}
+        terminal_step_by_ns: dict[str, str] = {}
+        for step_id, key in key_by_step_id.items():
+            ns, _ = key
+            if ns == _ROOT_NS:
                 continue
-            key = (parent_ns or _ROOT_NS, checkpoint_id)
-            if key not in seen:
-                seen.add(key)
-                out.append(key)
+            terminal = terminal_step_by_ns.get(ns)
+            if terminal is None or chrono_rank[terminal] < chrono_rank[step_id]:
+                terminal_step_by_ns[ns] = step_id
+            for parent_key in parent_keys.get(step_id, []):
+                if parent_key[0] != ns:
+                    entry_parent_by_ns.setdefault(ns, parent_key)
+
+        exits_by_entry_parent: dict[_CheckpointKey, list[_CheckpointKey]] = {}
+        for ns, entry_parent in entry_parent_by_ns.items():
+            terminal_step = terminal_step_by_ns.get(ns)
+            if terminal_step is None:
+                continue
+            exits_by_entry_parent.setdefault(entry_parent, []).append(key_by_step_id[terminal_step])
+
+        out: dict[str, list[_CheckpointKey]] = {}
+        for step_id, refs in parent_keys.items():
+            step_ns, _ = key_by_step_id[step_id]
+            expanded: list[_CheckpointKey] = []
+            seen: set[_CheckpointKey] = set()
+            for ref in refs:
+                exit_refs = [
+                    exit_ref
+                    for exit_ref in exits_by_entry_parent.get(ref, [])
+                    if ref[0] == step_ns
+                    and chrono_rank[step_id_by_key[exit_ref]] < chrono_rank[step_id]
+                ]
+                replacements = sorted(
+                    exit_refs,
+                    key=lambda exit_ref: chrono_rank[step_id_by_key[exit_ref]],
+                ) or [ref]
+                for replacement in replacements:
+                    if replacement not in seen:
+                        seen.add(replacement)
+                        expanded.append(replacement)
+            out[step_id] = expanded
         return out
 
     @staticmethod

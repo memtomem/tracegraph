@@ -80,6 +80,7 @@ def _ck(
     *,
     parent_ns: str | None = None,
     parents: dict[str, str] | None = None,
+    channel_values: dict | None = None,
 ) -> CheckpointTuple:
     cfg = {"configurable": {"thread_id": "A", "checkpoint_ns": ns, "checkpoint_id": cid}}
     pcfg = (
@@ -95,7 +96,11 @@ def _ck(
     )
     return CheckpointTuple(
         config=cfg,
-        checkpoint={"id": cid, "ts": "2026-01-01T00:00:00+00:00", "channel_values": {}},
+        checkpoint={
+            "id": cid,
+            "ts": "2026-01-01T00:00:00+00:00",
+            "channel_values": channel_values or {},
+        },
         metadata={"step": step, "source": "loop", "parents": parents or {}},
         parent_config=pcfg,
         pending_writes=[],
@@ -136,6 +141,84 @@ def test_metadata_parents_connect_subgraph_namespace_root():
     assert raw.steps[0].step_id == "root0"
     assert raw.steps[1].step_id == "sub:sub0"
     assert raw.steps[0].seq < raw.steps[1].seq
+
+
+def test_parent_continuation_uses_subgraph_terminal_cause():
+    # Real LangGraph subgraphs resume the parent namespace with parent_config still
+    # pointing at the checkpoint that launched the subgraph. In the expanded causal graph
+    # that namespace-level shortcut must be replaced with the subgraph terminal checkpoint.
+    root_before = _ck(
+        "001-root-before",
+        "",
+        1,
+        None,
+        channel_values={"branch:to:after": True},
+    )
+    sub_input = _ck("002-sub-input", "sub", -1, None, parents={"": "001-root-before"})
+    sub_step = _ck("003-sub-step", "sub", 0, "002-sub-input")
+    sub_done = _ck(
+        "004-sub-done",
+        "sub",
+        1,
+        "003-sub-step",
+        channel_values={"branch:to:wrong_parent": True},
+    )
+    root_after = _ck("005-root-after", "", 2, "001-root-before")
+
+    raw = LangGraphCheckpointAdapter(
+        _StubSaver([root_after, sub_done, sub_step, sub_input, root_before])
+    ).ingest("A")
+    caused = {(e.src, e.dst) for e in raw.causal_edges}
+
+    assert ("005-root-after", "sub:004-sub-done") in caused
+    assert ("005-root-after", "001-root-before") not in caused
+    assert next(s for s in raw.steps if s.step_id == "005-root-after").name == "after"
+    nt = normalize(raw)
+    assert [s.step_id for s in nt.steps] == [
+        "001-root-before",
+        "sub:002-sub-input",
+        "sub:003-sub-step",
+        "sub:004-sub-done",
+        "005-root-after",
+    ]
+
+
+def test_nested_metadata_parents_keep_only_closest_parent():
+    # Nested subgraph metadata carries every ancestor namespace. Only the immediate
+    # parent namespace is a direct cause for the nested namespace input.
+    root_parent = _ck(
+        "001-root-parent",
+        "",
+        1,
+        None,
+        channel_values={"branch:to:wrong_parent": True},
+    )
+    outer_parent = _ck(
+        "002-outer-parent",
+        "outer",
+        1,
+        None,
+        channel_values={"branch:to:inner": True},
+    )
+    inner_input = _ck(
+        "003-inner-input",
+        "outer|inner",
+        -1,
+        None,
+        parents={"": "001-root-parent", "outer": "002-outer-parent"},
+    )
+
+    nt = normalize(
+        LangGraphCheckpointAdapter(
+            _StubSaver([inner_input, outer_parent, root_parent])
+        ).ingest("A")
+    )
+    caused = {(e.src, e.dst) for e in nt.edges_of(EdgeType.CAUSED_BY)}
+    inner = nt.steps_by_id()["outer|inner:003-inner-input"]
+
+    assert caused == {("outer|inner:003-inner-input", "outer:002-outer-parent")}
+    assert not inner.projection_lossy
+    assert inner.name == "inner"
 
 
 def test_cross_namespace_missing_parent_raises():
