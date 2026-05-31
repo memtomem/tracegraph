@@ -1,7 +1,11 @@
 """Phase 1 end-to-end: real LangGraph SqliteSaver trace -> adapter -> normalized graph."""
 
+from operator import add
+from typing import Annotated, TypedDict
+
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
 from tiny_agent import run
 
 from tracegraph.adapters import LangGraphCheckpointAdapter
@@ -65,6 +69,139 @@ def test_ok_run_has_no_error_and_diverges_structurally(saver):
 def test_ingest_unknown_thread_raises(saver):
     with pytest.raises(KeyError):
         LangGraphCheckpointAdapter(saver).ingest("does-not-exist")
+
+
+def _keep_error(a: str | None, b: str | None) -> str | None:
+    return b or a
+
+
+class _SubgraphState(TypedDict):
+    log: Annotated[list[str], add]
+    error: Annotated[str | None, _keep_error]
+
+
+def _log_node(label: str):
+    def node(state: _SubgraphState) -> dict:  # noqa: ARG001 - node shape mirrors LangGraph
+        return {"log": [label]}
+
+    return node
+
+
+def _error_node(state: _SubgraphState) -> dict:  # noqa: ARG001 - node shape mirrors LangGraph
+    return {"log": ["error"], "error": "boom"}
+
+
+def _single_node_subgraph(name: str, node):
+    g = StateGraph(_SubgraphState)
+    g.add_node(name, node)
+    g.add_edge(START, name)
+    g.add_edge(name, END)
+    return g.compile()
+
+
+def test_real_nested_subgraph_uses_closest_parent_and_exit_edges():
+    inner = _single_node_subgraph("inner_step", _log_node("inner_step"))
+
+    outer = StateGraph(_SubgraphState)
+    outer.add_node("outer_before", _log_node("outer_before"))
+    outer.add_node("inner", inner)
+    outer.add_node("outer_after", _log_node("outer_after"))
+    outer.add_edge(START, "outer_before")
+    outer.add_edge("outer_before", "inner")
+    outer.add_edge("inner", "outer_after")
+    outer.add_edge("outer_after", END)
+
+    parent = StateGraph(_SubgraphState)
+    parent.add_node("before", _log_node("before"))
+    parent.add_node("outer", outer.compile())
+    parent.add_node("after", _log_node("after"))
+    parent.add_edge(START, "before")
+    parent.add_edge("before", "outer")
+    parent.add_edge("outer", "after")
+    parent.add_edge("after", END)
+
+    with SqliteSaver.from_conn_string(":memory:") as s:
+        parent.compile(checkpointer=s).invoke(
+            {"log": [], "error": None},
+            {"configurable": {"thread_id": "nested"}},
+        )
+        nt = normalize(LangGraphCheckpointAdapter(s).ingest("nested"))
+
+    steps = nt.steps_by_id()
+    caused = nt.edges_of(EdgeType.CAUSED_BY)
+    parents = {e.src: [] for e in caused}
+    for e in caused:
+        parents[e.src].append(e.dst)
+
+    inner_inputs = [
+        s for s in nt.steps if "|inner:" in s.step_id and s.source.value == "input"
+    ]
+    assert len(inner_inputs) == 1
+    inner_input = inner_inputs[0]
+    assert inner_input.name == "inner"
+    assert not inner_input.projection_lossy
+    assert [steps[p].name for p in parents[inner_input.step_id]] == ["outer_before"]
+
+    outer_inner_return = [
+        s
+        for s in nt.steps
+        if s.step_id.startswith("outer:")
+        and "|inner:" not in s.step_id
+        and s.name == "inner"
+        and s.source.value == "loop"
+    ]
+    assert len(outer_inner_return) == 1
+    assert [steps[p].name for p in parents[outer_inner_return[0].step_id]] == ["inner_step"]
+
+    root_outer_return = [
+        s for s in nt.steps if ":" not in s.step_id and s.name == "outer"
+    ]
+    assert len(root_outer_return) == 1
+    assert [steps[p].name for p in parents[root_outer_return[0].step_id]] == ["outer_after"]
+
+
+def test_real_parallel_subgraphs_preserve_labels_edges_and_propagated_error():
+    parent = StateGraph(_SubgraphState)
+    parent.add_node("before", _log_node("before"))
+    parent.add_node("sub_a", _single_node_subgraph("step", _log_node("a")))
+    parent.add_node("sub_b", _single_node_subgraph("step", _error_node))
+    parent.add_node("after", _log_node("after"))
+    parent.add_edge(START, "before")
+    parent.add_edge("before", "sub_a")
+    parent.add_edge("before", "sub_b")
+    parent.add_edge(["sub_a", "sub_b"], "after")
+    parent.add_edge("after", END)
+
+    with SqliteSaver.from_conn_string(":memory:") as s:
+        parent.compile(checkpointer=s).invoke(
+            {"log": [], "error": None},
+            {"configurable": {"thread_id": "parallel"}},
+        )
+        nt = normalize(LangGraphCheckpointAdapter(s).ingest("parallel"))
+
+    steps = nt.steps_by_id()
+    caused = nt.edges_of(EdgeType.CAUSED_BY)
+    parents = {e.src: [] for e in caused}
+    for e in caused:
+        parents[e.src].append(e.dst)
+
+    subgraph_inputs = {
+        s.name: s
+        for s in nt.steps
+        if s.step_id.startswith("sub_") and s.source.value == "input"
+    }
+    assert set(subgraph_inputs) == {"sub_a", "sub_b"}
+
+    errors = [s for s in nt.steps if s.status is StepStatus.ERROR]
+    assert len(errors) == 1
+    assert errors[0].step_id.startswith("sub_b:")
+    assert errors[0].name == "step"
+
+    fanin_steps = [s for s in nt.steps if s.projection_lossy and ":" not in s.step_id]
+    assert len(fanin_steps) == 1
+    fanin_parent_ids = parents[fanin_steps[0].step_id]
+    assert {p.split(":", 1)[0] for p in fanin_parent_ids} == {"sub_a", "sub_b"}
+    assert [steps[p].name for p in fanin_parent_ids] == ["step", "step"]
 
 
 # --- cross-namespace/subgraph parentage ---
