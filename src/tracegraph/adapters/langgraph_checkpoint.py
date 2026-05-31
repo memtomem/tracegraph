@@ -176,10 +176,8 @@ class LangGraphCheckpointAdapter:
                 if "tool" in name.lower():
                     step.kind = StepKind.TOOL
             causal_parent_ids = parents_by_step.get(step_id, [])
-            error_parent_cp = (
-                checkpoints.get(causal_parent_ids[0]) if causal_parent_ids else None
-            )
-            err = self._error_introduced(checkpoints[step_id], error_parent_cp)
+            error_parent_cps = [checkpoints[parent_id] for parent_id in causal_parent_ids]
+            err = self._error_introduced(checkpoints[step_id], error_parent_cps)
             if err is not None:
                 step.status = StepStatus.ERROR
                 step.error_msg = err
@@ -354,15 +352,14 @@ class LangGraphCheckpointAdapter:
                 return channel[len(_BRANCH_PREFIX):]
         return None
 
-    def _error_introduced(self, cp: dict, parent_cp: dict | None) -> str | None:
+    def _error_introduced(self, cp: dict, parent_cps: list[dict]) -> str | None:
         """Return the error message iff this checkpoint is where the error first appears."""
         current = cp.get("channel_values", {}).get(self._error_channel)
         if not current:
             return None
-        previous = (
-            (parent_cp or {}).get("channel_values", {}).get(self._error_channel)
-            if parent_cp
-            else None
+        previous = any(
+            parent_cp.get("channel_values", {}).get(self._error_channel)
+            for parent_cp in parent_cps
         )
         if previous:  # error was already present upstream -> not introduced here
             return None

@@ -191,6 +191,45 @@ def test_parent_continuation_uses_subgraph_terminal_cause():
     ]
 
 
+def test_parent_join_checks_all_subgraph_terminal_error_parents():
+    root_before = _ck(
+        "001-root-before",
+        "",
+        1,
+        None,
+        channel_values={"branch:to:join": True},
+    )
+    sub_a_input = _ck("002-sub-a-input", "sub_a", -1, None, parents={"": "001-root-before"})
+    sub_a_done = _ck("003-sub-a-done", "sub_a", 0, "002-sub-a-input")
+    sub_b_input = _ck("004-sub-b-input", "sub_b", -1, None, parents={"": "001-root-before"})
+    sub_b_done = _ck(
+        "005-sub-b-done",
+        "sub_b",
+        0,
+        "004-sub-b-input",
+        channel_values={"error": "boom"},
+    )
+    root_join = _ck(
+        "006-root-join",
+        "",
+        2,
+        "001-root-before",
+        channel_values={"error": "boom"},
+    )
+
+    raw = LangGraphCheckpointAdapter(
+        _StubSaver(
+            [root_join, sub_b_done, sub_b_input, sub_a_done, sub_a_input, root_before]
+        )
+    ).ingest("A")
+    caused = {(e.src, e.dst) for e in raw.causal_edges}
+    errors = [s.step_id for s in raw.steps if s.status is StepStatus.ERROR]
+
+    assert ("006-root-join", "sub_a:003-sub-a-done") in caused
+    assert ("006-root-join", "sub_b:005-sub-b-done") in caused
+    assert errors == ["sub_b:005-sub-b-done"]
+
+
 def test_nested_metadata_parents_keep_only_closest_parent():
     # Nested subgraph metadata carries every ancestor namespace. Only the immediate
     # parent namespace is a direct cause for the nested namespace input.
