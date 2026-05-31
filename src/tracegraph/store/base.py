@@ -4,10 +4,11 @@ The store does **not** expose a ``query(cypher)`` method: that would leak openCy
 upward and make the pure-Python path a second-class citizen. Instead, analyses are
 expressed as *operations* the store implements; each backend supplies its own
 implementation (pure-Python traversal here; compiled openCypher in the optional Kùzu
-backend later).
+backend for pattern matching).
 
-Pattern matching (``match_pattern``) is intentionally absent — it is post-MVP and will
-arrive as a separate ``PatternStore`` mixin so this core stays boring.
+Pattern matching intentionally stays out of the minimal ``GraphStore`` protocol. It is a
+separate backend capability (pure-Python functions for the default path; ``KuzuStore`` adds
+``find_matches``) so RCA/diff callers do not depend on a Cypher-capable backend.
 """
 
 from __future__ import annotations
