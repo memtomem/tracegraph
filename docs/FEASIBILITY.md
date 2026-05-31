@@ -34,15 +34,15 @@ tool with a clear wedge.
 ## Corrected positioning
 
 **tracegraph is a read-path analysis layer, not a checkpointer.** It ingests traces
-that *already exist* (LangGraph checkpoint history first; OpenInference/OTLP spans
-later) into a normalized causal graph, then runs analyses that the incumbents don't:
+that *already exist* (LangGraph checkpoint history and OpenInference/OTLP spans) into
+a normalized causal graph, then runs analyses that the incumbents don't:
 
 - **`explain` / causal RCA** — backward traversal over the *raw* causal graph from a
   failure, surfacing every real predecessor.
 - **structural regression diff** — rooted-tree (AHU) isomorphism over a *derived*
   single-parent view; exact and linear-time.
-- **cross-trace pattern matching** (post-MVP) — e.g. "tool X → retry → tool X →
-  failure" across all stored traces.
+- **cross-trace pattern matching** — e.g. "tool X → retry → tool X → failure" across
+  all stored traces.
 
 The one non-obvious design commitment that makes the RCA *honest*: we persist the
 **raw multi-parent causal graph** as the system of record and treat the single-parent

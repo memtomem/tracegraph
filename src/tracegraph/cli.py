@@ -7,7 +7,9 @@ the checkpoint stream), not an authoritative node-execution trace.
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -16,6 +18,7 @@ from rich.tree import Tree
 from tracegraph import artifact
 from tracegraph.adapters import LangGraphCheckpointAdapter
 from tracegraph.analysis import PRESETS
+from tracegraph.analysis import Match
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
@@ -30,6 +33,11 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+
+class QueryBackend(str, Enum):
+    MEMORY = "memory"
+    KUZU = "kuzu"
 
 
 def _load(path: Path) -> NormalizedTrace:
@@ -64,6 +72,46 @@ def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
             )
         seen[tid] = f
     return traces
+
+
+def _store_cls(backend: QueryBackend) -> type[Any]:
+    if backend is QueryBackend.MEMORY:
+        return InMemoryStore
+    try:
+        from tracegraph.store import KuzuStore
+    except ImportError as exc:
+        raise typer.BadParameter(
+            "--backend kuzu requires the optional tracegraph[cypher] dependency"
+        ) from exc
+    return KuzuStore
+
+
+def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
+    return _store_cls(backend).load_artifact(path)
+
+
+def _store_from_trace(nt: NormalizedTrace, backend: QueryBackend) -> Any:
+    return _store_cls(backend).from_trace(nt)
+
+
+def _search_with_backend(
+    traces: list[NormalizedTrace],
+    pattern,
+    backend: QueryBackend,
+) -> tuple[list[Match], dict[str, Any]]:
+    if backend is QueryBackend.MEMORY:
+        return pattern_search(traces, pattern), {}
+
+    matches: list[Match] = []
+    stores: dict[str, Any] = {}
+    for nt in traces:
+        store = _store_from_trace(nt, backend)
+        stores[nt.trace.trace_id] = store
+        steps = nt.steps_by_id()
+        for path in store.find_matches(pattern):
+            labels = [steps[i].name or steps[i].kind.value for i in path]
+            matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
+    return matches, stores
 
 
 def _label(step) -> str:
@@ -152,9 +200,15 @@ def inspect(artifact_path: Path = typer.Argument(..., help="Artifact JSON from `
 def explain(
     artifact_path: Path = typer.Argument(..., help="Artifact JSON from `ingest`."),
     step_id: str = typer.Argument(..., help="Step id to explain (full or unique suffix)."),
+    backend: QueryBackend = typer.Option(
+        QueryBackend.MEMORY,
+        "--backend",
+        case_sensitive=False,
+        help="Query backend to use for raw causal traversal.",
+    ),
 ) -> None:
     """Trace a step's raw causal chain back toward its root cause."""
-    store = InMemoryStore.load_artifact(artifact_path)
+    store = _store_from_artifact(artifact_path, backend)
     steps = store.trace().steps_by_id()
     matches = [sid for sid in steps if sid == step_id or sid.endswith(step_id)]
     if len(matches) != 1:
@@ -225,6 +279,12 @@ def query(
         help="For each match, render the raw causal ancestor chain of the matched "
              "effect (the last step in the path) — same shape as `tracegraph explain`.",
     ),
+    backend: QueryBackend = typer.Option(
+        QueryBackend.MEMORY,
+        "--backend",
+        case_sensitive=False,
+        help="Query backend to use for pattern matching and optional explanations.",
+    ),
 ) -> None:
     """Find a causal pattern across one or many traces. Exits 1 if no match is found."""
     pattern = PRESETS.get(preset)
@@ -235,7 +295,7 @@ def query(
     if limit is not None and limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
     traces = _load_many(artifacts)
-    matches = pattern_search(traces, pattern)
+    matches, stores = _search_with_backend(traces, pattern, backend)
     total = len(matches)
     truncated = limit is not None and total > limit
     if truncated:
@@ -248,14 +308,12 @@ def query(
     # Lazily build stores only for the traces that actually appear in the (possibly
     # truncated) match set — --explain over a 10-of-500 cap shouldn't pay 500 store loads.
     traces_by_id = {nt.trace.trace_id: nt for nt in traces}
-    stores: dict[str, InMemoryStore] = {}
-
     for m in matches:
         console.print(f"[green]{m.trace_id}[/]: " + " → ".join(m.labels))
         if explain:
             store = stores.get(m.trace_id)
             if store is None:
-                store = InMemoryStore.from_trace(traces_by_id[m.trace_id])
+                store = _store_from_trace(traces_by_id[m.trace_id], backend)
                 stores[m.trace_id] = store
             # The effect (last step in the matched path) is what we trace back from —
             # the rest of the match is by construction part of its causal chain, but

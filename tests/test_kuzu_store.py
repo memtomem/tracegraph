@@ -9,11 +9,13 @@ RCA evidence depending on which backend a user happened to install.
 from __future__ import annotations
 
 import pytest
+from typer.testing import CliRunner
 
 kuzu = pytest.importorskip("kuzu", reason="requires the [cypher] extra")
 
 from tracegraph import artifact
 from tracegraph.analysis import PRESETS, PathPattern, StepPredicate, find_matches
+from tracegraph.cli import app
 from tracegraph.model import (
     Edge,
     EdgeType,
@@ -28,6 +30,7 @@ from tracegraph.normalize import normalize
 from tracegraph.store import KuzuStore
 
 pytestmark = pytest.mark.cypher
+runner = CliRunner()
 
 
 # --- fixtures (shared trace shapes; mirror test_patterns.py so equivalence is checkable) ---
@@ -249,3 +252,34 @@ def test_corrupt_trace_rejected_at_load_boundary() -> None:
     corrupt = NormalizedTrace(trace=nt.trace, steps=nt.steps, edges=bad_edges)
     with pytest.raises(ValueError, match="ghost"):
         KuzuStore.from_trace(corrupt)
+
+
+# --- CLI backend selection ---
+
+
+def test_cli_explain_can_use_kuzu_backend(tmp_path) -> None:
+    src_path = tmp_path / "trace.json"
+    artifact.save(_erroring_tool_trace(), src_path)
+
+    res = runner.invoke(app, ["explain", "--backend", "kuzu", str(src_path), "A2"])
+
+    assert res.exit_code == 0, res.output
+    assert "call_tool" in res.output
+    assert "← plan" in res.output
+
+
+def test_cli_query_can_use_kuzu_backend(tmp_path) -> None:
+    a_path = tmp_path / "A.json"
+    b_path = tmp_path / "B.json"
+    artifact.save(_erroring_tool_trace(), a_path)
+    artifact.save(_clean_trace(), b_path)
+
+    res = runner.invoke(
+        app,
+        ["query", "tool-failure", "--backend", "kuzu", str(a_path), str(b_path)],
+    )
+
+    assert res.exit_code == 0, res.output
+    assert "A" in res.output
+    assert "call_tool" in res.output
+    assert "1 match(es)" in res.output

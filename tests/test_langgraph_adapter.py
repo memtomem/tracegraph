@@ -67,22 +67,36 @@ def test_ingest_unknown_thread_raises(saver):
         LangGraphCheckpointAdapter(saver).ingest("does-not-exist")
 
 
-# --- guard: cross-namespace parent must not silently fabricate a root ---
+# --- cross-namespace/subgraph parentage ---
 
 from langgraph.checkpoint.base import CheckpointTuple  # noqa: E402
 
 
-def _ck(cid: str, ns: str, step: int, parent_id: str | None) -> CheckpointTuple:
+def _ck(
+    cid: str,
+    ns: str,
+    step: int,
+    parent_id: str | None,
+    *,
+    parent_ns: str | None = None,
+    parents: dict[str, str] | None = None,
+) -> CheckpointTuple:
     cfg = {"configurable": {"thread_id": "A", "checkpoint_ns": ns, "checkpoint_id": cid}}
     pcfg = (
-        {"configurable": {"thread_id": "A", "checkpoint_ns": ns, "checkpoint_id": parent_id}}
+        {
+            "configurable": {
+                "thread_id": "A",
+                "checkpoint_ns": ns if parent_ns is None else parent_ns,
+                "checkpoint_id": parent_id,
+            }
+        }
         if parent_id
         else None
     )
     return CheckpointTuple(
         config=cfg,
         checkpoint={"id": cid, "ts": "2026-01-01T00:00:00+00:00", "channel_values": {}},
-        metadata={"step": step, "source": "loop", "parents": {}},
+        metadata={"step": step, "source": "loop", "parents": parents or {}},
         parent_config=pcfg,
         pending_writes=[],
     )
@@ -96,9 +110,35 @@ class _StubSaver:
         return iter(self._tuples)
 
 
-def test_cross_namespace_parent_raises():
-    # root-ns checkpoint c1 whose parent c0 is a (filtered-out) non-root checkpoint
-    root = _ck("c1", "", 1, "c0")
+def test_cross_namespace_parent_config_ingests_subgraph_checkpoint():
+    # root-ns checkpoint c1 whose direct parent is a non-root checkpoint.
+    root = _ck("c1", "", 1, "c0", parent_ns="sub")
     sub = _ck("c0", "sub", 0, None)
-    with pytest.raises(NotImplementedError, match="cross-namespace"):
-        LangGraphCheckpointAdapter(_StubSaver([root, sub])).ingest("A")
+    raw = LangGraphCheckpointAdapter(_StubSaver([root, sub])).ingest("A")
+    assert {s.step_id for s in raw.steps} == {"sub:c0", "c1"}
+    assert [(e.src, e.dst) for e in raw.causal_edges] == [("c1", "sub:c0")]
+
+    nt = normalize(raw)
+    caused = nt.edges_of(EdgeType.CAUSED_BY)
+    roots = [s.step_id for s in nt.steps if not any(e.src == s.step_id for e in caused)]
+    assert roots == ["sub:c0"]
+
+
+def test_metadata_parents_connect_subgraph_namespace_root():
+    # Real LangGraph subgraphs put their cross-namespace entry parent in metadata.parents
+    # on the subgraph input checkpoint, not in parent_config.
+    root_parent = _ck("root0", "", 1, None)
+    sub_root = _ck("sub0", "sub", -1, None, parents={"": "root0"})
+    raw = LangGraphCheckpointAdapter(_StubSaver([sub_root, root_parent])).ingest("A")
+
+    assert [(e.src, e.dst) for e in raw.causal_edges] == [("sub:sub0", "root0")]
+    assert {s.step_id for s in raw.steps} == {"root0", "sub:sub0"}
+    assert raw.steps[0].step_id == "root0"
+    assert raw.steps[1].step_id == "sub:sub0"
+    assert raw.steps[0].seq < raw.steps[1].seq
+
+
+def test_cross_namespace_missing_parent_raises():
+    root = _ck("c1", "", 1, "missing", parent_ns="sub")
+    with pytest.raises(ValueError, match="missing parent checkpoint"):
+        LangGraphCheckpointAdapter(_StubSaver([root])).ingest("A")

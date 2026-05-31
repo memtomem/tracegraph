@@ -2,7 +2,7 @@
 
 A :class:`~tracegraph.model.NormalizedTrace` serializes to a single self-describing
 JSON file (schema-versioned). This artifact — not any graph-DB file — is the source
-of truth: query backends (the in-memory store now, an optional Kùzu cache later) are
+of truth: query backends (the in-memory store and optional Kùzu cache) are
 always rebuildable from it. Parquet is a future option; JSON keeps Phase 0 boring.
 """
 

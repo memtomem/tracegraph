@@ -30,9 +30,9 @@ from pydantic import BaseModel, Field
 class StepKind(str, Enum):
     """What a causal-event step represents.
 
-    Mirrors OpenInference span kinds so the (post-MVP) OTLP adapter maps cleanly,
-    plus ``DATA`` for state/data nodes. LangGraph super-steps that can't be
-    classified more precisely default to ``CHAIN``.
+    Mirrors OpenInference span kinds so the OTLP adapter maps cleanly, plus ``DATA`` for
+    state/data nodes. LangGraph super-steps that can't be classified more precisely default
+    to ``CHAIN``.
     """
 
     AGENT = "AGENT"
@@ -68,11 +68,11 @@ class EdgeType(str, Enum):
 
 
 class Step(BaseModel):
-    """A causal-event node: one LangGraph super-step/checkpoint (or, later, one span)."""
+    """A causal-event node: one LangGraph super-step/checkpoint or one OTLP span."""
 
     step_id: str
     trace_id: str
-    seq: int = Field(description="Monotonic execution order within the trace (LangGraph metadata.step).")
+    seq: int = Field(description="Monotonic execution order within the trace.")
     ts: str | None = Field(default=None, description="ISO-8601 timestamp, when available.")
     kind: StepKind = StepKind.CHAIN
     source: StepSource = StepSource.LOOP
