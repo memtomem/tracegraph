@@ -197,7 +197,11 @@ def test_parent_join_checks_all_subgraph_terminal_error_parents():
         "",
         1,
         None,
-        channel_values={"branch:to:join": True},
+        channel_values={
+            "branch:to:sub_a": True,
+            "branch:to:sub_b": True,
+            "branch:to:join": True,
+        },
     )
     sub_a_input = _ck("002-sub-a-input", "sub_a", -1, None, parents={"": "001-root-before"})
     sub_a_done = _ck("003-sub-a-done", "sub_a", 0, "002-sub-a-input")
@@ -223,10 +227,13 @@ def test_parent_join_checks_all_subgraph_terminal_error_parents():
         )
     ).ingest("A")
     caused = {(e.src, e.dst) for e in raw.causal_edges}
+    steps = {s.step_id: s for s in raw.steps}
     errors = [s.step_id for s in raw.steps if s.status is StepStatus.ERROR]
 
     assert ("006-root-join", "sub_a:003-sub-a-done") in caused
     assert ("006-root-join", "sub_b:005-sub-b-done") in caused
+    assert steps["sub_a:002-sub-a-input"].name == "sub_a"
+    assert steps["sub_b:004-sub-b-input"].name == "sub_b"
     assert errors == ["sub_b:005-sub-b-done"]
 
 

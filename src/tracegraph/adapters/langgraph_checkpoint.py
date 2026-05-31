@@ -170,7 +170,9 @@ class LangGraphCheckpointAdapter:
         for step_id, step in steps.items():
             display_parent_id = display_parent_by_step.get(step_id)
             parent_cp = checkpoints.get(display_parent_id) if display_parent_id else None
-            name = self._producing_node(parent_cp)
+            parent_key = key_by_step_id.get(display_parent_id) if display_parent_id else None
+            branch_target = self._branch_target(parent_key, key_by_step_id[step_id])
+            name = self._producing_node(parent_cp, branch_target)
             if name:
                 step.name = name
                 if "tool" in name.lower():
@@ -344,8 +346,30 @@ class LangGraphCheckpointAdapter:
         return {sid: i for i, sid in enumerate(order)}
 
     @staticmethod
-    def _producing_node(parent_cp: dict | None) -> str | None:
+    def _branch_target(parent_key: _CheckpointKey | None, child_key: _CheckpointKey) -> str | None:
+        if parent_key is None:
+            return None
+        parent_ns, _ = parent_key
+        child_ns, _ = child_key
+        if parent_ns == child_ns:
+            return None
+        if parent_ns == _ROOT_NS:
+            relative_ns = child_ns
+        elif child_ns.startswith(f"{parent_ns}|"):
+            relative_ns = child_ns[len(parent_ns) + 1:]
+        else:
+            return None
+        next_ns = relative_ns.split("|", 1)[0]
+        return next_ns.split(":", 1)[0] or None
+
+    @staticmethod
+    def _producing_node(parent_cp: dict | None, branch_target: str | None = None) -> str | None:
         if not parent_cp:
+            return None
+        if branch_target is not None:
+            channel = f"{_BRANCH_PREFIX}{branch_target}"
+            if channel in parent_cp.get("channel_values", {}):
+                return branch_target
             return None
         for channel in parent_cp.get("channel_values", {}):
             if channel.startswith(_BRANCH_PREFIX):
