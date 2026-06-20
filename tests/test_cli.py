@@ -356,18 +356,20 @@ def test_query_explain_with_limit_only_explains_shown_matches(three_failing_trac
 
 
 def _panel_text(output: str) -> str:
-    """Collapse typer's Rich error-panel ANSI + box-drawing + wrapping into one searchable string.
+    """Collapse typer's Rich error-panel escapes + box-drawing + wrapping into one searchable string.
 
     typer renders BadParameter inside a panel that hard-wraps at the console width, inserting
     ``│``, newlines and padding mid-message — so a long (path-bearing) message can split an
     asserted phrase across the border (even ``"cannot load artifact"`` at a very narrow width).
-    Under a color-forcing terminal (e.g. CI sets ``FORCE_COLOR``) Rich *also* injects ANSI/SGR
-    escapes (``\\x1b[31m`` …) at the border, which would otherwise sit between the split words.
-    We strip the escapes first, then collapse all whitespace/box runs to single spaces — Rich
-    wraps at word boundaries, so this reconstitutes any phrase regardless of color, path length
-    or terminal width.
+    Under a color-forcing terminal Rich *also* injects ANSI escapes that would sit between the
+    split words. ``conftest.py`` forces ``TERM=dumb`` so color is normally off, but we still
+    strip escapes here defensively (in case a module is run without the conftest): OSC
+    sequences (e.g. hyperlinks ``\\x1b]8;;…``) then CSI/SGR sequences (``\\x1b[31m`` …). We then
+    collapse all whitespace/box runs to single spaces — Rich wraps at word boundaries, so this
+    reconstitutes any phrase regardless of color, path length, or terminal width.
     """
-    no_ansi = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)
+    no_osc = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", output)  # OSC ... BEL/ST
+    no_ansi = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", no_osc)  # CSI (incl. SGR)
     return re.sub(r"[\s│╭╮╰╯─]+", " ", no_ansi)
 
 
@@ -455,6 +457,50 @@ def test_query_explicit_bad_file_is_fatal_not_skipped(tmp_path):
     assert res.exit_code != 0
     assert "cannot load artifact" in _panel_text(res.output)
     assert "not valid JSON" in _panel_text(res.output)
+
+
+def test_query_skips_deeply_nested_stray_in_directory(tmp_path):
+    # A deeply-nested stray .json overflows json's recursive scanner with a RecursionError
+    # (not OSError/ValueError) — it used to escape _load_many and crash the query with a raw
+    # traceback. It must now be skipped like any other non-artifact (review finding #8).
+    d = tmp_path / "arts"
+    d.mkdir()
+    _write_linear_trace(
+        d / "good.json",
+        "G",
+        ("input", StepKind.CHAIN, StepStatus.OK),
+        ("call_tool", StepKind.TOOL, StepStatus.ERROR),
+    )
+    depth = 100_000
+    (d / "deep.json").write_text("[" * depth + "]" * depth, encoding="utf-8")
+    res = runner.invoke(app, ["query", "tool-failure", str(d)])
+    assert res.exit_code == 0, res.output
+    assert "call_tool" in res.output  # the real artifact still matched
+    assert "deep.json" in _panel_text(res.output)  # the stray was warned, not crashed
+
+
+def test_query_flushes_skip_warning_before_fatal_explicit_error(tmp_path):
+    # A stray discovered in a directory must not be silently dropped when a *later* explicit
+    # file fails fatally — the skip warning is flushed before the fatal error aborts the load
+    # (review finding #6).
+    d = tmp_path / "arts"
+    d.mkdir()
+    (d / "stray.json").write_text('{"name": "x"}', encoding="utf-8")
+    bad = tmp_path / "explicit_bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    res = runner.invoke(app, ["query", "error", str(d), str(bad)])
+    assert res.exit_code != 0
+    out = _panel_text(res.output)
+    assert "stray.json" in out  # the earlier-discovered stray was reported, not dropped
+    assert "cannot load artifact" in out  # and the explicit file's fatal error is shown
+
+
+def test_artifact_loads_normalizes_deep_nesting_to_valueerror():
+    # The RecursionError from json's recursive scanner is normalized to ValueError so the load
+    # boundary (CLI's (OSError, ValueError) handler) treats it as bad input, not a crash.
+    deep = "[" * 100_000 + "]" * 100_000
+    with pytest.raises(ValueError):
+        artifact.loads(deep)
 
 
 def test_explain_exact_id_wins_over_suffix_collision(tmp_path):

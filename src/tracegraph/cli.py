@@ -93,6 +93,18 @@ def _load(path: Path) -> NormalizedTrace:
         raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
 
 
+def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
+    """Emit the stderr warning for directory-discovered files that weren't valid artifacts."""
+    if not skipped:
+        return
+    # escape() the dynamic names/reasons so a filename containing Rich markup (e.g.
+    # "weird[x].json") renders literally instead of being mis-parsed as style tags.
+    detail = ", ".join(f"{f.name} ({why})" for f, why in skipped)
+    err_console.print(
+        f"[yellow]⚠ skipped {len(skipped)} non-artifact file(s): {escape(detail)}[/]"
+    )
+
+
 def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
     """Expand files and directories (``*.json``) into a list of validated traces.
 
@@ -123,7 +135,13 @@ def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
     skipped: list[tuple[Path, str]] = []
     for f, explicit in discovered:
         if explicit:
-            traces.append(_load(f))  # strict: a clean, fatal BadParameter on failure
+            try:
+                traces.append(_load(f))  # strict: a clean, fatal BadParameter on failure
+            except typer.BadParameter:
+                # Flush what we've already skipped before aborting, so strays discovered
+                # earlier in the argument list aren't silently dropped by the fatal error.
+                _warn_skipped(skipped)
+                raise
             used.append(f)
             continue
         try:
@@ -132,13 +150,7 @@ def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
         except _LOAD_ERRORS as exc:
             skipped.append((f, _load_reason(exc)))
 
-    if skipped:
-        # escape() the dynamic names/reasons so a filename containing Rich markup (e.g.
-        # "weird[x].json") renders literally instead of being mis-parsed as style tags.
-        detail = ", ".join(f"{f.name} ({why})" for f, why in skipped)
-        err_console.print(
-            f"[yellow]⚠ skipped {len(skipped)} non-artifact file(s): {escape(detail)}[/]"
-        )
+    _warn_skipped(skipped)
     if not traces:
         raise typer.BadParameter(
             f"no valid artifacts found ({len(skipped)} discovered file(s) were not "

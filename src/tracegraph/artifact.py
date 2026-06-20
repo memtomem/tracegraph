@@ -25,7 +25,14 @@ def dumps(nt: NormalizedTrace) -> str:
 
 def loads(text: str) -> NormalizedTrace:
     """Parse a trace from a JSON string, validating the schema version."""
-    payload = json.loads(text)
+    try:
+        payload = json.loads(text)
+    except RecursionError as exc:
+        # Deeply-nested JSON overflows json's recursive scanner with a RecursionError (a
+        # RuntimeError, *not* a ValueError). Normalize it so the load boundary treats an
+        # over-nested stray as bad input — otherwise it escapes the CLI's (OSError, ValueError)
+        # handler and crashes the whole command with a raw traceback.
+        raise ValueError("JSON nesting too deep") from exc
     # The artifact envelope is a JSON object. A top-level array/string/number/null is valid
     # JSON but not an artifact (e.g. a stray data export) — reject it as a clean ValueError
     # rather than letting ``payload.get`` raise an opaque AttributeError that callers can't

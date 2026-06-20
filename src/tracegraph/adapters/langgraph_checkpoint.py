@@ -51,12 +51,18 @@ _TOOL_TOKENS = {"tool", "tools"}
 def _looks_like_tool_node(name: str) -> bool:
     """True iff ``name`` names a tool node — has ``tool``/``tools`` as a *whole token*.
 
-    The old test was ``"tool" in name.lower()``, which classified any node whose name merely
-    *contained* the substring (``retool``, ``toolbar``, ``stool``) as a TOOL and let that
-    bogus kind leak into ``kind=TOOL`` pattern queries. We instead tokenize on
-    non-alphanumeric separators and camelCase boundaries, so ``call_tool`` / ``run_tools`` /
-    ``ToolNode`` classify as tools while ``retool`` does not. All-caps tokens match too
-    (``CALL_TOOL`` / ``TOOL``), preserving the case-insensitive coverage of the old check.
+    The old test ``"tool" in name.lower()`` matched any name *containing* the substring, so
+    ``retool`` / ``toolbar`` / ``stool`` wrongly became tools and leaked ``kind=TOOL`` into
+    pattern queries. We tokenize instead — split on non-alphanumeric separators, then on
+    camelCase / acronym boundaries — and match ``tool`` / ``tools`` as a *whole token*:
+    ``tool``, ``tools``, ``call_tool``, ``run_tools``, ``tool_node``, ``ToolNode`` and the
+    all-caps ``TOOL`` / ``CALL_TOOL`` all classify; ``retool`` does not.
+
+    This is deliberately stricter than the old substring test, so it does *not* match every
+    name the old check did: a name where ``tool`` is glued into a larger all-lowercase word
+    (``toolnode``, ``runtool``) or an all-caps run fused to a CamelWord (``TOOLs``) is not a
+    tool here. That's an accepted limitation — real LangGraph tool nodes use separated or
+    camelCase names (``tools``, ``call_tool``, ``ToolNode``). ASCII letters only.
     """
     tokens: list[str] = []
     for part in re.split(r"[^A-Za-z0-9]+", name):
