@@ -3,7 +3,7 @@
 import pytest
 
 from tracegraph import artifact
-from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, Trace
+from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, StepStatus, Trace
 from tracegraph.normalize import normalize, validate_normalized, validate_tree
 from tracegraph.store import InMemoryStore
 
@@ -223,3 +223,34 @@ def test_load_artifact_rejects_corrupt_raw_layer(tmp_path):
     artifact.save(_corrupt_normalized(), path)
     with pytest.raises(ValueError, match="not a known step"):
         InMemoryStore.load_artifact(path)
+
+
+# --- trace-level status is part of the system of record ------------------------------------
+
+
+def test_validate_normalized_rejects_lying_trace_status():
+    # A clean-looking status on a trace whose steps tell a different story would let an
+    # artifact hide a failed run. The header is system-of-record truth, so reject it.
+    nt = _canonical_two_step()  # no error steps -> status ok
+    lying = nt.model_copy(
+        update={"trace": nt.trace.model_copy(update={"status": StepStatus.ERROR})}
+    )
+    with pytest.raises(ValueError, match="disagrees with its steps"):
+        validate_normalized(lying)
+
+
+def test_normalize_derives_trace_status_from_steps():
+    # normalize() makes trace.status a derived view of the steps regardless of what the raw
+    # trace claimed: an erroring step always yields status=error, and the result self-checks.
+    steps = [
+        Step(step_id="a", trace_id="t", seq=0),
+        Step(step_id="b", trace_id="t", seq=1, status=StepStatus.ERROR, error_msg="boom"),
+    ]
+    raw = RawTrace(
+        trace=Trace(trace_id="t", source_kind="test", status=StepStatus.OK),  # raw lies: ok
+        steps=steps,
+        causal_edges=[Edge(type=EdgeType.CAUSED_BY, src="b", dst="a")],
+    )
+    nt = normalize(raw)
+    assert nt.trace.status is StepStatus.ERROR
+    validate_normalized(nt)  # the derived status passes its own consistency check

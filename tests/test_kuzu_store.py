@@ -27,7 +27,7 @@ from tracegraph.model import (
     Trace,
 )
 from tracegraph.normalize import normalize
-from tracegraph.store import KuzuStore
+from tracegraph.store import InMemoryStore, KuzuStore
 
 pytestmark = pytest.mark.cypher
 runner = CliRunner()
@@ -181,6 +181,18 @@ def test_ancestors_raises_on_unknown_step_id() -> None:
     store = KuzuStore.from_trace(_erroring_tool_trace())
     with pytest.raises(KeyError, match="unknown step"):
         store.ancestors("does-not-exist")
+
+
+def test_ancestors_deep_chain_matches_in_memory_at_any_depth() -> None:
+    # Regression: Kùzu caps variable-length hops at 30, so a `CAUSED_BY*0..` ancestor query
+    # silently truncated chains deeper than 31 — a partial RCA with no error. ancestors()
+    # must reproduce InMemoryStore exactly at any depth, including well past the 30-hop cap.
+    n = 100
+    nt = _linear("D", *[(f"n{i}", StepKind.CHAIN, OK) for i in range(n)])
+    ku = KuzuStore.from_trace(nt).ancestors(f"D{n - 1}")
+    mem = InMemoryStore.from_trace(nt).ancestors(f"D{n - 1}")
+    assert [s.step_id for s in ku] == [s.step_id for s in mem]
+    assert len(ku) == n - 1  # the full chain, not truncated at 31
 
 
 def test_artifact_roundtrip_preserves_normalized_trace(tmp_path) -> None:

@@ -57,7 +57,8 @@ A (langgraph)
 
 $ tracegraph diff A.json B.json
 NOT IDENTICAL
-  • diverges at CHAIN > CHAIN > plan > call_tool: A='handle_error' B='respond'
+  • only in A under CHAIN > CHAIN > plan > call_tool: subtree handle_error(respond)
+  • only in B under CHAIN > CHAIN > plan > call_tool: subtree respond
 
 $ tracegraph query tool-failure A.json B.json
 A: call_tool
