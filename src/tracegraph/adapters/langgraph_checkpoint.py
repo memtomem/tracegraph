@@ -29,6 +29,7 @@ langgraph-checkpoint 4.x):
 from __future__ import annotations
 
 import heapq
+import re
 from typing import Any
 
 from tracegraph.model import (
@@ -44,6 +45,28 @@ from tracegraph.model import (
 
 _ROOT_NS = ""
 _BRANCH_PREFIX = "branch:to:"
+_TOOL_TOKENS = {"tool", "tools"}
+
+
+def _looks_like_tool_node(name: str) -> bool:
+    """True iff ``name`` names a tool node — has ``tool``/``tools`` as a *whole token*.
+
+    The old test was ``"tool" in name.lower()``, which classified any node whose name merely
+    *contained* the substring (``retool``, ``toolbar``, ``stool``) as a TOOL and let that
+    bogus kind leak into ``kind=TOOL`` pattern queries. We instead tokenize on
+    non-alphanumeric separators and camelCase boundaries, so ``call_tool`` / ``run_tools`` /
+    ``ToolNode`` classify as tools while ``retool`` does not. All-caps tokens match too
+    (``CALL_TOOL`` / ``TOOL``), preserving the case-insensitive coverage of the old check.
+    """
+    tokens: list[str] = []
+    for part in re.split(r"[^A-Za-z0-9]+", name):
+        # Split into tokens, handling: an acronym run before a CamelWord ("HTTPTool" ->
+        # ["HTTP", "Tool"]); a Capitalized/lowercase word ("Tool", "tool"); an all-caps run
+        # with no trailing lowercase ("TOOL", "CALL"); and digit runs.
+        tokens.extend(re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+", part))
+    return any(t.lower() in _TOOL_TOKENS for t in tokens)
+
+
 _SOURCE_MAP = {
     "input": StepSource.INPUT,
     "loop": StepSource.LOOP,
@@ -175,7 +198,7 @@ class LangGraphCheckpointAdapter:
             name = self._producing_node(parent_cp, branch_target)
             if name:
                 step.name = name
-                if "tool" in name.lower():
+                if _looks_like_tool_node(name):
                     step.kind = StepKind.TOOL
             causal_parent_ids = parents_by_step.get(step_id, [])
             error_parent_cps = [checkpoints[parent_id] for parent_id in causal_parent_ids]

@@ -26,6 +26,14 @@ def dumps(nt: NormalizedTrace) -> str:
 def loads(text: str) -> NormalizedTrace:
     """Parse a trace from a JSON string, validating the schema version."""
     payload = json.loads(text)
+    # The artifact envelope is a JSON object. A top-level array/string/number/null is valid
+    # JSON but not an artifact (e.g. a stray data export) — reject it as a clean ValueError
+    # rather than letting ``payload.get`` raise an opaque AttributeError that callers can't
+    # distinguish from a real bug. CLI directory globbing relies on this to skip non-artifacts.
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"artifact JSON must be a top-level object, got {type(payload).__name__}"
+        )
     version = payload.get("schema_version")
     if version != ARTIFACT_SCHEMA_VERSION:
         raise ValueError(

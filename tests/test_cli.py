@@ -1,6 +1,7 @@
 """CLI smoke test: ingest a real SqliteSaver DB, then inspect / explain / diff."""
 
 import builtins
+import re
 import sys
 
 import pytest
@@ -349,3 +350,181 @@ def test_query_explain_with_limit_only_explains_shown_matches(three_failing_trac
     assert "← plan" in res.output  # explain rendered for it
     assert "T1" not in res.output and "T2" not in res.output  # other traces hidden
     assert "truncated from 3" in res.output
+
+
+# --- Tier-2 robustness: clean load errors, lenient directory globbing, exact explain ids ---
+
+
+def _panel_text(output: str) -> str:
+    """Collapse typer's Rich error-panel box-drawing + wrapping into one searchable string.
+
+    typer renders BadParameter inside a panel that hard-wraps at the console width, inserting
+    ``│``, newlines and padding mid-message — so a long (path-bearing) message can split an
+    asserted phrase across the border (even ``"cannot load artifact"`` at a very narrow width).
+    Rich wraps at word boundaries, so collapsing all whitespace/box runs to single spaces
+    reconstitutes any phrase regardless of path length or terminal width.
+    """
+    return re.sub(r"[\s│╭╮╰╯─]+", " ", output)
+
+
+def test_inspect_missing_file_reports_clean_error(tmp_path):
+    # A nonexistent artifact must produce a clean CLI error, not a raw FileNotFoundError
+    # traceback. The clean message (only emitted via typer.BadParameter) proves we caught it.
+    res = runner.invoke(app, ["inspect", str(tmp_path / "nope.json")])
+    assert res.exit_code != 0
+    assert "cannot load artifact" in _panel_text(res.output)
+    assert "file not found" in _panel_text(res.output)
+
+
+def test_inspect_malformed_json_reports_clean_error(tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ this is not valid json ", encoding="utf-8")
+    res = runner.invoke(app, ["inspect", str(bad)])
+    assert res.exit_code != 0
+    assert "cannot load artifact" in _panel_text(res.output)
+    assert "not valid JSON" in _panel_text(res.output)
+
+
+def test_inspect_wrong_schema_version_reports_clean_error(tmp_path):
+    f = tmp_path / "v0.json"
+    f.write_text('{"schema_version": 0, "trace": {}}', encoding="utf-8")
+    res = runner.invoke(app, ["inspect", str(f)])
+    assert res.exit_code != 0
+    assert "schema_version" in _panel_text(res.output)  # version-mismatch message survives
+
+
+def test_inspect_schema_mismatch_reports_clean_error(tmp_path):
+    f = tmp_path / "wrong.json"
+    f.write_text('{"schema_version": 1, "trace": {"nope": 1}}', encoding="utf-8")
+    res = runner.invoke(app, ["inspect", str(f)])
+    assert res.exit_code != 0
+    assert "does not match the artifact schema" in _panel_text(res.output)
+
+
+def test_explain_missing_file_reports_clean_error(tmp_path):
+    # explain loads through a store, a different code path than inspect/diff — guard it too.
+    res = runner.invoke(app, ["explain", str(tmp_path / "nope.json"), "anything"])
+    assert res.exit_code != 0
+    assert "cannot load artifact" in _panel_text(res.output)
+    assert "file not found" in _panel_text(res.output)
+
+
+def test_query_skips_stray_non_artifact_json_in_directory(tmp_path):
+    # A directory of artifacts may also hold unrelated JSON. Strays must be skipped (with a
+    # warning), not crash the whole query — but the real artifact must still match. Covers BOTH
+    # a top-level object (package.json) AND a top-level array (export.json, a data export) — the
+    # latter used to crash _load_many with an uncaught AttributeError (review finding #1).
+    d = tmp_path / "arts"
+    d.mkdir()
+    _write_linear_trace(
+        d / "good.json",
+        "G",
+        ("input", StepKind.CHAIN, StepStatus.OK),
+        ("call_tool", StepKind.TOOL, StepStatus.ERROR),
+    )
+    (d / "package.json").write_text('{"name": "not-a-trace"}', encoding="utf-8")
+    (d / "export.json").write_text('[{"row": 1}, {"row": 2}]', encoding="utf-8")
+    res = runner.invoke(app, ["query", "tool-failure", str(d)])
+    assert res.exit_code == 0, res.output
+    assert "call_tool" in res.output  # the real artifact still matched
+    warn = _panel_text(res.output)
+    assert "skipped 2 non-artifact" in warn  # both strays skipped, not silently/crashing
+    assert "package.json" in warn and "export.json" in warn
+
+
+def test_query_directory_of_only_strays_errors_cleanly(tmp_path):
+    d = tmp_path / "arts"
+    d.mkdir()
+    (d / "a.json").write_text("{ not json", encoding="utf-8")
+    (d / "b.json").write_text('{"schema_version": 99}', encoding="utf-8")
+    res = runner.invoke(app, ["query", "error", str(d)])
+    assert res.exit_code != 0
+    assert "no valid artifacts found" in res.output
+
+
+def test_query_explicit_bad_file_is_fatal_not_skipped(tmp_path):
+    # A file named directly on the CLI is strict: a load failure is fatal, NOT silently
+    # skipped the way a stray discovered inside a directory would be.
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    res = runner.invoke(app, ["query", "error", str(bad)])
+    assert res.exit_code != 0
+    assert "cannot load artifact" in _panel_text(res.output)
+    assert "not valid JSON" in _panel_text(res.output)
+
+
+def test_explain_exact_id_wins_over_suffix_collision(tmp_path):
+    # "c" is a full step id AND a suffix of "ns:c". Passing the full id must resolve to that
+    # exact step, not be rejected as ambiguous (the Tier-2 explain bug).
+    p = tmp_path / "ns.json"
+    steps = [
+        Step(step_id="c", trace_id="N", seq=0, name="root_step", kind=StepKind.CHAIN),
+        Step(step_id="ns:c", trace_id="N", seq=1, name="child_step", kind=StepKind.CHAIN),
+    ]
+    edges = [Edge(type=EdgeType.CAUSED_BY, src="ns:c", dst="c")]
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id="N", source_kind="x"), steps=steps, causal_edges=edges)
+    )
+    artifact.save(nt, p)
+
+    res = runner.invoke(app, ["explain", str(p), "c"])
+    assert res.exit_code == 0, res.output
+    assert "root_step" in res.output   # explained the exact "c" step ...
+    assert "no causes" in res.output    # ... which is a root, so it has no ancestors
+
+    # The namespaced id still resolves exactly to its own step.
+    res2 = runner.invoke(app, ["explain", str(p), "ns:c"])
+    assert res2.exit_code == 0, res2.output
+    assert "child_step" in res2.output
+    assert "← root_step" in res2.output
+
+
+def test_explain_ambiguous_suffix_still_rejected(tmp_path):
+    # Two ids share the "abc" suffix and neither equals it -> genuinely ambiguous; still an error.
+    p = tmp_path / "amb.json"
+    steps = [
+        Step(step_id="x1abc", trace_id="N", seq=0, name="a", kind=StepKind.CHAIN),
+        Step(step_id="x2abc", trace_id="N", seq=1, name="b", kind=StepKind.CHAIN),
+    ]
+    edges = [Edge(type=EdgeType.CAUSED_BY, src="x2abc", dst="x1abc")]
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id="N", source_kind="x"), steps=steps, causal_edges=edges)
+    )
+    artifact.save(nt, p)
+    res = runner.invoke(app, ["explain", str(p), "abc"])
+    assert res.exit_code != 0
+    assert "matched 2 steps" in res.output
+
+
+def test_load_reason_maps_each_failure_to_a_short_phrase():
+    # Lock the exception -> single-line reason mapping directly (no Rich panel in the way).
+    # pytest.raises guarantees the exception actually fires, so the asserts can't no-op.
+    import json as _json
+
+    from pydantic import ValidationError
+
+    from tracegraph.model import NormalizedTrace
+
+    assert cli_mod._load_reason(FileNotFoundError()) == "file not found"
+    assert cli_mod._load_reason(IsADirectoryError()) == "is a directory, not a file"
+    assert cli_mod._load_reason(PermissionError()) == "permission denied"
+
+    with pytest.raises(_json.JSONDecodeError) as ei_json:
+        _json.loads("{bad")
+    assert cli_mod._load_reason(ei_json.value) == "not valid JSON"
+
+    with pytest.raises(ValidationError) as ei_val:
+        NormalizedTrace.model_validate({"nope": 1})
+    assert cli_mod._load_reason(ei_val.value) == "does not match the artifact schema"
+
+    # A non-object artifact (e.g. a top-level array) is a ValueError raised by artifact.loads;
+    # its message passes through unchanged (review finding #1's hardening path).
+    with pytest.raises(ValueError) as ei_arr:
+        artifact.loads("[1, 2, 3]")
+    assert "must be a top-level object" in cli_mod._load_reason(ei_arr.value)
+
+    # A plain ValueError (e.g. the schema_version mismatch) passes its first line through.
+    assert (
+        cli_mod._load_reason(ValueError("unsupported artifact schema_version 0\ndetail"))
+        == "unsupported artifact schema_version 0"
+    )
