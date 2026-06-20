@@ -356,15 +356,19 @@ def test_query_explain_with_limit_only_explains_shown_matches(three_failing_trac
 
 
 def _panel_text(output: str) -> str:
-    """Collapse typer's Rich error-panel box-drawing + wrapping into one searchable string.
+    """Collapse typer's Rich error-panel ANSI + box-drawing + wrapping into one searchable string.
 
     typer renders BadParameter inside a panel that hard-wraps at the console width, inserting
     ``│``, newlines and padding mid-message — so a long (path-bearing) message can split an
     asserted phrase across the border (even ``"cannot load artifact"`` at a very narrow width).
-    Rich wraps at word boundaries, so collapsing all whitespace/box runs to single spaces
-    reconstitutes any phrase regardless of path length or terminal width.
+    Under a color-forcing terminal (e.g. CI sets ``FORCE_COLOR``) Rich *also* injects ANSI/SGR
+    escapes (``\\x1b[31m`` …) at the border, which would otherwise sit between the split words.
+    We strip the escapes first, then collapse all whitespace/box runs to single spaces — Rich
+    wraps at word boundaries, so this reconstitutes any phrase regardless of color, path length
+    or terminal width.
     """
-    return re.sub(r"[\s│╭╮╰╯─]+", " ", output)
+    no_ansi = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", output)
+    return re.sub(r"[\s│╭╮╰╯─]+", " ", no_ansi)
 
 
 def test_inspect_missing_file_reports_clean_error(tmp_path):
@@ -439,7 +443,7 @@ def test_query_directory_of_only_strays_errors_cleanly(tmp_path):
     (d / "b.json").write_text('{"schema_version": 99}', encoding="utf-8")
     res = runner.invoke(app, ["query", "error", str(d)])
     assert res.exit_code != 0
-    assert "no valid artifacts found" in res.output
+    assert "no valid artifacts found" in _panel_text(res.output)
 
 
 def test_query_explicit_bad_file_is_fatal_not_skipped(tmp_path):
@@ -493,7 +497,7 @@ def test_explain_ambiguous_suffix_still_rejected(tmp_path):
     artifact.save(nt, p)
     res = runner.invoke(app, ["explain", str(p), "abc"])
     assert res.exit_code != 0
-    assert "matched 2 steps" in res.output
+    assert "matched 2 steps" in _panel_text(res.output)
 
 
 def test_load_reason_maps_each_failure_to_a_short_phrase():
