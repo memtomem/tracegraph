@@ -165,17 +165,15 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
         """Pair unmatched subtrees that genuinely correspond, so "diverges at" never asserts
         a false A<->B correspondence between unrelated siblings.
 
-        * One leftover per side is unambiguous — it is the differing node at this position
-          (a relabel or replacement); pair it and let the deeper walk localize.
-        * Several leftovers per side are ambiguous: pair ONLY on real evidence — identical
-          *non-empty* child structure (a relabel of this node), then identical root label (a
-          node with changed descendants) — and report the rest as honest add/remove. Two
-          leaves sharing "no children" is not evidence, so positional cross-pairing of
-          unrelated siblings can no longer happen.
+        Correspondence requires real evidence — identical *non-empty* child structure (a
+        relabel of this node, surfaced as "diverges at"), then identical root label (a node
+        with changed descendants, localized by descending). Everything else is honest
+        add/remove. There is deliberately NO positional fallback: one unmatched leaf per side
+        with nothing in common is an add+remove, not a relabel — and "one leftover each" is
+        not itself evidence (the parent may simply have had several children, all but one of
+        which aligned away), so we never pair on sibling position alone. That positional
+        guess was the bug this replaced.
         """
-        if len(a_ids) == 1 and len(b_ids) == 1:
-            return [(a_ids[0], b_ids[0])], [], []
-
         pairs: list[tuple[str, str]] = []
         a_left, b_left = list(a_ids), list(b_ids)
 

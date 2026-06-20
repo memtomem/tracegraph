@@ -92,6 +92,17 @@ def test_multiple_changed_siblings_are_not_cross_paired():
     assert any("only in B" in c and "n" in c for c in result.changes)
 
 
+def test_single_unrelated_leftover_per_side_is_not_cross_paired():
+    # The subtler version: after aligning the shared child `c`, each side has exactly ONE
+    # leftover leaf (p vs m) with nothing in common. "one leftover each" is not evidence of
+    # correspondence, so this must be add/remove — never a fabricated "diverges at A=p B=m".
+    result = diff(_fanout("r", "c", "p"), _fanout("r", "c", "m"))
+    assert not result.identical
+    assert not any("diverges at" in c for c in result.changes), result.changes
+    assert any("only in A" in c and "p" in c for c in result.changes)
+    assert any("only in B" in c and "m" in c for c in result.changes)
+
+
 def test_sibling_relabel_with_shared_children_is_localized():
     # The flip side of the above: two siblings that keep their child subtree but change their
     # OWN label ARE a real correspondence (a relabel) — they share non-empty child structure,
