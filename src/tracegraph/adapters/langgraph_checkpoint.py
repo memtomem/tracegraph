@@ -29,6 +29,7 @@ langgraph-checkpoint 4.x):
 from __future__ import annotations
 
 import heapq
+import re
 from typing import Any
 
 from tracegraph.model import (
@@ -44,6 +45,34 @@ from tracegraph.model import (
 
 _ROOT_NS = ""
 _BRANCH_PREFIX = "branch:to:"
+_TOOL_TOKENS = {"tool", "tools"}
+
+
+def _looks_like_tool_node(name: str) -> bool:
+    """True iff ``name`` names a tool node — has ``tool``/``tools`` as a *whole token*.
+
+    The old test ``"tool" in name.lower()`` matched any name *containing* the substring, so
+    ``retool`` / ``toolbar`` / ``stool`` wrongly became tools and leaked ``kind=TOOL`` into
+    pattern queries. We tokenize instead — split on non-alphanumeric separators, then on
+    camelCase / acronym boundaries — and match ``tool`` / ``tools`` as a *whole token*:
+    ``tool``, ``tools``, ``call_tool``, ``run_tools``, ``tool_node``, ``ToolNode`` and the
+    all-caps ``TOOL`` / ``CALL_TOOL`` all classify; ``retool`` does not.
+
+    This is deliberately stricter than the old substring test, so it does *not* match every
+    name the old check did: a name where ``tool`` is glued into a larger all-lowercase word
+    (``toolnode``, ``runtool``) or an all-caps run fused to a CamelWord (``TOOLs``) is not a
+    tool here. That's an accepted limitation — real LangGraph tool nodes use separated or
+    camelCase names (``tools``, ``call_tool``, ``ToolNode``). ASCII letters only.
+    """
+    tokens: list[str] = []
+    for part in re.split(r"[^A-Za-z0-9]+", name):
+        # Split into tokens, handling: an acronym run before a CamelWord ("HTTPTool" ->
+        # ["HTTP", "Tool"]); a Capitalized/lowercase word ("Tool", "tool"); an all-caps run
+        # with no trailing lowercase ("TOOL", "CALL"); and digit runs.
+        tokens.extend(re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+", part))
+    return any(t.lower() in _TOOL_TOKENS for t in tokens)
+
+
 _SOURCE_MAP = {
     "input": StepSource.INPUT,
     "loop": StepSource.LOOP,
@@ -175,7 +204,7 @@ class LangGraphCheckpointAdapter:
             name = self._producing_node(parent_cp, branch_target)
             if name:
                 step.name = name
-                if "tool" in name.lower():
+                if _looks_like_tool_node(name):
                     step.kind = StepKind.TOOL
             causal_parent_ids = parents_by_step.get(step_id, [])
             error_parent_cps = [checkpoints[parent_id] for parent_id in causal_parent_ids]

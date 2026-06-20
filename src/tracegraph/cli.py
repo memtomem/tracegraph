@@ -7,12 +7,15 @@ the checkpoint stream), not an authoritative node-execution trace.
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import typer
+from pydantic import ValidationError
 from rich.console import Console
+from rich.markup import escape
 from rich.tree import Tree
 
 from tracegraph import artifact
@@ -33,6 +36,7 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+err_console = Console(stderr=True)  # diagnostics (warnings) — keep them off result stdout
 
 
 class QueryBackend(str, Enum):
@@ -40,30 +44,121 @@ class QueryBackend(str, Enum):
     KUZU = "kuzu"
 
 
-def _load(path: Path) -> NormalizedTrace:
-    """Load an artifact and validate both edge layers before using it."""
+# Exceptions that mean "this file isn't a usable tracegraph artifact" (bad path, non-JSON,
+# wrong schema_version, or a structurally-invalid trace) — as opposed to a bug inside
+# tracegraph. We translate these into clean CLI errors instead of dumping a raw traceback.
+# ``json.JSONDecodeError``, ``UnicodeDecodeError`` and pydantic's ``ValidationError`` are all
+# ``ValueError`` subclasses, as are the schema_version and canonical-form checks; ``OSError``
+# covers missing / unreadable / is-a-directory paths. Anything else (e.g. a ``TypeError``)
+# is a real bug and propagates unchanged.
+#
+# Trade-off: validate_normalized()'s canonical re-derivation also raises a bare ``ValueError``,
+# so a non-canonical artifact is treated as bad input. That is correct for the common case (a
+# corrupt or hand-edited file) and — in the rare case it surfaces a normalize() regression —
+# the original message is preserved verbatim (see _load_reason) rather than masked.
+_LOAD_ERRORS = (OSError, ValueError)
+
+
+def _load_reason(exc: Exception) -> str:
+    """A short, single-line reason for a load failure — no traceback, no stack."""
+    if isinstance(exc, FileNotFoundError):
+        return "file not found"
+    if isinstance(exc, IsADirectoryError):
+        return "is a directory, not a file"
+    if isinstance(exc, PermissionError):
+        return "permission denied"
+    if isinstance(exc, UnicodeDecodeError):
+        return "not UTF-8 text (is this a binary file?)"
+    if isinstance(exc, json.JSONDecodeError):
+        return "not valid JSON"
+    if isinstance(exc, ValidationError):
+        return "does not match the artifact schema"
+    # schema_version mismatch and validate_normalized failures carry a useful message.
+    msg = str(exc).strip()
+    return msg.splitlines()[0] if msg else exc.__class__.__name__
+
+
+def _load_validated(path: Path) -> NormalizedTrace:
+    """Load an artifact and validate both edge layers. Propagates the underlying load error."""
     nt = artifact.load(path)
     validate_normalized(nt)
     return nt
 
 
+def _load(path: Path) -> NormalizedTrace:
+    """Load + validate an explicitly-named artifact, mapping failures to clean CLI errors."""
+    try:
+        return _load_validated(path)
+    except _LOAD_ERRORS as exc:
+        raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
+
+
+def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
+    """Emit the stderr warning for directory-discovered files that weren't valid artifacts."""
+    if not skipped:
+        return
+    # escape() the dynamic names/reasons so a filename containing Rich markup (e.g.
+    # "weird[x].json") renders literally instead of being mis-parsed as style tags.
+    detail = ", ".join(f"{f.name} ({why})" for f, why in skipped)
+    err_console.print(
+        f"[yellow]⚠ skipped {len(skipped)} non-artifact file(s): {escape(detail)}[/]"
+    )
+
+
 def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
     """Expand files and directories (``*.json``) into a list of validated traces.
 
-    Rejects duplicate ``trace_id`` across the input set. The portable artifact is a
-    system of record keyed by ``trace_id``, so two files claiming the same id are
-    ambiguous — and ``query --explain`` looks up the originating trace by id when
-    rendering an ancestor chain, so silently keeping the last-loaded copy would
-    attach matches from one artifact to a different artifact's causal graph.
+    Directory expansion is **lenient** and **non-recursive** (top-level ``*.json`` only,
+    not subdirectories): a directory of artifacts may legitimately also hold unrelated JSON
+    (configs, exports), so a globbed ``*.json`` that isn't a valid artifact is skipped (with
+    a warning) rather than crashing the whole query. An **explicitly named** file is
+    **strict**: if the user points directly at a file, a load failure is a clean, fatal
+    error — they meant that file.
+
+    Rejects duplicate ``trace_id`` across the loaded set. The portable artifact is a system
+    of record keyed by ``trace_id``, so two files claiming the same id are ambiguous — and
+    ``query --explain`` looks up the originating trace by id when rendering an ancestor
+    chain, so silently keeping the last-loaded copy would attach matches from one artifact
+    to a different artifact's causal graph.
     """
-    files: list[Path] = []
+    discovered: list[tuple[Path, bool]] = []  # (path, explicitly_named)
     for p in paths:
-        files.extend(sorted(p.glob("*.json")) if p.is_dir() else [p])
-    if not files:
+        if p.is_dir():
+            discovered.extend((f, False) for f in sorted(p.glob("*.json")))
+        else:
+            discovered.append((p, True))
+    if not discovered:
         raise typer.BadParameter("no artifact files found")
-    traces = [_load(f) for f in files]
+
+    traces: list[NormalizedTrace] = []
+    used: list[Path] = []
+    skipped: list[tuple[Path, str]] = []
+    for f, explicit in discovered:
+        if explicit:
+            try:
+                traces.append(_load(f))  # strict: a clean, fatal BadParameter on failure
+            except typer.BadParameter:
+                # Flush what we've already skipped before aborting, so strays discovered
+                # earlier in the argument list aren't silently dropped by the fatal error.
+                _warn_skipped(skipped)
+                raise
+            used.append(f)
+            continue
+        try:
+            traces.append(_load_validated(f))  # lenient: skip stray non-artifacts
+            used.append(f)
+        except _LOAD_ERRORS as exc:
+            skipped.append((f, _load_reason(exc)))
+
+    _warn_skipped(skipped)
+    if not traces:
+        raise typer.BadParameter(
+            f"no valid artifacts found ({len(skipped)} discovered file(s) were not "
+            "tracegraph artifacts)"
+        )
+
     seen: dict[str, Path] = {}
-    for tr, f in zip(traces, files):
+    for tr, f in zip(traces, used):
         tid = tr.trace.trace_id
         if tid in seen:
             raise typer.BadParameter(
@@ -89,7 +184,13 @@ def _store_cls(backend: QueryBackend) -> type[Any]:
 
 
 def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
-    return _store_cls(backend).load_artifact(path)
+    # _store_cls may raise its own clean BadParameter (missing kuzu) — keep it outside the
+    # try so we only translate *load* failures, not backend-selection ones.
+    cls = _store_cls(backend)
+    try:
+        return cls.load_artifact(path)
+    except _LOAD_ERRORS as exc:
+        raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
 
 
 def _store_from_trace(nt: NormalizedTrace, backend: QueryBackend) -> Any:
@@ -218,12 +319,19 @@ def explain(
     """Trace a step's raw causal chain back toward its root cause."""
     store = _store_from_artifact(artifact_path, backend)
     steps = store.trace().steps_by_id()
-    matches = [sid for sid in steps if sid == step_id or sid.endswith(step_id)]
-    if len(matches) != 1:
-        raise typer.BadParameter(
-            f"{step_id!r} matched {len(matches)} steps; use a unique id/suffix."
-        )
-    result = explain_chain(store, matches[0])
+    # An exact full-id match always wins — even when that id is also a *suffix* of a longer
+    # namespaced id (e.g. "abc" vs "ns:abc"). Only fall back to suffix matching when the
+    # input isn't itself a full step id, so a valid id is never rejected as "ambiguous".
+    if step_id in steps:
+        chosen = step_id
+    else:
+        suffix = [sid for sid in steps if sid.endswith(step_id)]
+        if len(suffix) != 1:
+            raise typer.BadParameter(
+                f"{step_id!r} matched {len(suffix)} steps; use a unique id or suffix."
+            )
+        chosen = suffix[0]
+    result = explain_chain(store, chosen)
     target = result.target
     console.print(f"[bold]{target.name or target.kind.value}[/] (step {target.seq}) "
                   f"[{target.status.value}] {target.error_msg or ''}")

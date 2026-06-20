@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from tiny_agent import run
 
 from tracegraph.adapters import LangGraphCheckpointAdapter
+from tracegraph.adapters.langgraph_checkpoint import _looks_like_tool_node
 from tracegraph.analysis import explain
 from tracegraph.model import EdgeType, StepKind, StepStatus
 from tracegraph.normalize import normalize
@@ -46,6 +47,35 @@ def test_error_step_detected_and_named(saver):
     assert errors[0].name == "call_tool"
     assert errors[0].kind is StepKind.TOOL
     assert "tool failed" in (errors[0].error_msg or "")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "tool", "tools", "call_tool", "run_tools", "tool_node", "execute tool",
+        # camelCase / PascalCase / acronym-prefixed:
+        "ToolNode", "myTool", "HTTPToolServer",
+        # all-caps must still classify (the old `"tool" in name.lower()` matched these, so
+        # dropping them would be a silent regression — see review finding #8/#18):
+        "TOOL", "TOOLS", "CALL_TOOL", "TOOL_NODE",
+    ],
+)
+def test_tool_node_names_classify_as_tool(name):
+    assert _looks_like_tool_node(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    # All merely *contain* "tool" as a substring — none is a tool node. Misclassifying these
+    # would leak a bogus kind=TOOL into pattern queries (the Tier-2 bug this guards). Includes
+    # all-caps substring cases ("STOOL", "RETOOL") to prove the all-caps fix didn't over-match.
+    [
+        "retool", "toolbar", "stool", "footstool", "toolkit_loader", "tooling",
+        "planner", "agent", "STOOL", "RETOOL", "TOOLBAR", "",
+    ],
+)
+def test_substring_only_names_do_not_classify_as_tool(name):
+    assert not _looks_like_tool_node(name)
 
 
 def test_explain_walks_from_error_to_input_root(saver):

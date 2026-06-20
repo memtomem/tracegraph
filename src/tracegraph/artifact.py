@@ -25,13 +25,35 @@ def dumps(nt: NormalizedTrace) -> str:
 
 def loads(text: str) -> NormalizedTrace:
     """Parse a trace from a JSON string, validating the schema version."""
-    payload = json.loads(text)
+    try:
+        payload = json.loads(text)
+    except RecursionError as exc:
+        # Deeply-nested JSON overflows json's recursive scanner with a RecursionError (a
+        # RuntimeError, *not* a ValueError). Normalize it so the load boundary treats an
+        # over-nested stray as bad input — otherwise it escapes the CLI's (OSError, ValueError)
+        # handler and crashes the whole command with a raw traceback.
+        raise ValueError("JSON nesting too deep") from exc
+    # The artifact envelope is a JSON object. A top-level array/string/number/null is valid
+    # JSON but not an artifact (e.g. a stray data export) — reject it as a clean ValueError
+    # rather than letting ``payload.get`` raise an opaque AttributeError that callers can't
+    # distinguish from a real bug. CLI directory globbing relies on this to skip non-artifacts.
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"artifact JSON must be a top-level object, got {type(payload).__name__}"
+        )
     version = payload.get("schema_version")
     if version != ARTIFACT_SCHEMA_VERSION:
         raise ValueError(
             f"unsupported artifact schema_version {version!r} "
             f"(this build reads {ARTIFACT_SCHEMA_VERSION})"
         )
+    # Guard the last raw dereference: a dict with the right schema_version but no "trace" key
+    # (e.g. `{"schema_version": 1}`) would otherwise raise a bare KeyError, which — like the
+    # AttributeError and RecursionError above — is neither OSError nor ValueError and would
+    # escape the CLI's load handler. With this guard, loads() raises *only* ValueError for any
+    # malformed input, so every load path (strict file, lenient directory skip) stays clean.
+    if "trace" not in payload:
+        raise ValueError('artifact JSON is missing the required "trace" object')
     return NormalizedTrace.model_validate(payload["trace"])
 
 
