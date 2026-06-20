@@ -503,6 +503,41 @@ def test_artifact_loads_normalizes_deep_nesting_to_valueerror():
         artifact.loads(deep)
 
 
+def test_artifact_loads_missing_trace_key_is_valueerror():
+    # A dict with the right schema_version but no "trace" key used to raise a bare KeyError
+    # (neither OSError nor ValueError) and escape the CLI load handler. It must be a ValueError.
+    with pytest.raises(ValueError):
+        artifact.loads('{"schema_version": 1}')
+
+
+def test_query_skips_schema_only_stray_in_directory(tmp_path):
+    # A `{"schema_version": 1}` stray (valid version, no "trace") must be skipped, not crash the
+    # query with a raw KeyError traceback (review finding: KeyError escaped _LOAD_ERRORS).
+    d = tmp_path / "arts"
+    d.mkdir()
+    _write_linear_trace(
+        d / "good.json",
+        "G",
+        ("input", StepKind.CHAIN, StepStatus.OK),
+        ("call_tool", StepKind.TOOL, StepStatus.ERROR),
+    )
+    (d / "headeronly.json").write_text('{"schema_version": 1}', encoding="utf-8")
+    res = runner.invoke(app, ["query", "tool-failure", str(d)])
+    assert res.exit_code == 0, res.output
+    assert "call_tool" in res.output  # the real artifact still matched
+    assert "headeronly.json" in _panel_text(res.output)  # the stray was warned, not crashed
+
+
+def test_inspect_schema_only_file_reports_clean_error(tmp_path):
+    # The same input named explicitly is a clean fatal error, not a raw KeyError traceback.
+    f = tmp_path / "headeronly.json"
+    f.write_text('{"schema_version": 1}', encoding="utf-8")
+    res = runner.invoke(app, ["inspect", str(f)])
+    assert res.exit_code != 0
+    assert "cannot load artifact" in _panel_text(res.output)
+    assert "missing the required" in _panel_text(res.output)
+
+
 def test_explain_exact_id_wins_over_suffix_collision(tmp_path):
     # "c" is a full step id AND a suffix of "ns:c". Passing the full id must resolve to that
     # exact step, not be rejected as ambiguous (the Tier-2 explain bug).

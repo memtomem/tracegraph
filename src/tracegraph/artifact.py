@@ -47,6 +47,13 @@ def loads(text: str) -> NormalizedTrace:
             f"unsupported artifact schema_version {version!r} "
             f"(this build reads {ARTIFACT_SCHEMA_VERSION})"
         )
+    # Guard the last raw dereference: a dict with the right schema_version but no "trace" key
+    # (e.g. `{"schema_version": 1}`) would otherwise raise a bare KeyError, which — like the
+    # AttributeError and RecursionError above — is neither OSError nor ValueError and would
+    # escape the CLI's load handler. With this guard, loads() raises *only* ValueError for any
+    # malformed input, so every load path (strict file, lenient directory skip) stays clean.
+    if "trace" not in payload:
+        raise ValueError('artifact JSON is missing the required "trace" object')
     return NormalizedTrace.model_validate(payload["trace"])
 
 
