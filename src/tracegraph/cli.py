@@ -132,14 +132,20 @@ def _render_tree(nt: NormalizedTrace) -> None:
     steps = nt.steps_by_id()
     order = sorted(children.keys() | {s.step_id for s in nt.steps}, key=lambda i: steps[i].seq)
 
-    def add(parent_node: Tree, nid: str) -> None:
-        branch = parent_node.add(_label(steps[nid]))
-        for child in sorted(children.get(nid, []), key=lambda i: steps[i].seq):
-            add(branch, child)
+    def add_subtree(root_node: Tree, rid: str) -> None:
+        # Iterative DFS: a recursive walk overflows on deep-linear traces (one super-step
+        # per node). Push children in reverse-seq order so they render seq-ascending as they
+        # pop, and each child's branch is rendered under its own parent.
+        stack: list[tuple[Tree, str]] = [(root_node, rid)]
+        while stack:
+            rich_parent, nid = stack.pop()
+            branch = rich_parent.add(_label(steps[nid]))
+            for child in sorted(children.get(nid, []), key=lambda i: steps[i].seq, reverse=True):
+                stack.append((branch, child))
 
     root_tree = Tree(f"[bold]{nt.trace.trace_id}[/] ({nt.trace.source_kind})")
     for rid in [i for i in order if i not in has_parent]:
-        add(root_tree, rid)
+        add_subtree(root_tree, rid)
     console.print(root_tree)
 
     n_err = sum(1 for s in nt.steps if s.status is StepStatus.ERROR)

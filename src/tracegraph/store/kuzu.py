@@ -129,22 +129,23 @@ class KuzuStore:
     def ancestors(self, step_id: str) -> list[Step]:
         """Raw CAUSED_BY ancestors of ``step_id``, nearest-cause first.
 
-        Implementation: pull the full ancestor subgraph in one parameterized var-length
-        match, then BFS in Python. The BFS step preserves the in-memory store's edge-order
-        semantics on fan-in (Cypher gives no row-order guarantee, so we'd otherwise diverge
-        on multi-parent steps). For linear traces — the LangGraph default — the order is
-        identical either way.
+        Implementation: pull single-hop CAUSED_BY adjacency for the whole graph, then BFS in
+        Python. The BFS preserves the in-memory store's edge-order semantics on fan-in
+        (Cypher gives no row-order guarantee, so we'd otherwise diverge on multi-parent
+        steps). We deliberately do NOT use a variable-length match: Kùzu 0.11 hard-caps its
+        upper bound at 30 hops, which would silently truncate any chain deeper than that —
+        a partial RCA with no error, violating the "nothing is dropped" contract.
         """
         if not self._step_exists(step_id):
             raise KeyError(f"unknown step {step_id!r}")
 
-        # adjacency restricted to the relevant subgraph: every edge reachable from ``step_id``.
+        # Whole-graph single-hop adjacency (effect -> cause); the Python BFS below restricts
+        # it to what's reachable from ``step_id``. Same load-then-traverse pattern as
+        # trace()/find_matches, and reproduces InMemoryStore.ancestors exactly at any depth.
         rows = _collect(
             self._conn.execute(
-                "MATCH (start:Step)-[:CAUSED_BY*0..]->(effect:Step)-[:CAUSED_BY]->(cause:Step) "
-                "WHERE start.step_id = $sid "
-                "RETURN effect.step_id, cause.step_id",
-                {"sid": step_id},
+                "MATCH (effect:Step)-[:CAUSED_BY]->(cause:Step) "
+                "RETURN effect.step_id, cause.step_id"
             )
         )
         adjacency: dict[str, list[str]] = {}

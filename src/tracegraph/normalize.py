@@ -20,7 +20,7 @@ than letting it become a malformed artifact downstream.
 
 from __future__ import annotations
 
-from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step
+from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, StepStatus
 
 
 def _check_steps(trace_id: str, steps: list[Step]) -> None:
@@ -87,6 +87,18 @@ def validate_normalized(nt: NormalizedTrace) -> None:
     _check_steps(nt.trace.trace_id, nt.steps)
     _check_caused_by(nt.steps_by_id(), nt.edges_of(EdgeType.CAUSED_BY))
     validate_tree(nt)
+
+    # The trace header is part of the system of record: a stored status that disagrees with
+    # the steps would let a "clean" artifact hide a failed run. normalize() derives it, so an
+    # honest artifact always matches — we check it explicitly here for a clear error message
+    # (the re-derive below would also catch it, but only as a generic "not canonical").
+    any_error = any(s.status is StepStatus.ERROR for s in nt.steps)
+    expected_status = StepStatus.ERROR if any_error else StepStatus.OK
+    if nt.trace.status is not expected_status:
+        raise ValueError(
+            f"trace.status {nt.trace.status.value!r} disagrees with its steps (expected "
+            f"{expected_status.value!r}: {'a' if any_error else 'no'} step has status=error)"
+        )
 
     # Reconstruct what the canonical form should look like from the raw layer alone. We
     # strip projection_lossy from the steps so normalize() resets it from scratch —
@@ -167,7 +179,13 @@ def normalize(raw: RawTrace) -> NormalizedTrace:
             chosen = _primary_parent(parents, steps_by_id)
             edges.append(Edge(type=EdgeType.TREE_PARENT, src=step.step_id, dst=chosen))
 
-    nt = NormalizedTrace(trace=raw.trace, steps=new_steps, edges=edges)
+    # The trace-level status is a derived view of its steps, not independent data: make it
+    # canonical here so the artifact header can never lie about whether the run errored.
+    any_error = any(s.status is StepStatus.ERROR for s in new_steps)
+    trace = raw.trace.model_copy(
+        update={"status": StepStatus.ERROR if any_error else StepStatus.OK}
+    )
+    nt = NormalizedTrace(trace=trace, steps=new_steps, edges=edges)
     validate_tree(nt)
     return nt
 
