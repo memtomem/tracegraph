@@ -16,12 +16,15 @@ import re
 from pathlib import Path
 
 import pytest
-from syncmill_otlp_traces import CONSUMED_KEYS, GENERATORS, SYNCMILL_ALLOWLIST
+from syncmill_otlp_traces import CONSUMED_KEYS, GENERATORS, SYNCMILL_ALLOWLIST, TRACE_IDS
 
 # Redaction contract: no bodies/secrets/local paths in any trace attribute value,
 # span name, or status message. The allowlist test already bounds attribute KEYS;
 # this scan bounds string VALUES anywhere in the document.
-_FORBIDDEN_SUBSTRINGS = ("prompt", "patch", "stdout", "stderr")
+_FORBIDDEN_BODY = re.compile(
+    r"(?<![A-Za-z0-9])(?:prompt|patch|stdout|stderr)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 _ABS_PATH = re.compile(r"^(/|[A-Za-z]:[\\/])")
 _CREDENTIAL_PATTERNS = [
     re.compile(r"://[^/\s]+:[^/\s]+@"),
@@ -45,10 +48,8 @@ def _string_values(node):
 def _scan(doc) -> list[str]:
     violations = []
     for value in _string_values(doc):
-        low = value.lower()
-        for marker in _FORBIDDEN_SUBSTRINGS:
-            if marker in low:
-                violations.append(f"body:{value}")
+        if _FORBIDDEN_BODY.search(value):
+            violations.append(f"body:{value}")
         if _ABS_PATH.match(value):
             violations.append(f"abs-path:{value}")
         for pattern in _CREDENTIAL_PATTERNS:
@@ -91,7 +92,9 @@ EXPECTED_EDGES = {
         (A2, RUN),
         (G1, A1),  # each gate is caused by the attempt it judged
         (G2, A2),
-        (SELECT, A2),  # graph parent: the gate-passing candidate
+        # Selection consumes candidate artifacts, not gate spans. Gates remain
+        # leaf effects; the selected attempt (not its passing gate) is causal.
+        (SELECT, A2),
         (SELECT, A1),  # link: the examined, gate-rejected one
     },
     "pipeline-success": {
@@ -123,9 +126,6 @@ EXPECTED_EDGES = {
     },
 }
 
-TRACE_IDS = {name: "0" * 31 + str(i + 1) for i, name in enumerate(GENERATORS)}
-
-
 def _load(name: str) -> dict:
     return json.loads((FIXTURES / f"{name}.otlp.json").read_text(encoding="utf-8"))
 
@@ -133,6 +133,12 @@ def _load(name: str) -> dict:
 def _normalized(name: str):
     adapter = OTLPSpanAdapter(_load(name))
     return normalize(adapter.ingest(TRACE_IDS[name]))
+
+
+def test_trace_ids_are_named_valid_and_unique():
+    assert set(TRACE_IDS) == set(GENERATORS)
+    assert len(set(TRACE_IDS.values())) == len(TRACE_IDS)
+    assert all(re.fullmatch(r"[0-9a-f]{32}", value) for value in TRACE_IDS.values())
 
 
 @pytest.mark.parametrize("name", sorted(GENERATORS), ids=str)
@@ -245,6 +251,10 @@ def test_scanner_catches_planted_violations():
     assert any(v.startswith("body:") for v in found)
     assert any(v.startswith("abs-path:") for v in found)
     assert any(v.startswith("cred:") for v in found)
+
+
+def test_scanner_does_not_match_forbidden_fragments_inside_words():
+    assert _scan({"phase": "dispatch", "description": "prompting"}) == []
 
 
 @pytest.mark.parametrize("name", sorted(GENERATORS), ids=str)

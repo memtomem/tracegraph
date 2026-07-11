@@ -130,9 +130,28 @@ def _run_span(
 _RUN = "aa00000000000001"
 
 
+def _trace_id(index: int) -> str:
+    """A valid 16-byte OTLP trace id, stable beyond single-digit fixtures."""
+    return f"{index:032x}"
+
+
+# Single source for fixture filtering and generation. Names, not GENERATORS
+# insertion order, own their trace ids so registry reordering is harmless.
+TRACE_IDS = {
+    "route-success": _trace_id(1),
+    "route-fallback": _trace_id(2),
+    "compete-winner": _trace_id(3),
+    "compete-timeout": _trace_id(4),
+    "compete-gate-reject": _trace_id(5),
+    "pipeline-success": _trace_id(6),
+    "council-success": _trace_id(7),
+    "decompose-success": _trace_id(8),
+}
+
+
 def route_success() -> dict:
     """route: the first agent completes — one attempt caused by the run."""
-    trace_id, run_id = "0" * 31 + "1", "00000000-0000-4000-8000-000000000001"
+    trace_id, run_id = TRACE_IDS["route-success"], "00000000-0000-4000-8000-000000000001"
     return _document(
         [
             _run_span(trace_id, run_id, "route", end_ns=60_000),
@@ -164,7 +183,7 @@ def route_success() -> dict:
 
 def route_fallback() -> dict:
     """route: first agent fails, the fallback attempt is CAUSED BY that failure."""
-    trace_id, run_id = "0" * 31 + "2", "00000000-0000-4000-8000-000000000002"
+    trace_id, run_id = TRACE_IDS["route-fallback"], "00000000-0000-4000-8000-000000000002"
     return _document(
         [
             _run_span(trace_id, run_id, "route", end_ns=120_000),
@@ -289,7 +308,7 @@ def _select_span(
 def compete_winner() -> dict:
     """compete: three concurrent attempts fan out from the run; select is parented
     on the winner and linked to both examined losers (multi-parent -> lossy)."""
-    trace_id, run_id = "0" * 31 + "3", "00000000-0000-4000-8000-000000000003"
+    trace_id, run_id = TRACE_IDS["compete-winner"], "00000000-0000-4000-8000-000000000003"
     return _document(
         [
             _run_span(trace_id, run_id, "compete", end_ns=100_000),
@@ -315,7 +334,7 @@ def compete_winner() -> dict:
 
 def compete_timeout() -> dict:
     """compete: one sibling times out; select examined only the completers."""
-    trace_id, run_id = "0" * 31 + "4", "00000000-0000-4000-8000-000000000004"
+    trace_id, run_id = TRACE_IDS["compete-timeout"], "00000000-0000-4000-8000-000000000004"
     return _document(
         [
             _run_span(trace_id, run_id, "compete", end_ns=200_000),
@@ -348,7 +367,7 @@ def compete_timeout() -> dict:
 def compete_gate_reject() -> dict:
     """compete: the priority winner fails its quality gate; select falls to the
     next gate-passing candidate. Gate spans are TOOL steps caused by their attempt."""
-    trace_id, run_id = "0" * 31 + "5", "00000000-0000-4000-8000-000000000005"
+    trace_id, run_id = TRACE_IDS["compete-gate-reject"], "00000000-0000-4000-8000-000000000005"
     gate_common = {"schema_version": 1, "run_id": run_id, "phase": "gate"}
     return _document(
         [
@@ -423,7 +442,7 @@ def _advanced_attempt(
 
 def pipeline_success() -> dict:
     """pipeline: sequential stages form a strict causal chain."""
-    trace_id, run_id = "0" * 31 + "6", "00000000-0000-4000-8000-000000000006"
+    trace_id, run_id = TRACE_IDS["pipeline-success"], "00000000-0000-4000-8000-000000000006"
     return _document([
         _run_span(trace_id, run_id, "pipeline", end_ns=100_000),
         _advanced_attempt(trace_id, run_id, "bb00000000000001", "stage:0:codex",
@@ -439,7 +458,7 @@ def pipeline_success() -> dict:
 
 def council_success() -> dict:
     """council: agent-local chains plus explicit cross-member synthesis fan-in."""
-    trace_id, run_id = "0" * 31 + "7", "00000000-0000-4000-8000-000000000007"
+    trace_id, run_id = TRACE_IDS["council-success"], "00000000-0000-4000-8000-000000000007"
     spans = [_run_span(trace_id, run_id, "council", end_ns=150_000)]
     specs = [
         ("bb00000000000001", "propose:codex", "run", "codex", "propose", 1_000, 25_000, None),
@@ -459,7 +478,7 @@ def council_success() -> dict:
 
 def decompose_success() -> dict:
     """decompose: subtasks fan out from plan; synthesis consumes completed subtasks."""
-    trace_id, run_id = "0" * 31 + "8", "00000000-0000-4000-8000-000000000008"
+    trace_id, run_id = TRACE_IDS["decompose-success"], "00000000-0000-4000-8000-000000000008"
     spans = [
         _run_span(trace_id, run_id, "decompose", end_ns=150_000),
         _advanced_attempt(trace_id, run_id, "bb00000000000001", "plan:codex", "plan",
