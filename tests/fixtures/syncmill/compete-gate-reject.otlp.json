@@ -1,0 +1,423 @@
+{
+  "resourceSpans": [
+    {
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "00000000000000000000000000000005",
+              "spanId": "aa00000000000001",
+              "name": "syncmill.run",
+              "startTimeUnixNano": "1700000000000000000",
+              "endTimeUnixNano": "1700000000000150000",
+              "attributes": [
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "CHAIN"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "run"
+                  }
+                },
+                {
+                  "key": "syncmill.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.run_id",
+                  "value": {
+                    "stringValue": "00000000-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "syncmill.strategy",
+                  "value": {
+                    "stringValue": "compete"
+                  }
+                },
+                {
+                  "key": "syncmill.agent_id",
+                  "value": {
+                    "stringValue": "supervisor"
+                  }
+                },
+                {
+                  "key": "syncmill.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                }
+              ]
+            },
+            {
+              "traceId": "00000000000000000000000000000005",
+              "spanId": "bb00000000000001",
+              "name": "attempt:codex",
+              "startTimeUnixNano": "1700000000000001000",
+              "endTimeUnixNano": "1700000000000080000",
+              "attributes": [
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "attempt:codex"
+                  }
+                },
+                {
+                  "key": "graph.node.parent_id",
+                  "value": {
+                    "stringValue": "run"
+                  }
+                },
+                {
+                  "key": "syncmill.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.run_id",
+                  "value": {
+                    "stringValue": "00000000-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "syncmill.phase",
+                  "value": {
+                    "stringValue": "attempt"
+                  }
+                },
+                {
+                  "key": "syncmill.agent_id",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                },
+                {
+                  "key": "syncmill.attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "syncmill.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "syncmill.worktree_slot",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "syncmill.exit_code",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "syncmill.files_changed_count",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "parentSpanId": "aa00000000000001"
+            },
+            {
+              "traceId": "00000000000000000000000000000005",
+              "spanId": "bb00000000000002",
+              "name": "attempt:claude",
+              "startTimeUnixNano": "1700000000000001000",
+              "endTimeUnixNano": "1700000000000070000",
+              "attributes": [
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "AGENT"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "attempt:claude"
+                  }
+                },
+                {
+                  "key": "graph.node.parent_id",
+                  "value": {
+                    "stringValue": "run"
+                  }
+                },
+                {
+                  "key": "syncmill.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.run_id",
+                  "value": {
+                    "stringValue": "00000000-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "syncmill.phase",
+                  "value": {
+                    "stringValue": "attempt"
+                  }
+                },
+                {
+                  "key": "syncmill.agent_id",
+                  "value": {
+                    "stringValue": "claude"
+                  }
+                },
+                {
+                  "key": "syncmill.attempt",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "syncmill.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "syncmill.worktree_slot",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.exit_code",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "syncmill.files_changed_count",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "parentSpanId": "aa00000000000001"
+            },
+            {
+              "traceId": "00000000000000000000000000000005",
+              "spanId": "dd00000000000001",
+              "name": "gate:codex",
+              "startTimeUnixNano": "1700000000000081000",
+              "endTimeUnixNano": "1700000000000095000",
+              "attributes": [
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "gate:codex"
+                  }
+                },
+                {
+                  "key": "graph.node.parent_id",
+                  "value": {
+                    "stringValue": "attempt:codex"
+                  }
+                },
+                {
+                  "key": "syncmill.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.run_id",
+                  "value": {
+                    "stringValue": "00000000-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "syncmill.phase",
+                  "value": {
+                    "stringValue": "gate"
+                  }
+                },
+                {
+                  "key": "syncmill.agent_id",
+                  "value": {
+                    "stringValue": "codex"
+                  }
+                },
+                {
+                  "key": "syncmill.status",
+                  "value": {
+                    "stringValue": "failed"
+                  }
+                },
+                {
+                  "key": "syncmill.gate.passed",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "parentSpanId": "aa00000000000001",
+              "status": {
+                "code": "STATUS_CODE_ERROR",
+                "message": "gate: pytest -q failed"
+              }
+            },
+            {
+              "traceId": "00000000000000000000000000000005",
+              "spanId": "dd00000000000002",
+              "name": "gate:claude",
+              "startTimeUnixNano": "1700000000000096000",
+              "endTimeUnixNano": "1700000000000110000",
+              "attributes": [
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "TOOL"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "gate:claude"
+                  }
+                },
+                {
+                  "key": "graph.node.parent_id",
+                  "value": {
+                    "stringValue": "attempt:claude"
+                  }
+                },
+                {
+                  "key": "syncmill.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.run_id",
+                  "value": {
+                    "stringValue": "00000000-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "syncmill.phase",
+                  "value": {
+                    "stringValue": "gate"
+                  }
+                },
+                {
+                  "key": "syncmill.agent_id",
+                  "value": {
+                    "stringValue": "claude"
+                  }
+                },
+                {
+                  "key": "syncmill.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "syncmill.gate.passed",
+                  "value": {
+                    "boolValue": true
+                  }
+                }
+              ],
+              "parentSpanId": "aa00000000000001"
+            },
+            {
+              "traceId": "00000000000000000000000000000005",
+              "spanId": "cc00000000000001",
+              "name": "select",
+              "startTimeUnixNano": "1700000000000111000",
+              "endTimeUnixNano": "1700000000000120000",
+              "attributes": [
+                {
+                  "key": "openinference.span.kind",
+                  "value": {
+                    "stringValue": "CHAIN"
+                  }
+                },
+                {
+                  "key": "graph.node.id",
+                  "value": {
+                    "stringValue": "select"
+                  }
+                },
+                {
+                  "key": "graph.node.parent_id",
+                  "value": {
+                    "stringValue": "attempt:claude"
+                  }
+                },
+                {
+                  "key": "syncmill.schema_version",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "syncmill.run_id",
+                  "value": {
+                    "stringValue": "00000000-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "syncmill.phase",
+                  "value": {
+                    "stringValue": "select"
+                  }
+                },
+                {
+                  "key": "syncmill.agent_id",
+                  "value": {
+                    "stringValue": "supervisor"
+                  }
+                },
+                {
+                  "key": "syncmill.status",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                }
+              ],
+              "parentSpanId": "aa00000000000001",
+              "links": [
+                {
+                  "traceId": "00000000000000000000000000000005",
+                  "spanId": "bb00000000000001"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
