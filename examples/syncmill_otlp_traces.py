@@ -402,12 +402,93 @@ def compete_gate_reject() -> dict:
     )
 
 
+def _advanced_attempt(
+    trace_id: str, run_id: str, span_id: str, name: str, node_id: str,
+    node_parent: str, agent: str, phase: str, start_ns: int, end_ns: int,
+    *, links: list[str] | None = None, winner: bool = False,
+) -> dict:
+    attrs: dict[str, str | int | bool] = {
+        "schema_version": 1, "run_id": run_id, "phase": phase,
+        "agent_id": agent, "status": "completed", "exit_code": 0,
+    }
+    if winner:
+        attrs["winner"] = True
+        attrs["files_changed_count"] = 2
+    return _span(
+        trace_id, span_id, name, "AGENT", parent_span=_RUN, node_id=node_id,
+        node_parent=node_parent, start_ns=start_ns, end_ns=end_ns,
+        syncmill=attrs, links=links,
+    )
+
+
+def pipeline_success() -> dict:
+    """pipeline: sequential stages form a strict causal chain."""
+    trace_id, run_id = "0" * 31 + "6", "00000000-0000-4000-8000-000000000006"
+    return _document([
+        _run_span(trace_id, run_id, "pipeline", end_ns=100_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000001", "stage:0:codex",
+                          "stage:0:codex", "run", "codex", "stage", 1_000, 30_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000002", "stage:1:claude",
+                          "stage:1:claude", "stage:0:codex", "claude", "stage",
+                          31_000, 60_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000003", "stage:2:kimi-code",
+                          "stage:2:kimi-code", "stage:1:claude", "kimi-code", "stage",
+                          61_000, 90_000, winner=True),
+    ])
+
+
+def council_success() -> dict:
+    """council: agent-local chains plus explicit cross-member synthesis fan-in."""
+    trace_id, run_id = "0" * 31 + "7", "00000000-0000-4000-8000-000000000007"
+    spans = [_run_span(trace_id, run_id, "council", end_ns=150_000)]
+    specs = [
+        ("bb00000000000001", "propose:codex", "run", "codex", "propose", 1_000, 25_000, None),
+        ("bb00000000000002", "propose:claude", "run", "claude", "propose", 1_000, 20_000, None),
+        ("bb00000000000003", "critique:codex:0", "propose:codex", "codex", "critique", 26_000, 50_000, None),
+        ("bb00000000000004", "critique:claude:0", "propose:claude", "claude", "critique", 21_000, 45_000, None),
+        ("bb00000000000005", "synthesize:codex", "critique:codex:0", "codex", "synthesize", 51_000, 85_000, ["bb00000000000004"]),
+        ("bb00000000000006", "synthesize:claude", "critique:claude:0", "claude", "synthesize", 46_000, 80_000, ["bb00000000000003"]),
+    ]
+    for sid, node, parent, agent, phase, start, end, links in specs:
+        spans.append(_advanced_attempt(trace_id, run_id, sid, node, node, parent,
+                                       agent, phase, start, end, links=links))
+    spans.append(_select_span(trace_id, run_id, "synthesize:codex",
+                              ["bb00000000000006"], start_ns=86_000, end_ns=95_000))
+    return _document(spans)
+
+
+def decompose_success() -> dict:
+    """decompose: subtasks fan out from plan; synthesis consumes completed subtasks."""
+    trace_id, run_id = "0" * 31 + "8", "00000000-0000-4000-8000-000000000008"
+    spans = [
+        _run_span(trace_id, run_id, "decompose", end_ns=150_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000001", "plan:codex", "plan",
+                          "run", "codex", "plan", 1_000, 25_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000002", "subtask:0:claude",
+                          "subtask:0", "plan", "claude", "subtask", 26_000, 55_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000003", "subtask:1:kimi-code",
+                          "subtask:1", "plan", "kimi-code", "subtask", 26_000, 60_000),
+        _advanced_attempt(trace_id, run_id, "bb00000000000004", "synthesize:codex",
+                          "synthesize:codex", "plan", "codex", "synthesize", 61_000,
+                          90_000, links=["bb00000000000002", "bb00000000000003"]),
+        _advanced_attempt(trace_id, run_id, "bb00000000000005", "synthesize:claude",
+                          "synthesize:claude", "plan", "claude", "synthesize", 61_000,
+                          85_000, links=["bb00000000000002", "bb00000000000003"]),
+        _select_span(trace_id, run_id, "synthesize:codex", ["bb00000000000005"],
+                     start_ns=91_000, end_ns=100_000),
+    ]
+    return _document(spans)
+
+
 GENERATORS = {
     "route-success": route_success,
     "route-fallback": route_fallback,
     "compete-winner": compete_winner,
     "compete-timeout": compete_timeout,
     "compete-gate-reject": compete_gate_reject,
+    "pipeline-success": pipeline_success,
+    "council-success": council_success,
+    "decompose-success": decompose_success,
 }
 
 

@@ -94,6 +94,33 @@ EXPECTED_EDGES = {
         (SELECT, A2),  # graph parent: the gate-passing candidate
         (SELECT, A1),  # link: the examined, gate-rejected one
     },
+    "pipeline-success": {
+        ("bb00000000000001", RUN),
+        ("bb00000000000002", "bb00000000000001"),
+        ("bb00000000000003", "bb00000000000002"),
+    },
+    "council-success": {
+        ("bb00000000000001", RUN), ("bb00000000000002", RUN),
+        ("bb00000000000003", "bb00000000000001"),
+        ("bb00000000000004", "bb00000000000002"),
+        ("bb00000000000005", "bb00000000000003"),
+        ("bb00000000000005", "bb00000000000004"),
+        ("bb00000000000006", "bb00000000000004"),
+        ("bb00000000000006", "bb00000000000003"),
+        (SELECT, "bb00000000000005"), (SELECT, "bb00000000000006"),
+    },
+    "decompose-success": {
+        ("bb00000000000001", RUN),
+        ("bb00000000000002", "bb00000000000001"),
+        ("bb00000000000003", "bb00000000000001"),
+        ("bb00000000000004", "bb00000000000001"),
+        ("bb00000000000004", "bb00000000000002"),
+        ("bb00000000000004", "bb00000000000003"),
+        ("bb00000000000005", "bb00000000000001"),
+        ("bb00000000000005", "bb00000000000002"),
+        ("bb00000000000005", "bb00000000000003"),
+        (SELECT, "bb00000000000004"), (SELECT, "bb00000000000005"),
+    },
 }
 
 TRACE_IDS = {name: "0" * 31 + str(i + 1) for i, name in enumerate(GENERATORS)}
@@ -130,6 +157,18 @@ def test_concurrent_siblings_share_no_edges(name: str):
         assert not (src in attempts and dst in attempts)
     caused = {(e.src, e.dst) for e in _normalized(name).edges if e.type.value == "CAUSED_BY"}
     assert not {(s, d) for s, d in caused if s in attempts and d in attempts}
+
+
+@pytest.mark.parametrize(
+    ("name", "siblings"),
+    [
+        ("council-success", {"bb00000000000001", "bb00000000000002"}),
+        ("decompose-success", {"bb00000000000002", "bb00000000000003"}),
+    ],
+)
+def test_advanced_strategy_parallel_siblings_share_no_edges(name, siblings):
+    caused = {(e.src, e.dst) for e in _normalized(name).edges if e.type.value == "CAUSED_BY"}
+    assert not {(s, d) for s, d in caused if s in siblings and d in siblings}
 
 
 def test_route_fallback_is_caused_by_prior_failure():
