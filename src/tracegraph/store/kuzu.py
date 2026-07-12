@@ -26,7 +26,12 @@ from typing import Any
 import kuzu
 
 from tracegraph import artifact
-from tracegraph.analysis.patterns import PathPattern, compile_to_cypher
+from tracegraph.analysis.patterns import (
+    PathPattern,
+    UncompilablePattern,
+    compile_to_cypher,
+)
+from tracegraph.analysis.patterns import find_matches as py_find_matches
 from tracegraph.model import (
     Edge,
     EdgeType,
@@ -82,6 +87,10 @@ class KuzuStore:
         self._db = kuzu.Database(":memory:" if path is None else str(path))
         self._conn = kuzu.Connection(self._db)
         self._trace: Trace | None = None
+        #: True iff the most recent find_matches() could not compile to faithful Cypher
+        #: (unbounded/over-cap gap) and ran the pure-Python matcher instead. Lets the CLI
+        #: tell the user the accelerator deferred — the results are identical either way.
+        self.fell_back_to_python = False
 
     # --- construction ---
 
@@ -213,12 +222,25 @@ class KuzuStore:
         sort to ``(seq, step_id)`` per position. So we reproduce that ordering on the rows
         Kùzu returns. (Cypher itself gives no row-order guarantee; without this sort the
         backends would silently disagree.)
+
+        Honest fallback: a pattern with an unbounded (or over-30-hop) gap cannot be expressed
+        within Kùzu's variable-length cap, so ``compile_to_cypher`` raises
+        :class:`~tracegraph.analysis.UncompilablePattern`. Rather than emit a query that would
+        silently truncate, we fall back to a whole-graph pull (:meth:`trace`) plus the *same*
+        pure-Python matcher — equivalence by identity, exactly the load-then-traverse posture
+        :meth:`ancestors` already uses for the same cap. The accelerator degrades to *slower*,
+        never to *wrong*; ``fell_back_to_python`` records that it happened.
         """
+        self.fell_back_to_python = False
         if not pattern.steps:
             # Match the pure-Python convention so callers can be backend-agnostic; the
             # compile step would raise, but raising here would break that contract.
             return []
-        q = compile_to_cypher(pattern)
+        try:
+            q = compile_to_cypher(pattern)
+        except UncompilablePattern:
+            self.fell_back_to_python = True
+            return py_find_matches(self.trace(), pattern)
         rows = _collect(self._conn.execute(q.cypher, q.params))
         steps_by_id = {s.step_id: s for s in self._load_all_steps()}
         rows.sort(key=lambda row: tuple((steps_by_id[sid].seq, sid) for sid in row))

@@ -17,11 +17,13 @@ from tracegraph.analysis.ahu import (
 )
 from tracegraph.analysis.explain import Explanation, explain
 from tracegraph.analysis.patterns import (
+    MAX_GAP,
     PRESETS,
     CompiledQuery,
     Match,
     PathPattern,
     StepPredicate,
+    UncompilablePattern,
     compile_to_cypher,
     find_matches,
     search,
@@ -36,11 +38,13 @@ __all__ = [
     "diff",
     "is_isomorphic",
     "structure_only",
+    "MAX_GAP",
     "PRESETS",
     "CompiledQuery",
     "Match",
     "PathPattern",
     "StepPredicate",
+    "UncompilablePattern",
     "compile_to_cypher",
     "find_matches",
     "search",

@@ -207,6 +207,7 @@ def _search_with_backend(
 
     matches: list[Match] = []
     stores: dict[str, Any] = {}
+    fell_back = False
     for nt in traces:
         store = _store_from_trace(nt, backend)
         stores[nt.trace.trace_id] = store
@@ -214,6 +215,15 @@ def _search_with_backend(
         for path in store.find_matches(pattern):
             labels = [steps[i].name or steps[i].kind.value for i in path]
             matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
+        fell_back = fell_back or getattr(store, "fell_back_to_python", False)
+    if fell_back:
+        # Honesty signal (off result stdout): the kuzu accelerator couldn't compile this
+        # pattern under Kùzu's 30-hop cap and ran the pure-Python matcher instead. Results
+        # are identical — this just tells the user the accelerator deferred.
+        err_console.print(
+            "[dim]⚠ pattern not Cypher-compilable (unbounded gap); ran the pure-Python "
+            "matcher over the raw causal graph — results are identical to --backend kuzu's.[/]"
+        )
     return matches, stores
 
 
@@ -374,8 +384,10 @@ def diff(
 def presets() -> None:
     """List the named cross-trace query patterns."""
     for name, pattern in PRESETS.items():
-        console.print(f"[bold]{name}[/]  [dim]{pattern.description}[/]")
-        console.print(f"    {pattern}")
+        # escape() the pattern: its rendering uses [gap …] markers that Rich would otherwise
+        # parse as style tags and silently swallow (the gap connector would vanish).
+        console.print(f"[bold]{name}[/]  [dim]{escape(pattern.description)}[/]")
+        console.print(f"    {escape(str(pattern))}")
 
 
 @app.command()
@@ -416,7 +428,8 @@ def query(
     truncated = limit is not None and total > limit
     if truncated:
         matches = matches[:limit]
-    console.print(f"[bold]{preset}[/]: {pattern}  [dim](over {len(traces)} trace(s))[/]\n")
+    # escape() the pattern str (its [gap …] markers would be eaten as Rich markup otherwise).
+    console.print(f"[bold]{preset}[/]: {escape(str(pattern))}  [dim](over {len(traces)} trace(s))[/]\n")
     if not matches:
         console.print("[dim]no matches[/]")
         raise typer.Exit(1)

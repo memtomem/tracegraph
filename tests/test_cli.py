@@ -138,6 +138,60 @@ def test_presets_lists_patterns():
     assert "tool-failure" in res.output
 
 
+def _write_retry_trace(path, trace_id="RT"):
+    """input → plan → search(ok) → handle → replan → search(error): the marquee retry shape."""
+    specs = [
+        ("input", StepKind.CHAIN, StepStatus.OK),
+        ("plan", StepKind.CHAIN, StepStatus.OK),
+        ("search", StepKind.TOOL, StepStatus.OK),
+        ("handle", StepKind.CHAIN, StepStatus.OK),
+        ("replan", StepKind.CHAIN, StepStatus.OK),
+        ("search", StepKind.TOOL, StepStatus.ERROR),
+    ]
+    steps, edges = [], []
+    for i, (name, kind, status) in enumerate(specs):
+        steps.append(Step(step_id=f"{trace_id}{i}", trace_id=trace_id, seq=i, name=name,
+                          kind=kind, status=status))
+        if i:
+            edges.append(Edge(type=EdgeType.CAUSED_BY, src=f"{trace_id}{i}", dst=f"{trace_id}{i - 1}"))
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id=trace_id, source_kind="x"), steps=steps, causal_edges=edges)
+    )
+    artifact.save(nt, path)
+
+
+def test_presets_lists_marquee_retry_pattern():
+    res = runner.invoke(app, ["presets"])
+    assert res.exit_code == 0
+    assert "tool-retry-failure" in res.output
+    # the readable rendering shows the gap connector and the back-reference
+    assert "gap" in res.output and "name=#0" in res.output
+
+
+def test_query_marquee_finds_repeated_failing_tool(tmp_path):
+    p = tmp_path / "retry.json"
+    _write_retry_trace(p)
+    res = runner.invoke(app, ["query", "tool-retry-failure", str(p)])
+    assert res.exit_code == 0, res.output
+    # both 'search' invocations appear in the match line
+    assert res.output.count("search") >= 2
+    assert "1 match(es)" in res.output
+
+
+def test_query_marquee_no_match_on_single_clean_tool(tmp_path):
+    # A trace with one successful tool and no repeat must NOT match — exit 1, "no matches".
+    p = tmp_path / "clean.json"
+    _write_linear_trace(
+        p,
+        "CLEAN",
+        ("input", StepKind.CHAIN, StepStatus.OK),
+        ("call_tool", StepKind.TOOL, StepStatus.OK),
+    )
+    res = runner.invoke(app, ["query", "tool-retry-failure", str(p)])
+    assert res.exit_code == 1
+    assert "no matches" in res.output
+
+
 def test_kuzu_backend_missing_optional_dependency_reports_bad_parameter(monkeypatch):
     monkeypatch.delitem(sys.modules, "tracegraph.store.kuzu", raising=False)
     monkeypatch.delitem(sys.modules, "kuzu", raising=False)

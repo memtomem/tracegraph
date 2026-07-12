@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 kuzu = pytest.importorskip("kuzu", reason="requires the [cypher] extra")
 
 from tracegraph import artifact
-from tracegraph.analysis import PRESETS, PathPattern, StepPredicate, find_matches
+from tracegraph.analysis import MAX_GAP, PRESETS, PathPattern, StepPredicate, find_matches
 from tracegraph.cli import app
 from tracegraph.model import (
     Edge,
@@ -83,6 +83,53 @@ def _clean_trace(tid: str = "B") -> NormalizedTrace:
     )
 
 
+def _custom(tid, specs, edges) -> NormalizedTrace:
+    """Build a trace from explicit (local_id, name, kind, status) specs + CAUSED_BY id pairs."""
+    steps = [
+        Step(step_id=f"{tid}{sid}", trace_id=tid, seq=i, name=name, kind=kind, status=status)
+        for i, (sid, name, kind, status) in enumerate(specs)
+    ]
+    es = [Edge(type=EdgeType.CAUSED_BY, src=f"{tid}{s}", dst=f"{tid}{d}") for s, d in edges]
+    return normalize(
+        RawTrace(trace=Trace(trace_id=tid, source_kind="x"), steps=steps, causal_edges=es)
+    )
+
+
+def _retry_trace(tid: str = "RT") -> NormalizedTrace:
+    """'tool X → retry → tool X → failure': two 'search' tools 3 causal hops apart, 2nd errors."""
+    return _custom(
+        tid,
+        [
+            (0, "input", StepKind.CHAIN, OK),
+            (1, "plan", StepKind.CHAIN, OK),
+            (2, "search", StepKind.TOOL, OK),
+            (3, "handle_error", StepKind.CHAIN, OK),
+            (4, "replan", StepKind.CHAIN, OK),
+            (5, "search", StepKind.TOOL, ERR),
+        ],
+        [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4)],
+    )
+
+
+def _retry_diamond(tid: str = "RD") -> NormalizedTrace:
+    """search(OK) → {a, b} → search(ERR): the failing retry is reachable by TWO gap paths.
+
+    This is the equivalence trap: a Kùzu variable-length match yields one row per *path*, so
+    without RETURN DISTINCT it would emit the (s0,s1) pair twice and diverge from the deduped
+    pure-Python matcher.
+    """
+    return _custom(
+        tid,
+        [
+            (0, "search", StepKind.TOOL, OK),
+            (1, "a", StepKind.CHAIN, OK),
+            (2, "b", StepKind.CHAIN, OK),
+            (3, "search", StepKind.TOOL, ERR),
+        ],
+        [(1, 0), (2, 0), (3, 1), (3, 2)],
+    )
+
+
 def _fanin_trace(tid: str = "C") -> NormalizedTrace:
     """A step with two causes — the case where TREE_PARENT is lossy and the raw layer matters."""
     steps = [
@@ -117,12 +164,72 @@ def test_pattern_matches_equivalent_to_pure_python(preset_name: str) -> None:
     # Every shipped preset, on every shape we test elsewhere, must agree across backends —
     # exact list equality (not set equality): if Kùzu reorders matches relative to the
     # pure-Python traversal, that's a real divergence we want to catch, not paper over.
+    # The retry fixtures exercise the gap presets across BOTH backend modes: the bounded
+    # 'near' preset compiles to capped Cypher; the unbounded marquee falls back to pure-Python.
     pattern = PRESETS[preset_name]
-    for nt in (_erroring_tool_trace(), _clean_trace(), _fanin_trace()):
+    for nt in (
+        _erroring_tool_trace(),
+        _clean_trace(),
+        _fanin_trace(),
+        _retry_trace(),
+        _retry_diamond(),
+    ):
         store = KuzuStore.from_trace(nt)
         assert store.find_matches(pattern) == find_matches(nt, pattern), (
             f"divergence on {preset_name} / {nt.trace.trace_id}"
         )
+
+
+def test_gap_diamond_distinct_parity_one_row_per_endpoint_pair() -> None:
+    # The DISTINCT trap, head-on: the bounded 'near' preset compiles to a variable-length
+    # match that, WITHOUT RETURN DISTINCT, returns the (search, search) pair once PER path —
+    # twice on this diamond — diverging from the deduped pure-Python matcher. With DISTINCT
+    # both yield exactly one row. (If this regresses, the compiled query dropped DISTINCT.)
+    nt = _retry_diamond()
+    store = KuzuStore.from_trace(nt)
+    ku = store.find_matches(PRESETS["tool-retry-failure-near"])
+    py = find_matches(nt, PRESETS["tool-retry-failure-near"])
+    assert ku == py == [["RD0", "RD3"]]
+    assert store.fell_back_to_python is False  # bounded gap → ran as real Cypher
+
+
+def test_unbounded_marquee_falls_back_to_python_and_stays_equivalent() -> None:
+    # The unbounded marquee can't compile under the 30-hop cap, so KuzuStore must transparently
+    # run the pure-Python matcher (system of record) and flag that it did — never silently truncate.
+    for nt in (_retry_trace(), _retry_diamond()):
+        store = KuzuStore.from_trace(nt)
+        ku = store.find_matches(PRESETS["tool-retry-failure"])
+        assert store.fell_back_to_python is True
+        assert ku == find_matches(nt, PRESETS["tool-retry-failure"])
+
+
+def test_fell_back_flag_resets_between_calls() -> None:
+    # The flag reflects the MOST RECENT call: a fallback then a compilable call must clear it,
+    # or the CLI honesty note would cry wolf on a subsequent native-Cypher query.
+    store = KuzuStore.from_trace(_retry_trace())
+    store.find_matches(PRESETS["tool-retry-failure"])  # unbounded → fallback
+    assert store.fell_back_to_python is True
+    store.find_matches(PRESETS["tool-retry-failure-near"])  # bounded → native Cypher
+    assert store.fell_back_to_python is False
+
+
+def test_unbounded_fallback_matches_far_retry_past_the_hop_cap() -> None:
+    # A retry well beyond Kùzu's 30-hop cap: the bounded 'near' Cypher would miss it, but the
+    # unbounded fallback (whole-graph pull + pure-Python) catches it AND equals the in-memory
+    # store at that depth — the same load-then-traverse guarantee ancestors() makes.
+    n = 80  # > MAX_GAP, so a *2..30 var-length query could never reach the failing retry
+    specs = [(i, f"n{i}", StepKind.CHAIN, OK) for i in range(n)]
+    specs[3] = (3, "search", StepKind.TOOL, OK)
+    specs[n - 3] = (n - 3, "search", StepKind.TOOL, ERR)
+    nt = _custom("DEEP", specs, [(i, i - 1) for i in range(1, n)])
+
+    store = KuzuStore.from_trace(nt)
+    ku = store.find_matches(PRESETS["tool-retry-failure"])
+    assert store.fell_back_to_python is True
+    assert ku == find_matches(nt, PRESETS["tool-retry-failure"]) == [["DEEP3", f"DEEP{n - 3}"]]
+    assert (n - 3) - 3 > MAX_GAP  # guard: the retry really is past the cap
+    # the bounded variant, run as native Cypher, correctly finds nothing this far apart
+    assert store.find_matches(PRESETS["tool-retry-failure-near"]) == []
 
 
 def test_ad_hoc_pattern_with_only_kind_wildcard_status_matches_python() -> None:
@@ -295,3 +402,25 @@ def test_cli_query_can_use_kuzu_backend(tmp_path) -> None:
     assert "A" in res.output
     assert "call_tool" in res.output
     assert "1 match(es)" in res.output
+
+
+def test_cli_query_kuzu_marquee_prints_honest_fallback_note(tmp_path) -> None:
+    # The unbounded marquee can't compile under Kùzu's cap, so --backend kuzu transparently
+    # runs the pure-Python matcher. The CLI must SAY so (the project's honesty ethos) while
+    # still returning the correct match — never silently pretend the accelerator ran it.
+    p = tmp_path / "retry.json"
+    artifact.save(_retry_trace(), p)
+    res = runner.invoke(app, ["query", "tool-retry-failure", "--backend", "kuzu", str(p)])
+    assert res.exit_code == 0, res.output
+    assert "1 match(es)" in res.output  # correct result ...
+    assert "not Cypher-compilable" in res.output  # ... plus the honest deferral note
+
+
+def test_cli_query_kuzu_bounded_marquee_runs_native_no_fallback_note(tmp_path) -> None:
+    # The bounded variant DOES compile, so the fallback note must NOT appear (no crying wolf).
+    p = tmp_path / "retry.json"
+    artifact.save(_retry_trace(), p)
+    res = runner.invoke(app, ["query", "tool-retry-failure-near", "--backend", "kuzu", str(p)])
+    assert res.exit_code == 0, res.output
+    assert "1 match(es)" in res.output
+    assert "not Cypher-compilable" not in res.output
