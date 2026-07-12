@@ -41,6 +41,7 @@ tracegraph diff A.json B.json        # structural regression diff (AHU isomorphi
 
 tracegraph presets                   # list cross-trace query patterns
 tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
+tracegraph query tool-retry-failure *.json    # the marquee: same tool retried, then failing
 tracegraph query tool-failure --backend kuzu A.json B.json   # use the optional Cypher accelerator
 ```
 
@@ -63,7 +64,23 @@ NOT IDENTICAL
 $ tracegraph query tool-failure A.json B.json
 A: call_tool
 1 match(es) across 1 trace(s)
+
+$ tracegraph query tool-retry-failure A.json
+A: search → search
+1 match(es) across 1 trace(s)
 ```
+
+The marquee pattern — *"tool X → retry → tool X → failure"* — is a real query, not just a
+tagline. It needs three things a flat predicate list can't express, all added to
+`PathPattern` without touching the frozen model: a **back-reference** (`same_name_as`, "the
+*same* tool X both times"), a **variable-length gap** (`gap=(lo, hi)`, "→ retry →" = some
+intervening steps), and **de-duplication** of fan-in paths. The gap is *unbounded* by default,
+because real traces are deep and a retry can be many super-steps later — so the pure-Python
+matcher (the system of record) catches it at any distance. Kùzu's openCypher backend hard-caps
+variable-length hops at 30, so rather than silently truncate, `compile_to_cypher` refuses an
+unbounded gap (`UncompilablePattern`) and `KuzuStore` transparently falls back to the
+pure-Python matcher — *the accelerator degrades to slower, never to wrong*. The bounded
+`tool-retry-failure-near` variant stays within the cap and runs as native Cypher.
 
 ## Status
 
@@ -72,7 +89,7 @@ A: call_tool
 - **Phase 0 (frozen contract):** `RawTrace` vs `NormalizedTrace`, portable JSON artifact (system of record), `validate_raw` → projection → `validate_tree`/`validate_normalized`, in-memory store, `explain`.
 - **Phase 1 (ingestion):** `LangGraphCheckpointAdapter` reads any `BaseCheckpointSaver`, including subgraph checkpoint namespaces, and reconstructs declared checkpoint parentage; `examples/tiny_agent.py` generates real traces.
 - **Phase 2 (analysis + CLI):** AHU rooted-tree diff and the Typer CLI.
-- **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend.
+- **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. Supports variable-length **gaps** and **back-references** (`same_name_as`), which is what makes the marquee `tool-retry-failure` pattern expressible; uncompilable (unbounded) patterns degrade honestly rather than truncate.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests exported spans (Phoenix/Langfuse/Collector) into the same causal model — the source that actually exercises the raw/derived split.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `KuzuStore` that compiles the **same** `PathPattern` spec to openCypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
 
