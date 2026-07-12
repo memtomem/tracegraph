@@ -61,6 +61,7 @@ def test_real_fixture_hash_allowlist_and_redaction():
 def test_real_filetracer_ingest_inspect_and_lossy_select(tmp_path):
     target = tmp_path / "compete.json"
     trace = _ingest(REAL, target)
+    assert trace.trace.run_id == "efd16fc1-758e-48fd-a765-bb3e27815952"
     result = runner.invoke(app, ["inspect", str(target)])
     assert result.exit_code == 0, result.output
     assert "select" in result.output and "lossy-projection" in result.output

@@ -7,7 +7,9 @@ the checkpoint stream), not an authoritative node-execution trace.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,9 @@ from tracegraph.analysis import search as pattern_search
 from tracegraph.analysis import structure_only
 from tracegraph.model import EdgeType, NormalizedTrace, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
+from tracegraph.review_candidates import build_report as build_candidate_report
+from tracegraph.review_candidates import is_review_exportable
+from tracegraph.review_candidates import save_atomic as save_candidate_report
 from tracegraph.store import InMemoryStore
 
 app = typer.Typer(
@@ -85,6 +90,25 @@ def _load_validated(path: Path) -> NormalizedTrace:
     return nt
 
 
+@dataclass(frozen=True)
+class _LoadedArtifact:
+    path: Path
+    trace: NormalizedTrace
+    digest: str
+
+
+def _load_artifact_evidence(path: Path) -> _LoadedArtifact:
+    """Load and validate the exact bytes whose digest will identify review evidence."""
+    raw = path.read_bytes()
+    nt = artifact.loads(raw.decode("utf-8"))
+    validate_normalized(nt)
+    return _LoadedArtifact(
+        path=path,
+        trace=nt,
+        digest=f"sha256:{hashlib.sha256(raw).hexdigest()}",
+    )
+
+
 def _load(path: Path) -> NormalizedTrace:
     """Load + validate an explicitly-named artifact, mapping failures to clean CLI errors."""
     try:
@@ -105,7 +129,9 @@ def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
     )
 
 
-def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
+def _load_many_evidence(
+    paths: list[Path], *, exclude: Path | None = None
+) -> list[_LoadedArtifact]:
     """Expand files and directories (``*.json``) into a list of validated traces.
 
     Directory expansion is **lenient** and **non-recursive** (top-level ``*.json`` only,
@@ -122,51 +148,61 @@ def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
     to a different artifact's causal graph.
     """
     discovered: list[tuple[Path, bool]] = []  # (path, explicitly_named)
+    excluded = exclude.resolve() if exclude is not None else None
     for p in paths:
         if p.is_dir():
-            discovered.extend((f, False) for f in sorted(p.glob("*.json")))
+            discovered.extend(
+                (f, False)
+                for f in sorted(p.glob("*.json"))
+                if excluded is None or f.resolve() != excluded
+            )
         else:
+            if excluded is not None and p.resolve() == excluded:
+                raise typer.BadParameter("--out must not overwrite an input artifact")
             discovered.append((p, True))
     if not discovered:
         raise typer.BadParameter("no artifact files found")
 
-    traces: list[NormalizedTrace] = []
-    used: list[Path] = []
+    loaded: list[_LoadedArtifact] = []
     skipped: list[tuple[Path, str]] = []
     for f, explicit in discovered:
         if explicit:
             try:
-                traces.append(_load(f))  # strict: a clean, fatal BadParameter on failure
-            except typer.BadParameter:
+                loaded.append(_load_artifact_evidence(f))
+            except _LOAD_ERRORS as exc:
                 # Flush what we've already skipped before aborting, so strays discovered
                 # earlier in the argument list aren't silently dropped by the fatal error.
                 _warn_skipped(skipped)
-                raise
-            used.append(f)
+                raise typer.BadParameter(
+                    f"cannot load artifact {f}: {_load_reason(exc)}"
+                ) from exc
             continue
         try:
-            traces.append(_load_validated(f))  # lenient: skip stray non-artifacts
-            used.append(f)
+            loaded.append(_load_artifact_evidence(f))
         except _LOAD_ERRORS as exc:
             skipped.append((f, _load_reason(exc)))
 
     _warn_skipped(skipped)
-    if not traces:
+    if not loaded:
         raise typer.BadParameter(
             f"no valid artifacts found ({len(skipped)} discovered file(s) were not "
             "tracegraph artifacts)"
         )
 
     seen: dict[str, Path] = {}
-    for tr, f in zip(traces, used):
-        tid = tr.trace.trace_id
+    for item in loaded:
+        tid = item.trace.trace.trace_id
         if tid in seen:
             raise typer.BadParameter(
-                f"duplicate trace_id {tid!r}: {seen[tid]} and {f}. Each artifact "
+                f"duplicate trace_id {tid!r}: {seen[tid]} and {item.path}. Each artifact "
                 "must carry a unique trace_id — rename or deduplicate before querying."
             )
-        seen[tid] = f
-    return traces
+        seen[tid] = item.path
+    return loaded
+
+
+def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
+    return [item.trace for item in _load_many_evidence(paths)]
 
 
 def _store_cls(backend: QueryBackend) -> type[Any]:
@@ -386,7 +422,11 @@ def presets() -> None:
     for name, pattern in PRESETS.items():
         # escape() the pattern: its rendering uses [gap …] markers that Rich would otherwise
         # parse as style tags and silently swallow (the gap connector would vanish).
-        console.print(f"[bold]{name}[/]  [dim]{escape(pattern.description)}[/]")
+        version = f"@v{pattern.pattern_version}"
+        review = "  [cyan]review-exportable[/]" if is_review_exportable(pattern) else ""
+        console.print(
+            f"[bold]{name}{version}[/]  [dim]{escape(pattern.description)}[/]{review}"
+        )
         console.print(f"    {escape(str(pattern))}")
 
 
@@ -429,7 +469,10 @@ def query(
     if truncated:
         matches = matches[:limit]
     # escape() the pattern str (its [gap …] markers would be eaten as Rich markup otherwise).
-    console.print(f"[bold]{preset}[/]: {escape(str(pattern))}  [dim](over {len(traces)} trace(s))[/]\n")
+    console.print(
+        f"[bold]{pattern.pattern_id}@v{pattern.pattern_version}[/]: {escape(str(pattern))}  "
+        f"[dim](over {len(traces)} trace(s))[/]\n"
+    )
     if not matches:
         console.print("[dim]no matches[/]")
         raise typer.Exit(1)
@@ -471,6 +514,43 @@ def query(
     suffix = f" — truncated from {total}" if truncated else ""
     console.print(
         f"\n[dim]{len(matches)} match(es) across {n_traces} trace(s){suffix}[/]"
+    )
+
+
+@app.command(name="export-review-candidates")
+def export_review_candidates(
+    preset: str = typer.Argument(..., help="Review-exportable preset pattern name."),
+    artifacts: list[Path] = typer.Argument(..., help="Artifact JSON files and/or directories."),
+    out: Path = typer.Option(..., "--out", "-o", help="Versioned review-candidate JSON report."),
+    backend: QueryBackend = typer.Option(
+        QueryBackend.MEMORY,
+        "--backend",
+        case_sensitive=False,
+        help="Pattern-matching backend; both backends produce identical candidates.",
+    ),
+) -> None:
+    """Export body-free, versioned governance review candidates. Empty matches succeed."""
+    pattern = PRESETS.get(preset)
+    if pattern is None:
+        raise typer.BadParameter(
+            f"unknown preset {preset!r}; available: {', '.join(PRESETS)}"
+        )
+    if not is_review_exportable(pattern):
+        raise typer.BadParameter(f"preset {preset!r} is not review-exportable")
+
+    loaded = _load_many_evidence(artifacts, exclude=out)
+    traces = [item.trace for item in loaded]
+    matches, _ = _search_with_backend(traces, pattern, backend)
+    traces_by_id = {item.trace.trace.trace_id: item.trace for item in loaded}
+    digests_by_id = {item.trace.trace.trace_id: item.digest for item in loaded}
+    try:
+        report = build_candidate_report(pattern, matches, traces_by_id, digests_by_id)
+        save_candidate_report(report, out)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"cannot export review candidates: {exc}") from exc
+    console.print(
+        f"[green]exported {len(report.candidates)} review candidate(s)[/] "
+        f"from {len(matches)} match(es) → {out}"
     )
 
 

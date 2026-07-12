@@ -1,19 +1,21 @@
 # toolgraph, tracegraph, syncmill 연계 계획
 
-**상태:** 첫 통합 마일스톤 완료 (2026-07-11)
+**상태:** 첫 통합 마일스톤 및 Tracegraph T3 완료 (2026-07-12)
 **작성일:** 2026-07-11
 **정본:** [전체 계획](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/integration-plan.md) · [구현 설계](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/implementation-design.md) · [smoke runbook](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/smoke-runbook.md)
 
 > 실제 landed 순서와 설계 라벨은 정본에서 구분한다. P0/P1과 첫 마일스톤,
-> dashboard rendering을 제외한 P2, 실제 identity/qualified-tool advisory P3/Gate D는
-> 완료됐다. strict P3.1, T3/G3, P4는 열려 있다.
+> P2와 실제 identity/qualified-tool advisory P3/Gate D는 완료됐다. Tracegraph T3의
+> versioned review-candidate producer도 완료됐고, strict P3.1, Toolgraph G3와 전체 P4는
+> 열려 있다.
 
-**핵심 결정:** syncmill이 `OTLPSpanAdapter`가 소비하는 세 속성
+**핵심 결정:** 첫 통합 마일스톤에서 syncmill이 `OTLPSpanAdapter`가 소비하는 세 속성
 (`openinference.span.kind`, `graph.node.id`, `graph.node.parent_id` — 모두
 OpenInference/graph 표준)을 직접 emit하므로 **첫 통합 마일스톤에서 tracegraph의 src
-변경은 없다**. 1~2단계 작업은 전부 fixture(`examples/syncmill_otlp_traces.py`)와
-golden test다. syncmill 고유 의미는 additive `syncmill.*` 속성에 실리며 adapter는
-읽지 않는다 — core causal model 비오염 원칙이 구조적으로 지켜진다.
+변경은 없었다**. 1~2단계 작업은 전부 fixture(`examples/syncmill_otlp_traces.py`)와
+golden test였다. 후속 T3는 공통 상관 식별자인 allowlisted `syncmill.run_id` 하나만
+generic `Trace.run_id`로 보존하고, 다른 syncmill 속성은 읽거나 core causal model에
+저장하지 않는다.
 
 ## 요약
 
@@ -111,14 +113,18 @@ span name에는 agent id/phase/인덱스만 허용하고 uuid, timestamp, run_id
 - [ ] strategy 간 normalized structure diff 예제를 추가한다.
 - [ ] timeout, repeated-agent-failure, gate-failure-after-success preset을 검토한다.
 - [ ] agent 이름이 같은 재시도와 다른 worktree slot을 구분한다.
-- [ ] cross-run query 결과에 pattern version을 기록한다.
+- [x] cross-run query 결과에 pattern version을 기록한다.
 
 ### 4단계: toolgraph provenance 연결
 
 - [ ] preflight artifact digest와 graph generation을 run metadata로 가져온다.
 - [ ] policy verdict를 causal edge가 아닌 외부 decision evidence로 표현한다.
-- [ ] failure pattern을 governance review candidate JSON으로 내보낸다.
-- [ ] tracegraph가 toolgraph manifest를 직접 수정하지 않는 경계를 테스트한다.
+- [x] failure pattern을 versioned governance review candidate JSON으로 내보낸다.
+- [x] tracegraph가 toolgraph manifest를 직접 수정하지 않는 경계를 테스트한다.
+
+T3 producer는 `run_id`, `pattern_id`/`pattern_version`, qualified `tool_key`, 분석한
+normalized artifact의 `sha256:` digest만 내보낸다. 후보는 사람이 검토할 evidence이며
+Toolgraph intake/annotation(G3)과 SyncMill board 노출은 별도 후속 작업이다.
 
 ## 검증 기준
 
