@@ -129,20 +129,33 @@ def test_batch_is_sorted_deduplicated_and_repeatable(tmp_path):
     assert target.read_bytes() == first_bytes
 
 
-def test_builder_deduplicates_identical_candidate_tuples(tmp_path):
+def test_builder_deduplicates_and_only_indexes_matched_traces(tmp_path, monkeypatch):
     source = tmp_path / "trace.json"
+    unmatched_source = tmp_path / "unmatched.json"
     _write_trace(source, "dupe", run_id="run-dupe")
+    _write_trace(unmatched_source, "unmatched", run_id="run-unmatched")
     nt = artifact.load(source)
+    unmatched = artifact.load(unmatched_source)
     endpoint = next(step for step in nt.steps if step.kind is StepKind.TOOL)
     duplicate = Match(trace_id="dupe", step_ids=[endpoint.step_id], labels=[endpoint.name])
     digest = f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"
+    unmatched_digest = f"sha256:{hashlib.sha256(unmatched_source.read_bytes()).hexdigest()}"
+    original_steps_by_id = type(nt).steps_by_id
+    indexed: list[str] = []
+
+    def counted_steps_by_id(trace):
+        indexed.append(trace.trace.trace_id)
+        return original_steps_by_id(trace)
+
+    monkeypatch.setattr(type(nt), "steps_by_id", counted_steps_by_id)
     report = build_report(
         PRESETS["tool-failure"],
         [duplicate, duplicate],
-        {"dupe": nt},
-        {"dupe": digest},
+        {"dupe": nt, "unmatched": unmatched},
+        {"dupe": digest, "unmatched": unmatched_digest},
     )
     assert len(report.candidates) == 1
+    assert indexed == ["dupe"]
 
 
 @pytest.mark.cypher

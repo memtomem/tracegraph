@@ -11,7 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from tracegraph.analysis.patterns import Match, PathPattern
-from tracegraph.model import NormalizedTrace, StepKind, StepStatus
+from tracegraph.model import NormalizedTrace, Step, StepKind, StepStatus
 
 
 REVIEW_CANDIDATE_SCHEMA_VERSION = 1
@@ -60,14 +60,18 @@ def build_report(
     if not is_review_exportable(pattern):
         raise ValueError(f"preset {pattern.pattern_id!r} is not review-exportable")
 
-    steps_by_trace = {trace_id: trace.steps_by_id() for trace_id, trace in traces.items()}
+    steps_by_trace: dict[str, dict[str, Step]] = {}
     unique: dict[tuple[str, str, int, str, str], ReviewCandidate] = {}
     for match in matches:
         trace = traces[match.trace_id]
         run_id = trace.trace.run_id
         if run_id is None:
             raise ValueError(f"trace {match.trace_id!r} has no run_id")
-        endpoint = steps_by_trace[match.trace_id][match.step_ids[-1]]
+        steps = steps_by_trace.get(match.trace_id)
+        if steps is None:
+            steps = trace.steps_by_id()
+            steps_by_trace[match.trace_id] = steps
+        endpoint = steps[match.step_ids[-1]]
         if endpoint.kind is not StepKind.TOOL or not endpoint.name:
             raise ValueError(f"trace {match.trace_id!r} matched an unnamed or non-TOOL endpoint")
         tool_key = endpoint.name
