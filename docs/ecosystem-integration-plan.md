@@ -1,13 +1,14 @@
 # toolgraph, tracegraph, syncmill 연계 계획
 
-**상태:** 첫 통합 마일스톤, P3.1 preview, T3 및 SyncMill board import slice 완료 (2026-07-12)
+**상태:** 첫 통합 마일스톤, P3.1 preview, T3, SyncMill board import 및 Toolgraph G3 완료 (2026-07-12)
 **작성일:** 2026-07-11
 **정본:** [전체 계획](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/integration-plan.md) · [구현 설계](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/implementation-design.md) · [smoke runbook](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/smoke-runbook.md)
 
 > 실제 landed 순서와 설계 라벨은 정본에서 구분한다. P0/P1과 첫 마일스톤,
 > P2와 실제 identity/qualified-tool advisory P3/Gate D, opt-in strict P3.1 preview는
-> 완료됐다. Tracegraph T3 producer와 SyncMill board import slice도 완료됐고,
-> Toolgraph G3와 전체 P4는 열려 있다.
+> 완료됐다. Tracegraph T3 producer, SyncMill board import, Toolgraph G3 artifact
+> review도 완료됐다. Live qualified-tool telemetry와 운영 검토 평가를 포함한 전체
+> P4는 열려 있다.
 
 **핵심 결정:** 첫 통합 마일스톤에서 syncmill이 `OTLPSpanAdapter`가 소비하는 세 속성
 (`openinference.span.kind`, `graph.node.id`, `graph.node.parent_id` — 모두
@@ -125,8 +126,12 @@ span name에는 agent id/phase/인덱스만 허용하고 uuid, timestamp, run_id
 T3 producer는 `run_id`, `pattern_id`/`pattern_version`, qualified `tool_key`, 분석한
 normalized artifact의 `sha256:` digest만 내보낸다. 후보는 사람이 검토할 evidence이며
 SyncMill은 exact tuple을 idempotent `review`/`human-required` board item으로 가져온다.
-import는 strict verdict를 재평가하거나 policy를 바꾸지 않는다. Toolgraph
-intake/annotation(G3)과 live qualified-tool span은 별도 후속 작업이다.
+import는 strict verdict를 재평가하거나 policy를 바꾸지 않는다. Toolgraph G3는
+SyncMill과 마찬가지로 exact candidate tuple에서 같은 UUIDv5를 계산해 correlation에만
+사용하고, exact report-byte digest에 묶인 별도 sidecar에서
+`open`/`accepted`/`dismissed`를 기록한다. Annotation은 SyncMill board, manifest,
+selector, blast radius, preflight 또는 graph state를 바꾸지 않는다. Live qualified-tool
+span과 운영 검토 평가는 별도 후속 작업이다.
 
 ## 검증 기준
 
