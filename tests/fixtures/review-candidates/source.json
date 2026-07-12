@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "trace": {
+    "edges": [
+      {
+        "dst": "s0",
+        "src": "s1",
+        "type": "CAUSED_BY"
+      },
+      {
+        "dst": "s1",
+        "src": "s2",
+        "type": "CAUSED_BY"
+      },
+      {
+        "dst": "review-retry",
+        "src": "s0",
+        "type": "BELONGS_TO"
+      },
+      {
+        "dst": "review-retry",
+        "src": "s1",
+        "type": "BELONGS_TO"
+      },
+      {
+        "dst": "s0",
+        "src": "s1",
+        "type": "TREE_PARENT"
+      },
+      {
+        "dst": "review-retry",
+        "src": "s2",
+        "type": "BELONGS_TO"
+      },
+      {
+        "dst": "s1",
+        "src": "s2",
+        "type": "TREE_PARENT"
+      }
+    ],
+    "steps": [
+      {
+        "error_msg": null,
+        "kind": "TOOL",
+        "name": "syncmill::board_stats",
+        "projection_lossy": false,
+        "seq": 0,
+        "source": "loop",
+        "status": "ok",
+        "step_id": "s0",
+        "trace_id": "review-retry",
+        "ts": null
+      },
+      {
+        "error_msg": null,
+        "kind": "CHAIN",
+        "name": "retry",
+        "projection_lossy": false,
+        "seq": 1,
+        "source": "loop",
+        "status": "ok",
+        "step_id": "s1",
+        "trace_id": "review-retry",
+        "ts": null
+      },
+      {
+        "error_msg": "password=secret stdout and patch body",
+        "kind": "TOOL",
+        "name": "syncmill::board_stats",
+        "projection_lossy": false,
+        "seq": 2,
+        "source": "loop",
+        "status": "error",
+        "step_id": "s2",
+        "trace_id": "review-retry",
+        "ts": null
+      }
+    ],
+    "trace": {
+      "run_id": "efd16fc1-758e-48fd-a765-bb3e27815952",
+      "source_kind": "fixture",
+      "status": "error",
+      "thread_id": null,
+      "trace_id": "review-retry"
+    }
+  }
+}
