@@ -22,6 +22,7 @@ runner = CliRunner()
 ROOT = Path(__file__).parents[1]
 SCHEMA = ROOT / "contracts" / "review-candidates.schema.json"
 GOLDEN = ROOT / "tests" / "fixtures" / "review-candidates" / "v1.json"
+GOLDEN_SOURCE = ROOT / "tests" / "fixtures" / "review-candidates" / "source.json"
 
 
 def _write_trace(
@@ -72,6 +73,22 @@ def test_contract_schema_and_canonical_fixture():
     Draft202012Validator(schema).validate({**fixture, "future_additive_field": True})
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate({**fixture, "schema_version": 2})
+
+
+def test_canonical_fixture_is_producer_derived(tmp_path):
+    target = tmp_path / "candidates.json"
+
+    result = _export("tool-retry-failure", GOLDEN_SOURCE, target)
+
+    assert result.exit_code == 0, result.output
+    assert target.read_bytes() == GOLDEN.read_bytes()
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["candidates"][0]["artifact_digest"] == (
+        f"sha256:{hashlib.sha256(GOLDEN_SOURCE.read_bytes()).hexdigest()}"
+    )
+    text = target.read_text(encoding="utf-8")
+    for forbidden in ("password", "secret", "stdout", "patch body", "review-retry", "s2"):
+        assert forbidden not in text
 
 
 def test_path_pattern_metadata_is_paired_and_positive():

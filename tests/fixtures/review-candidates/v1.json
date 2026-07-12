@@ -1,7 +1,7 @@
 {
   "candidates": [
     {
-      "artifact_digest": "sha256:30a0069caa5f26489746158e5234b4a20e827345115a5299809bb6568855a626",
+      "artifact_digest": "sha256:be96bf257c1c3dfe3c8e3ca756fba9e4dccee985ff350d397ec63e323c938653",
       "pattern_id": "tool-retry-failure",
       "pattern_version": 1,
       "run_id": "efd16fc1-758e-48fd-a765-bb3e27815952",

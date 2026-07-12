@@ -101,6 +101,17 @@ The public schema is a repository-vendored contract (not wheel package data) at
 [`contracts/review-candidates.schema.json`](contracts/review-candidates.schema.json); G3
 consumers should vendor that file explicitly.
 
+SyncMill can consume the report without importing this package:
+
+```bash
+SYNCMILL_BOARD__ENABLED=true syncmill board import-review-candidates candidates.json
+```
+
+The importer creates deterministic, human-required `review` items. It does not run agents,
+invoke Toolgraph, or reinterpret strict enforcement policy. Live SyncMill traces still lack
+qualified MCP tool-call spans, so the cross-repo contract test uses the producer-derived
+normalized retry fixture; live run-to-board telemetry remains separate work.
+
 ## Status
 
 **MVP works** — ingest → inspect / explain / diff on real LangGraph traces.
@@ -111,7 +122,7 @@ consumers should vendor that file explicitly.
 - **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. Supports variable-length **gaps** and **back-references** (`same_name_as`), which is what makes the marquee `tool-retry-failure` pattern expressible; uncompilable (unbounded) patterns degrade honestly rather than truncate.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests exported spans (Phoenix/Langfuse/Collector) into the same causal model — the source that actually exercises the raw/derived split.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `KuzuStore` that compiles the **same** `PathPattern` spec to openCypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
-- **Ecosystem T3 (feedback preview producer):** OTLP `syncmill.run_id` correlation, versioned presets, and deterministic body-free `export-review-candidates`; Toolgraph intake and SyncMill board exposure remain separate follow-ups.
+- **Ecosystem T3/P4 board slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, and SyncMill human-review board intake; Toolgraph G3 and live qualified-tool spans remain follow-ups.
 
 Caveats: this is a **checkpoint-level** view (one node per super-step); node names/kinds are
 best-effort display metadata. Subgraph checkpoints are ingested as namespaced steps, but
