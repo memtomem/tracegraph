@@ -53,6 +53,15 @@ def test_conflicting_syncmill_run_ids_are_rejected():
         OTLPSpanAdapter(doc).ingest("t")
 
 
+def test_whitespace_in_syncmill_run_id_is_rejected_at_ingest():
+    attr = {"key": "syncmill.run_id", "value": {"stringValue": "run abc"}}
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "a", "attributes": [attr]},
+    ]}]}]}
+    with pytest.raises(ValueError, match="whitespace-containing"):
+        OTLPSpanAdapter(doc).ingest("t")
+
+
 def test_ingest_unknown_trace_raises():
     with pytest.raises(KeyError):
         _adapter().ingest("nope")

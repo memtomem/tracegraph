@@ -540,4 +540,10 @@ PRESETS: dict[str, PathPattern] = {
     ),
 }
 
-assert all(name == pattern.pattern_id for name, pattern in PRESETS.items())
+_mismatched_preset_ids = [
+    (name, pattern.pattern_id)
+    for name, pattern in PRESETS.items()
+    if name != pattern.pattern_id
+]
+if _mismatched_preset_ids:
+    raise RuntimeError(f"PRESETS keys must equal pattern_id: {_mismatched_preset_ids!r}")

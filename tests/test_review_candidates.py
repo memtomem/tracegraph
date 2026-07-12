@@ -167,6 +167,20 @@ def test_no_match_writes_empty_report_and_succeeds_without_run_id(tmp_path):
     assert json.loads(target.read_text(encoding="utf-8"))["candidates"] == []
 
 
+def test_mixed_matching_batch_without_run_id_fails_closed(tmp_path):
+    _write_trace(tmp_path / "attributed.json", "with-run", run_id="run-ok")
+    _write_trace(tmp_path / "unattributed.json", "without-run", run_id=None)
+    target = tmp_path / "report.json"
+    target.write_text("keep-me\n", encoding="utf-8")
+
+    result = _export("tool-failure", tmp_path, target)
+
+    assert result.exit_code != 0
+    compact = " ".join(result.output.split())
+    assert "without-run" in compact and "run_id" in compact
+    assert target.read_text(encoding="utf-8") == "keep-me\n"
+
+
 @pytest.mark.parametrize(
     ("preset", "run_id", "tool_key", "message"),
     [

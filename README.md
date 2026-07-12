@@ -95,8 +95,11 @@ are eligible. The matched endpoint name must already be a qualified `server::too
 tracegraph never guesses that identity. Each candidate contains only `run_id`, pattern
 id/version, tool key, and the SHA-256 digest of the exact normalized artifact that was queried.
 There are no prompts, outputs, errors, step IDs, trace IDs, or local paths, and the command
-never changes a Toolgraph manifest or policy. The public schema is
-[`contracts/review-candidates.schema.json`](contracts/review-candidates.schema.json).
+never changes a Toolgraph manifest or policy. A matching artifact without `run_id` fails the
+entire batch and leaves an existing output untouched; export never silently drops evidence.
+The public schema is a repository-vendored contract (not wheel package data) at
+[`contracts/review-candidates.schema.json`](contracts/review-candidates.schema.json); G3
+consumers should vendor that file explicitly.
 
 ## Status
 

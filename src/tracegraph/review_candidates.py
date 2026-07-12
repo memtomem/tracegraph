@@ -60,13 +60,14 @@ def build_report(
     if not is_review_exportable(pattern):
         raise ValueError(f"preset {pattern.pattern_id!r} is not review-exportable")
 
+    steps_by_trace = {trace_id: trace.steps_by_id() for trace_id, trace in traces.items()}
     unique: dict[tuple[str, str, int, str, str], ReviewCandidate] = {}
     for match in matches:
         trace = traces[match.trace_id]
         run_id = trace.trace.run_id
         if run_id is None:
             raise ValueError(f"trace {match.trace_id!r} has no run_id")
-        endpoint = trace.steps_by_id()[match.step_ids[-1]]
+        endpoint = steps_by_trace[match.trace_id][match.step_ids[-1]]
         if endpoint.kind is not StepKind.TOOL or not endpoint.name:
             raise ValueError(f"trace {match.trace_id!r} matched an unnamed or non-TOOL endpoint")
         tool_key = endpoint.name

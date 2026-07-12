@@ -262,8 +262,15 @@ class OTLPSpanAdapter:
             if _SYNCMILL_RUN_ID not in span_attrs:
                 continue
             value = span_attrs[_SYNCMILL_RUN_ID]
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"trace {trace_id!r} has an empty or non-string syncmill.run_id")
+            if (
+                not isinstance(value, str)
+                or not value
+                or any(ch.isspace() for ch in value)
+            ):
+                raise ValueError(
+                    f"trace {trace_id!r} has an empty, whitespace-containing, or non-string "
+                    "syncmill.run_id"
+                )
             values.add(value)
         if len(values) > 1:
             raise ValueError(f"trace {trace_id!r} has conflicting syncmill.run_id values")
