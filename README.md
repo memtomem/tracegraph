@@ -43,6 +43,9 @@ tracegraph presets                   # list cross-trace query patterns
 tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
 tracegraph query tool-retry-failure *.json    # the marquee: same tool retried, then failing
 tracegraph query tool-failure --backend kuzu A.json B.json   # use the optional Cypher accelerator
+
+# export versioned, body-free governance evidence (an empty match set is a valid report)
+tracegraph export-review-candidates tool-retry-failure *.json -o candidates.json
 ```
 
 ```text
@@ -82,6 +85,19 @@ unbounded gap (`UncompilablePattern`) and `KuzuStore` transparently falls back t
 pure-Python matcher — *the accelerator degrades to slower, never to wrong*. The bounded
 `tool-retry-failure-near` variant stays within the cap and runs as native Cypher.
 
+Every shipped preset has a stable `pattern_id` and positive integer `pattern_version`, shown
+as `pattern-id@vN` by `presets` and `query`. Increment the version when match semantics or
+review-export eligibility changes; wording-only description edits keep the current version.
+
+`export-review-candidates` accepts the same artifact-file/directory batches as `query` and
+writes a deterministic schema-v1 envelope. Only presets ending in a failing `TOOL` predicate
+are eligible. The matched endpoint name must already be a qualified `server::tool` key —
+tracegraph never guesses that identity. Each candidate contains only `run_id`, pattern
+id/version, tool key, and the SHA-256 digest of the exact normalized artifact that was queried.
+There are no prompts, outputs, errors, step IDs, trace IDs, or local paths, and the command
+never changes a Toolgraph manifest or policy. The public schema is
+[`contracts/review-candidates.schema.json`](contracts/review-candidates.schema.json).
+
 ## Status
 
 **MVP works** — ingest → inspect / explain / diff on real LangGraph traces.
@@ -92,6 +108,7 @@ pure-Python matcher — *the accelerator degrades to slower, never to wrong*. Th
 - **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. Supports variable-length **gaps** and **back-references** (`same_name_as`), which is what makes the marquee `tool-retry-failure` pattern expressible; uncompilable (unbounded) patterns degrade honestly rather than truncate.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests exported spans (Phoenix/Langfuse/Collector) into the same causal model — the source that actually exercises the raw/derived split.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `KuzuStore` that compiles the **same** `PathPattern` spec to openCypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
+- **Ecosystem T3 (feedback preview producer):** OTLP `syncmill.run_id` correlation, versioned presets, and deterministic body-free `export-review-candidates`; Toolgraph intake and SyncMill board exposure remain separate follow-ups.
 
 Caveats: this is a **checkpoint-level** view (one node per super-step); node names/kinds are
 best-effort display metadata. Subgraph checkpoints are ingested as namespaced steps, but

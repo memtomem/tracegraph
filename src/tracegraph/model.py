@@ -97,6 +97,10 @@ class Trace(BaseModel):
 
     trace_id: str
     source_kind: str = Field(description="Which adapter produced this trace, e.g. 'langgraph'.")
+    run_id: str | None = Field(
+        default=None,
+        description="Optional cross-system run identifier (for example, a SyncMill run_id).",
+    )
     thread_id: str | None = None
     status: StepStatus = StepStatus.OK
 

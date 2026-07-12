@@ -66,6 +66,7 @@ from tracegraph.model import (
 _SPAN_KIND_ATTR = "openinference.span.kind"
 _GRAPH_NODE_ID = "graph.node.id"
 _GRAPH_NODE_PARENT_ID = "graph.node.parent_id"
+_SYNCMILL_RUN_ID = "syncmill.run_id"
 
 #: OpenInference span kinds that map cleanly onto a :class:`StepKind`. Anything else
 #: (EMBEDDING, RERANKER, GUARDRAIL, EVALUATOR, or absent) defaults to ``CHAIN`` — see
@@ -192,6 +193,7 @@ class OTLPSpanAdapter:
         parent_span = self._structural_parents(trace_id, by_id)
         depth = self._depths(parent_span)
         attrs = {sid: _attributes(by_id[sid]) for sid in by_id}
+        run_id = self._run_id(trace_id, attrs)
 
         # prerank is a deterministic *temporal* pre-order (real start time, then span-tree
         # depth and spanId only as tiebreaks). It is used solely to decide which spans
@@ -239,12 +241,33 @@ class OTLPSpanAdapter:
         trace = Trace(
             trace_id=trace_id,
             source_kind=self._source_kind,
+            run_id=run_id,
             thread_id=trace_id,
             status=StepStatus.ERROR if any_error else StepStatus.OK,
         )
         return RawTrace(trace=trace, steps=steps, causal_edges=edges)
 
     # --- helpers ---
+
+    @staticmethod
+    def _run_id(trace_id: str, attrs: dict[str, dict[str, Any]]) -> str | None:
+        """Return one consistent optional SyncMill run id for the trace.
+
+        ``run_id`` is common correlation metadata, not a causal signal.  We retain only this
+        allowlisted value and continue to discard all other vendor attributes.  A partially
+        annotated trace is acceptable, but two different declared values are not.
+        """
+        values: set[str] = set()
+        for span_attrs in attrs.values():
+            if _SYNCMILL_RUN_ID not in span_attrs:
+                continue
+            value = span_attrs[_SYNCMILL_RUN_ID]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"trace {trace_id!r} has an empty or non-string syncmill.run_id")
+            values.add(value)
+        if len(values) > 1:
+            raise ValueError(f"trace {trace_id!r} has conflicting syncmill.run_id values")
+        return next(iter(values), None)
 
     @staticmethod
     def _start_nano(span: dict) -> int:

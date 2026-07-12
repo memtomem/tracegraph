@@ -124,6 +124,14 @@ class PathPattern:
 
     steps: tuple[StepPredicate, ...]
     description: str = ""
+    pattern_id: str | None = None
+    pattern_version: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.pattern_id is None) != (self.pattern_version is None):
+            raise ValueError("pattern_id and pattern_version must be set together")
+        if self.pattern_version is not None and self.pattern_version <= 0:
+            raise ValueError("pattern_version must be a positive integer")
 
     def __str__(self) -> str:
         if not self.steps:
@@ -472,10 +480,14 @@ PRESETS: dict[str, PathPattern] = {
     "error": PathPattern(
         (StepPredicate(status=StepStatus.ERROR),),
         "any step that errored",
+        pattern_id="error",
+        pattern_version=1,
     ),
     "tool-failure": PathPattern(
         (StepPredicate(kind=StepKind.TOOL, status=StepStatus.ERROR),),
         "a tool step that errored",
+        pattern_id="tool-failure",
+        pattern_version=1,
     ),
     "plan-then-tool-failure": PathPattern(
         (
@@ -483,6 +495,8 @@ PRESETS: dict[str, PathPattern] = {
             StepPredicate(kind=StepKind.TOOL, status=StepStatus.ERROR),
         ),
         "a 'plan' step immediately followed (causally) by a failing tool",
+        pattern_id="plan-then-tool-failure",
+        pattern_version=1,
     ),
     # The marquee cross-trace pattern advertised in the README / FEASIBILITY:
     # "tool X → retry → tool X → failure". Predicate 0 binds the first tool's name; predicate 1
@@ -503,6 +517,8 @@ PRESETS: dict[str, PathPattern] = {
         ),
         "the same tool called again (after a retry) and failing — "
         "'tool X → retry → tool X → failure' (any causal distance)",
+        pattern_id="tool-retry-failure",
+        pattern_version=1,
     ),
     # Bounded variant of the marquee: the failing retry within MAX_GAP causal hops of the first
     # call. Identical matches to `tool-retry-failure` for nearby retries, but it compiles to a
@@ -519,5 +535,9 @@ PRESETS: dict[str, PathPattern] = {
         ),
         f"the same tool retried within {MAX_GAP} causal hops and failing "
         "(Cypher-acceleratable form of tool-retry-failure)",
+        pattern_id="tool-retry-failure-near",
+        pattern_version=1,
     ),
 }
+
+assert all(name == pattern.pattern_id for name, pattern in PRESETS.items())

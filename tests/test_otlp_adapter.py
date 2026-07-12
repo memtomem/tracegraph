@@ -28,6 +28,31 @@ def test_discover_lists_distinct_traces():
     assert _adapter().discover() == ["agent-trace-1"]
 
 
+def test_syncmill_run_id_is_preserved_when_consistent():
+    def attr(value):
+        return {"key": "syncmill.run_id", "value": {"stringValue": value}}
+
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "a", "attributes": [attr("run-1")]},
+        {"traceId": "t", "spanId": "b", "parentSpanId": "a", "name": "b",
+         "attributes": [attr("run-1")]},
+    ]}]}]}
+    assert OTLPSpanAdapter(doc).ingest("t").trace.run_id == "run-1"
+
+
+def test_conflicting_syncmill_run_ids_are_rejected():
+    def attr(value):
+        return {"key": "syncmill.run_id", "value": {"stringValue": value}}
+
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "a", "attributes": [attr("run-1")]},
+        {"traceId": "t", "spanId": "b", "parentSpanId": "a", "name": "b",
+         "attributes": [attr("run-2")]},
+    ]}]}]}
+    with pytest.raises(ValueError, match="conflicting syncmill.run_id"):
+        OTLPSpanAdapter(doc).ingest("t")
+
+
 def test_ingest_unknown_trace_raises():
     with pytest.raises(KeyError):
         _adapter().ingest("nope")
