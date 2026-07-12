@@ -451,7 +451,9 @@ def compile_to_cypher(pattern: PathPattern) -> CompiledQuery:
     # endpoint tuple, matching the pure-Python matcher's de-dup. Strict-only patterns can't
     # produce duplicate tuples (no repeated CAUSED_BY edges), so they keep the bare RETURN —
     # preserving the exact compiled string for the existing presets.
-    has_gap = any(p.gap is not None for p in pattern.steps)
+    # A gap belongs to the relationship reaching its predicate. Predicate 0 has no incoming
+    # relationship, so its gap is contractually ignored and must not add a spurious DISTINCT.
+    has_gap = any(p.gap is not None for p in pattern.steps[1:])
     ret = "RETURN DISTINCT " if has_gap else "RETURN "
 
     parts = [f"MATCH {match}"]

@@ -148,3 +148,15 @@ def test_at_cap_bounded_gap_is_accepted():
     )
     q = compile_to_cypher(pattern)
     assert f"*1..{MAX_GAP}" in q.cypher
+
+
+def test_first_predicate_gap_is_ignored_without_spurious_distinct():
+    pattern = PathPattern(
+        (
+            StepPredicate(kind=StepKind.TOOL, gap=(1, None)),
+            StepPredicate(kind=StepKind.TOOL),
+        )
+    )
+    q = compile_to_cypher(pattern)
+    assert "RETURN DISTINCT" not in q.cypher
+    assert "RETURN s0.step_id AS s0, s1.step_id AS s1" in q.cypher
