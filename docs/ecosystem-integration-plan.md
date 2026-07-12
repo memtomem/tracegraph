@@ -126,8 +126,9 @@ span name에는 agent id/phase/인덱스만 허용하고 uuid, timestamp, run_id
 T3 producer는 `run_id`, `pattern_id`/`pattern_version`, qualified `tool_key`, 분석한
 normalized artifact의 `sha256:` digest만 내보낸다. 후보는 사람이 검토할 evidence이며
 SyncMill은 exact tuple을 idempotent `review`/`human-required` board item으로 가져온다.
-import는 strict verdict를 재평가하거나 policy를 바꾸지 않는다. Toolgraph G3는 같은
-UUIDv5를 correlation에만 사용하고 exact report-byte digest에 묶인 별도 sidecar에서
+import는 strict verdict를 재평가하거나 policy를 바꾸지 않는다. Toolgraph G3는
+SyncMill과 마찬가지로 exact candidate tuple에서 같은 UUIDv5를 계산해 correlation에만
+사용하고, exact report-byte digest에 묶인 별도 sidecar에서
 `open`/`accepted`/`dismissed`를 기록한다. Annotation은 SyncMill board, manifest,
 selector, blast radius, preflight 또는 graph state를 바꾸지 않는다. Live qualified-tool
 span과 운영 검토 평가는 별도 후속 작업이다.

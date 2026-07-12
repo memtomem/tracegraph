@@ -113,9 +113,10 @@ qualified MCP tool-call spans, so the cross-repo contract test uses the producer
 normalized retry fixture; live run-to-board telemetry remains separate work.
 
 Toolgraph G3 can independently review the same report with `review-candidates list/annotate`.
-It uses the same exact-tuple UUIDv5 for correlation, but stores dispositions in a separate
-exact-report-digest-bound sidecar. Toolgraph `accepted` neither completes the SyncMill board
-item nor changes a manifest, selector result, blast radius, preflight result, or graph state.
+Like SyncMill, it derives the same UUIDv5 from the exact candidate tuple for correlation,
+but stores dispositions in a separate exact-report-digest-bound sidecar. Toolgraph
+`accepted` neither completes the SyncMill board item nor changes a manifest, selector
+result, blast radius, preflight result, or graph state.
 
 ## Status
 
