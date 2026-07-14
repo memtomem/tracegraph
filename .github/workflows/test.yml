@@ -2,11 +2,11 @@ name: tests
 
 # Locks in the contracts the repo's design hinges on:
 #   - Default install is hermetic — pure Python core works with no optional deps.
-#   - The optional [cypher] extra (Kùzu) installs cleanly and the equivalence
-#     tests (Kùzu vs pure-Python matcher) pass on a fresh runner.
+#   - The optional [cypher] extra (LadybugDB) installs cleanly and the equivalence
+#     tests (LadybugDB vs pure-Python matcher) pass on a fresh runner.
 # A two-job matrix is the minimum that proves both: dropping the base job would
-# let a stray `import kuzu` outside the optional-extra gate go unnoticed; dropping
-# the cypher job would let the Kùzu wheel rot until a user hits it.
+# let a stray `import ladybug` outside the optional-extra gate go unnoticed; dropping
+# the cypher job would let the LadybugDB wheel rot until a user hits it.
 
 on:
   push:
@@ -44,15 +44,15 @@ jobs:
         run: uv sync --locked
 
       # The whole point of this job is to assert the optional-extra gate works.
-      # `pytest.importorskip("kuzu")` skips the cypher tests transparently, so a
-      # transitive dep that quietly pulled kuzu into the default install would
+      # `pytest.importorskip("ladybug")` skips the cypher tests transparently, so a
+      # transitive dep that quietly pulled ladybug into the default install would
       # turn that skip into a run and the gate would silently break. Catch it
       # here, before pytest, with a one-liner that fails loud.
-      - name: Assert kuzu is NOT installed in the default environment
+      - name: Assert ladybug is NOT installed in the default environment
         run: |
           uv run --no-sync python -c "import importlib.util, sys; \
-            spec = importlib.util.find_spec('kuzu'); \
-            sys.exit(0) if spec is None else sys.exit(f'kuzu leaked into the default install at {spec.origin!r}')"
+            spec = importlib.util.find_spec('ladybug'); \
+            sys.exit(0) if spec is None else sys.exit(f'ladybug leaked into the default install at {spec.origin!r}')"
 
       # `--no-sync` so pytest runs against exactly what `uv sync --locked` put
       # in the venv (no re-resolve possible mid-job).
@@ -60,7 +60,7 @@ jobs:
         run: uv run --no-sync pytest -v
 
   cypher:
-    name: with [cypher] extra (Kùzu)
+    name: with [cypher] extra (LadybugDB)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
