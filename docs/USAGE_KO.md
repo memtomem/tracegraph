@@ -181,6 +181,13 @@ trace id를 생략하면 최근 20개 중 가장 최신 실패 trace를 선택�
 `--project`를 사용하고, endpoint와 인증정보는 `px` profile 또는 환경 변수에서
 관리합니다. tracegraph는 API key를 인자로 받거나 출력하지 않습니다.
 
+자동 retry 진단은 upstream producer가 기록한 `retry:` CHAIN marker만 신뢰합니다.
+SyncMill의 명시적 retry telemetry는 이 계약을 기록하지만, 일반 OTLP 또는 LangGraph
+checkpoint producer가 marker를 기록하지 않으면 반복된 tool 호출을 retry로 자동 표시하지
+않습니다. 이 경우 `tracegraph query tool-repeat-failure-heuristic <artifact>`로 추론 신호를
+직접 조회할 수 있습니다. 이 heuristic 결과는 governance review candidate로 내보낼 수
+없습니다.
+
 정상 실행을 명시적으로 비교하려면 baseline trace id를 넘깁니다. 진단 대상은 자동으로
 고를 수 있지만 baseline은 의미가 같은 실행인지 추측하지 않고 항상 명시적으로 받습니다.
 

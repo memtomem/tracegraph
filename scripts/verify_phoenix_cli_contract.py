@@ -19,6 +19,15 @@ TRACE_NEWEST = "a" * 32
 TRACE_FAILED = "b" * 32
 
 
+class _ContractViolation(RuntimeError):
+    """A stable, user-facing Phoenix CLI contract failure."""
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise _ContractViolation(message)
+
+
 def _span(trace_id: str, span_id: str, *, start: str, status: str) -> dict:
     return {
         "context": {"trace_id": trace_id, "span_id": span_id},
@@ -92,31 +101,61 @@ def main(argv: list[str]) -> int:
         "--no-progress",
     ]
     try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip() or "<empty>"
+            raise _ContractViolation(
+                f"launcher exited with status {exc.returncode}; stderr: {stderr}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise _ContractViolation("launcher timed out after 60 seconds") from exc
+        except OSError as exc:
+            raise _ContractViolation(f"could not start launcher: {exc}") from exc
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
-    traces = json.loads(result.stdout)
-    assert isinstance(traces, list) and len(traces) == 2
-    assert [trace.get("traceId") for trace in traces] == [TRACE_NEWEST, TRACE_FAILED]
-    assert [trace.get("status") for trace in traces] == ["OK", "ERROR"]
-    assert all(isinstance(trace.get("spans"), list) and trace["spans"] for trace in traces)
-    assert {path for method, path in _PhoenixHandler.requests if method == "GET"} == {
-        "/v1/projects/a1/spans",
-        "/v1/projects/a1/trace_annotations",
-        "/v1/projects/a1/span_annotations",
-    }
+    try:
+        traces = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise _ContractViolation("launcher stdout was not valid JSON") from exc
+    _require(isinstance(traces, list) and len(traces) == 2, "expected exactly two traces")
+    _require(
+        [trace.get("traceId") for trace in traces] == [TRACE_NEWEST, TRACE_FAILED],
+        "trace ordering or traceId schema changed",
+    )
+    _require(
+        [trace.get("status") for trace in traces] == ["OK", "ERROR"],
+        "trace status schema changed",
+    )
+    _require(
+        all(isinstance(trace.get("spans"), list) and trace["spans"] for trace in traces),
+        "trace spans are missing or empty",
+    )
+    _require(
+        {path for method, path in _PhoenixHandler.requests if method == "GET"}
+        == {
+            "/v1/projects/a1/spans",
+            "/v1/projects/a1/trace_annotations",
+            "/v1/projects/a1/span_annotations",
+        },
+        "Phoenix API request contract changed",
+    )
     print("Phoenix CLI trace-list schema contract passed")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except _ContractViolation as exc:
+        print(f"Phoenix CLI contract failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None

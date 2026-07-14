@@ -525,13 +525,12 @@ def test_presets_lists_patterns():
 
 
 def _write_retry_trace(path, trace_id="RT"):
-    """input → plan → search(ok) → handle → replan → search(error): the marquee retry shape."""
+    """input → plan → search(ok) → explicit retry marker → search(error)."""
     specs = [
         ("input", StepKind.CHAIN, StepStatus.OK),
         ("plan", StepKind.CHAIN, StepStatus.OK),
         ("search", StepKind.TOOL, StepStatus.OK),
-        ("handle", StepKind.CHAIN, StepStatus.OK),
-        ("replan", StepKind.CHAIN, StepStatus.OK),
+        ("retry:search", StepKind.CHAIN, StepStatus.OK),
         ("search", StepKind.TOOL, StepStatus.ERROR),
     ]
     steps, edges = [], []
@@ -550,8 +549,7 @@ def test_presets_lists_marquee_retry_pattern():
     res = runner.invoke(app, ["presets"])
     assert res.exit_code == 0
     assert "tool-retry-failure" in res.output
-    # the readable rendering shows the gap connector and the back-reference
-    assert "gap" in res.output and "name=#0" in res.output
+    assert "retry:" in res.output and "name=#0" in res.output
 
 
 def test_query_marquee_finds_repeated_failing_tool(tmp_path):

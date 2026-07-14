@@ -15,7 +15,12 @@ from tracegraph.analysis import Match, PRESETS, PathPattern, StepPredicate
 from tracegraph.cli import app
 from tracegraph.model import Edge, EdgeType, RawTrace, Step, StepKind, StepStatus, Trace
 from tracegraph.normalize import normalize
-from tracegraph.review_candidates import ReviewCandidateReport, build_report, dumps
+from tracegraph.review_candidates import (
+    ReviewCandidateReport,
+    build_report,
+    dumps,
+    is_review_exportable,
+)
 
 
 runner = CliRunner()
@@ -98,7 +103,9 @@ def test_path_pattern_metadata_is_paired_and_positive():
     with pytest.raises(ValueError, match="positive"):
         PathPattern(step, pattern_id="x", pattern_version=0)
     assert all(name == pattern.pattern_id for name, pattern in PRESETS.items())
-    assert {pattern.pattern_version for pattern in PRESETS.values()} == {1}
+    assert {pattern.pattern_version for pattern in PRESETS.values()} == {1, 2}
+    assert not is_review_exportable(PRESETS["tool-repeat-failure-heuristic"])
+    assert not is_review_exportable(PRESETS["tool-retry-failure-near"])
 
 
 def test_cli_exports_exact_digest_minimal_fields_and_redacts(tmp_path):

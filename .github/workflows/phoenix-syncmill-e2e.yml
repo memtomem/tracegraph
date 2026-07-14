@@ -1,0 +1,100 @@
+name: Phoenix + SyncMill E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      syncmill_ref:
+        description: SyncMill commit, tag, or branch to verify
+        required: false
+        default: main
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  phoenix-syncmill-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SYNCMILL_REF: ${{ inputs.syncmill_ref || 'main' }}
+      PHOENIX_PROJECT: tracegraph-syncmill-e2e
+      HOME: ${{ runner.temp }}/e2e-home
+      XDG_CONFIG_HOME: ${{ runner.temp }}/e2e-xdg/config
+      XDG_CACHE_HOME: ${{ runner.temp }}/e2e-xdg/cache
+      XDG_DATA_HOME: ${{ runner.temp }}/e2e-xdg/data
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out SyncMill
+        uses: actions/checkout@v4
+        with:
+          repository: memtomem/syncmill
+          ref: ${{ env.SYNCMILL_REF }}
+          path: vendor/syncmill
+
+      - name: Record SyncMill revision
+        run: echo "SYNCMILL_SHA=$(git -C vendor/syncmill rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Tracegraph and SyncMill Phoenix exporter
+        run: |
+          uv sync --locked
+          uv sync --project vendor/syncmill --locked --extra phoenix
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pinned Phoenix CLI
+        run: |
+          PX_VERSION=$(jq -r .phoenix_cli contracts/phoenix-runtime.json)
+          echo "PX_VERSION=$PX_VERSION" >> "$GITHUB_ENV"
+          npm install --global "@arizeai/phoenix-cli@$PX_VERSION"
+          test "$(px --version)" = "$PX_VERSION"
+
+      - name: Start pinned Phoenix server
+        run: |
+          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+          IMAGE=$(jq -r '.phoenix_server | "\(.image):\(.version)@\(.digest)"' contracts/phoenix-runtime.json)
+          docker pull "$IMAGE"
+          docker run --detach --rm --name tracegraph-phoenix-e2e \
+            --publish 127.0.0.1::6006 \
+            --env PHOENIX_TELEMETRY_ENABLED=false \
+            --env PHOENIX_ALLOW_EXTERNAL_RESOURCES=false \
+            "$IMAGE"
+          PORT=$(docker port tracegraph-phoenix-e2e 6006/tcp | sed 's/.*://')
+          test -n "$PORT"
+          echo "PHOENIX_ENDPOINT=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+
+      - name: Verify diagnose, diff, and review-candidate flow
+        run: |
+          uv run --no-sync python scripts/verify_phoenix_syncmill_e2e.py \
+            --endpoint "$PHOENIX_ENDPOINT" \
+            --project "$PHOENIX_PROJECT" \
+            --syncmill-dir vendor/syncmill \
+            --syncmill-sha "$SYNCMILL_SHA" \
+            --px-version "$PX_VERSION" \
+            --work-dir "$RUNNER_TEMP/phoenix-syncmill-e2e"
+
+      - name: Upload body-free E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-syncmill-e2e-${{ github.run_id }}
+          path: ${{ runner.temp }}/phoenix-syncmill-e2e/evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop Phoenix server
+        if: always()
+        run: docker rm --force tracegraph-phoenix-e2e >/dev/null 2>&1 || true

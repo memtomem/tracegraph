@@ -30,23 +30,26 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Load Phoenix runtime pins
+        run: echo "PX_VERSION=$(jq -r .phoenix_cli contracts/phoenix-runtime.json)" >> "$GITHUB_ENV"
+
       # Phoenix is an external runtime CLI rather than a Python dependency. Pin the
       # exact package used to verify the read-only flags tracegraph relies on; the
       # runtime floor remains 1.0.4, when trace annotation export became available.
       - name: Verify px read contract
         run: |
           set -euo pipefail
-          test "$(npx --yes @arizeai/phoenix-cli@1.8.1 --version)" = "1.8.1"
-          npx --yes @arizeai/phoenix-cli@1.8.1 trace get --help | grep -F -- '--include-annotations'
-          npx --yes @arizeai/phoenix-cli@1.8.1 trace get --help | grep -F -- '--project'
-          npx --yes @arizeai/phoenix-cli@1.8.1 trace list --help | grep -F -- '--include-annotations'
-          npx --yes @arizeai/phoenix-cli@1.8.1 trace list --help | grep -F -- '--project'
-          npx --yes @arizeai/phoenix-cli@1.8.1 project list --help | grep -F -- '--format'
+          test "$(npx --yes "@arizeai/phoenix-cli@$PX_VERSION" --version)" = "$PX_VERSION"
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace get --help | grep -F -- '--include-annotations'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace get --help | grep -F -- '--project'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace list --help | grep -F -- '--include-annotations'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace list --help | grep -F -- '--project'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" project list --help | grep -F -- '--format'
 
       - name: Verify px trace-list output schema
         run: >-
           python3 scripts/verify_phoenix_cli_contract.py
-          npx --yes @arizeai/phoenix-cli@1.8.1
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION"
 
   base:
     name: pure-python core

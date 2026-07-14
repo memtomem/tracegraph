@@ -103,6 +103,55 @@ def test_success_report_has_no_failures_and_is_deterministic():
     assert analyze(nt).primary_failures == []
 
 
+def test_explicit_retry_marker_is_auto_diagnosed_as_version_two():
+    trace_id = "retry-v2"
+    steps = [
+        Step(
+            step_id=f"{trace_id}-0",
+            trace_id=trace_id,
+            seq=0,
+            name="syncmill::probe",
+            kind=StepKind.TOOL,
+            status=StepStatus.OK,
+        ),
+        Step(
+            step_id=f"{trace_id}-1",
+            trace_id=trace_id,
+            seq=1,
+            name="retry:syncmill::probe",
+            kind=StepKind.CHAIN,
+            status=StepStatus.OK,
+        ),
+        Step(
+            step_id=f"{trace_id}-2",
+            trace_id=trace_id,
+            seq=2,
+            name="syncmill::probe",
+            kind=StepKind.TOOL,
+            status=StepStatus.ERROR,
+        ),
+    ]
+    nt = normalize(
+        RawTrace(
+            trace=Trace(trace_id=trace_id, source_kind="syncmill"),
+            steps=steps,
+            causal_edges=[
+                Edge(type=EdgeType.CAUSED_BY, src=steps[1].step_id, dst=steps[0].step_id),
+                Edge(type=EdgeType.CAUSED_BY, src=steps[2].step_id, dst=steps[1].step_id),
+            ],
+        )
+    )
+
+    retry_findings = [
+        finding
+        for finding in analyze(nt).patterns
+        if finding.pattern_id == "tool-retry-failure"
+    ]
+    assert len(retry_findings) == 1
+    assert retry_findings[0].pattern_version == 2
+    assert retry_findings[0].step_ids == [step.step_id for step in steps]
+
+
 def test_report_matches_public_json_schema():
     root = Path(__file__).parents[1]
     schema = json.loads((root / "contracts" / "analysis-report.schema.json").read_text())

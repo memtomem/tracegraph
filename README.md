@@ -52,7 +52,7 @@ tracegraph phoenix diagnose <trace-id> --save-artifact safe.json --json-out repo
 
 tracegraph presets                   # list cross-trace query patterns
 tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
-tracegraph query tool-retry-failure *.json    # the marquee: same tool retried, then failing
+tracegraph query tool-retry-failure *.json    # explicit retry marker, then same tool failing
 tracegraph query tool-failure --backend ladybug A.json B.json   # use the optional Cypher accelerator
 
 # export versioned, body-free governance evidence (an empty match set is a valid report)
@@ -87,6 +87,12 @@ the raw Phoenix response. Phoenix connection details and credentials remain owne
 profiles or environment variables; tracegraph never accepts an API key option. For an already
 exported file or a shell pipeline:
 
+Automatic retry diagnosis intentionally requires an upstream `retry:` CHAIN marker. SyncMill's
+controlled retry telemetry emits this contract; generic OTLP and LangGraph-checkpoint producers
+that do not emit it will not be labeled as retries automatically. Their repeated-tool signal
+remains available with `tracegraph query tool-repeat-failure-heuristic`, but this inference-only
+preset cannot create governance review candidates.
+
 ```bash
 tracegraph ingest-phoenix --file phoenix-trace.json --out tracegraph.json
 tracegraph analyze phoenix-trace.json --json-out analysis.json
@@ -96,6 +102,12 @@ px trace get <trace-id> --format raw --no-progress | tracegraph analyze -
 Phoenix exports preserve span parents but currently do not expose the original OTLP span
 links. These artifacts are explicitly marked `causal_fidelity=parent_only`; tracegraph warns
 that additional fan-in causes may be missing instead of claiming a complete DAG.
+
+The exact Phoenix CLI and server versions used by CI are centrally pinned. See the
+[Phoenix runtime pin maintenance runbook](docs/phoenix-cli-contract.md) for the controlled
+upgrade and contract-verification procedure, and the
+[Phoenix + SyncMill operational E2E runbook](docs/phoenix-syncmill-e2e.md) for the scheduled
+real-server verification boundary.
 
 The default `safe-v1` privacy contract retains structural IDs, identifier-shaped operation names,
 kind/status/time, tokens, explicit cost, and annotation name/label/score. It drops prompts,
@@ -195,7 +207,7 @@ result, blast radius, preflight result, or graph state.
 - **Phase 0 (frozen contract):** `RawTrace` vs `NormalizedTrace`, portable JSON artifact (system of record), `validate_raw` → projection → `validate_tree`/`validate_normalized`, in-memory store, `explain`.
 - **Phase 1 (ingestion):** `LangGraphCheckpointAdapter` reads any `BaseCheckpointSaver`, including subgraph checkpoint namespaces, and reconstructs declared checkpoint parentage; `examples/tiny_agent.py` generates real traces.
 - **Phase 2 (analysis + CLI):** AHU rooted-tree diff and the Typer CLI.
-- **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. Supports variable-length **gaps** and **back-references** (`same_name_as`), which is what makes the marquee `tool-retry-failure` pattern expressible; uncompilable (unbounded) patterns degrade honestly rather than truncate.
+- **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. The official `tool-retry-failure@v2` requires an explicit producer marker; variable-length **gaps** and **back-references** (`same_name_as`) remain available for query-only heuristics. Uncompilable unbounded patterns degrade honestly rather than truncate.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests Collector JSON/JSONL spans into the same causal model — the source that exercises full link-preserving raw/derived causality.
 - **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
