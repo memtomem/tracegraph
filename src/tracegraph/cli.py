@@ -1,14 +1,14 @@
-"""``tracegraph`` command line — the demo-able surface: ingest / inspect / explain / diff.
+"""``tracegraph`` command line for checkpoint, Phoenix, and OTLP causal analysis.
 
-This is a **checkpoint-level** view of a LangGraph thread: one node per super-step
-checkpoint. Node names/kinds are best-effort display metadata (recovered heuristically from
-the checkpoint stream), not an authoritative node-execution trace.
+LangGraph checkpoint ingestion is a super-step view; Phoenix/OTLP ingestion is span-level.
+Every source is normalized into the same raw causal DAG plus derived structural tree.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -23,6 +23,9 @@ from rich.tree import Tree
 from tracegraph import artifact
 from tracegraph.adapters import LangGraphCheckpointAdapter
 from tracegraph.analysis import PRESETS
+from tracegraph.analysis.diagnose import AnalysisReport
+from tracegraph.analysis.diagnose import analyze as build_analysis
+from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
 from tracegraph.analysis import Match
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
@@ -36,17 +39,22 @@ from tracegraph.review_candidates import save_atomic as save_candidate_report
 from tracegraph.store import InMemoryStore
 
 app = typer.Typer(
-    help="Causal-graph analysis of LangGraph agent traces (checkpoint-level view).",
+    help="Causal-graph analysis of LangGraph, Phoenix, and OpenInference traces.",
     no_args_is_help=True,
     add_completion=False,
 )
+phoenix_app = typer.Typer(
+    help="Read-only Phoenix CLI integration for body-free diagnosis.",
+    no_args_is_help=True,
+)
+app.add_typer(phoenix_app, name="phoenix")
 console = Console()
 err_console = Console(stderr=True)  # diagnostics (warnings) — keep them off result stdout
 
 
 class QueryBackend(str, Enum):
     MEMORY = "memory"
-    KUZU = "kuzu"
+    LADYBUG = "ladybug"
 
 
 # Exceptions that mean "this file isn't a usable tracegraph artifact" (bad path, non-JSON,
@@ -88,6 +96,230 @@ def _load_validated(path: Path) -> NormalizedTrace:
     nt = artifact.load(path)
     validate_normalized(nt)
     return nt
+
+
+def _read_source(source: str) -> str:
+    if source == "-":
+        return typer.get_text_stream("stdin").read()
+    return Path(source).read_text(encoding="utf-8")
+
+
+def _load_analysis_source(source: str, trace_id: str | None = None) -> NormalizedTrace:
+    """Strictly identify a tracegraph artifact or Phoenix CLI trace export."""
+    try:
+        text = _read_source(source)
+        payload = json.loads(text)
+        if isinstance(payload, dict) and "schema_version" in payload:
+            nt = artifact.loads(text)
+        else:
+            from tracegraph.adapters import PhoenixExportAdapter
+
+            adapter = PhoenixExportAdapter(payload)
+            ids = adapter.discover()
+            selected = trace_id
+            if selected is None:
+                if len(ids) != 1:
+                    raise ValueError(
+                        f"Phoenix export holds {len(ids)} traces; pass --trace. "
+                        f"Found: {', '.join(ids) or 'none'}"
+                    )
+                selected = ids[0]
+            nt = normalize(adapter.ingest(selected))
+        validate_normalized(nt)
+        return nt
+    except (*_LOAD_ERRORS, KeyError) as exc:
+        raise typer.BadParameter(f"cannot load analysis input {source}: {_load_reason(exc)}") from exc
+
+
+def _px_trace(trace_id: str) -> NormalizedTrace:
+    """Read one trace through the official px CLI without persisting its raw body."""
+    command = [
+        "px",
+        "trace",
+        "get",
+        trace_id,
+        "--format",
+        "raw",
+        "--no-progress",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError as exc:
+        raise typer.BadParameter(
+            "Phoenix CLI `px` was not found; install/configure @arizeai/phoenix-cli first"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise typer.BadParameter("px trace get timed out after 60 seconds") from exc
+    except subprocess.CalledProcessError as exc:
+        raise typer.BadParameter(
+            f"px trace get failed with exit {exc.returncode}; verify Phoenix endpoint and authentication"
+        ) from exc
+    try:
+        payload = json.loads(result.stdout)
+        # `trace get` has no annotation flag. Fetch the same trace's annotated spans through
+        # the documented read-only span command and merge only annotation objects by span id.
+        try:
+            annotated = subprocess.run(
+                [
+                    "px",
+                    "span",
+                    "list",
+                    "--trace-id",
+                    trace_id,
+                    "--limit",
+                    "10000",
+                    "--include-annotations",
+                    "--format",
+                    "raw",
+                    "--no-progress",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            span_payload = json.loads(annotated.stdout)
+            annotated_spans = span_payload if isinstance(span_payload, list) else []
+            if len(annotated_spans) >= 10_000:
+                err_console.print(
+                    "[yellow]⚠ Phoenix annotation lookup reached the 10,000-span limit; "
+                    "evaluation evidence may be incomplete.[/]"
+                )
+            annotations_by_id = {
+                (item.get("context") or {}).get("span_id") or item.get("id"): item.get("annotations")
+                for item in annotated_spans
+                if isinstance(item, dict) and item.get("annotations")
+            }
+            for span in payload.get("spans", []) if isinstance(payload, dict) else []:
+                span_id = (span.get("context") or {}).get("span_id") or span.get("id")
+                if span_id in annotations_by_id:
+                    span["annotations"] = annotations_by_id[span_id]
+        except (
+            FileNotFoundError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            json.JSONDecodeError,
+            ValueError,
+        ):
+            # Annotations are optional evidence. The trace itself remains diagnosable and
+            # missing evaluations are rendered as unavailable, never as zero/pass.
+            pass
+
+        from tracegraph.adapters import PhoenixExportAdapter
+
+        adapter = PhoenixExportAdapter(payload)
+        return normalize(adapter.ingest(trace_id))
+    except (ValueError, json.JSONDecodeError, KeyError) as exc:
+        raise typer.BadParameter(
+            f"px returned an unsupported or incomplete trace export: {_load_reason(exc)}"
+        ) from exc
+
+
+def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
+    status_style = "red" if report.status == StepStatus.ERROR.value else "green"
+    console.print(
+        f"[bold {status_style}]{escape(report.trace_id)}[/]  "
+        f"{report.step_count} steps · {report.error_count} error"
+    )
+
+    console.print("\n[bold]What failed[/]")
+    if not report.primary_failures:
+        console.print("  [green]No error step found.[/]")
+    for finding in report.primary_failures[:limit]:
+        step = finding.step
+        console.print(f"  [red]✗[/] {escape(step.name or step.kind)} ({step.kind}, step {step.seq})")
+        shown = {item.step_id: item.name or item.kind for item in finding.causal_steps}
+        shown[step.step_id] = step.name or step.kind
+        for edge in finding.causal_edges:
+            origin = f" [{edge.origin}]" if edge.origin else ""
+            console.print(
+                f"    {escape(shown.get(edge.cause, edge.cause))} → "
+                f"{escape(shown.get(edge.effect, edge.effect))}[dim]{escape(origin)}[/]"
+            )
+    remaining = len(report.primary_failures) - limit
+    if remaining > 0:
+        console.print(f"  [dim]… {remaining} more primary failure(s) in JSON report[/]")
+    if report.propagated_failures:
+        names = ", ".join(escape(item.name or item.kind) for item in report.propagated_failures)
+        console.print(f"  [dim]propagated/context errors: {names}[/]")
+
+    console.print("\n[bold]Repeated behavior[/]")
+    if report.patterns:
+        for finding in report.patterns:
+            labels = " → ".join(escape(label or "(unnamed)") for label in finding.labels)
+            console.print(f"  • {finding.pattern_id}@v{finding.pattern_version}: {labels}")
+    else:
+        console.print("  [dim]No high-signal failure pattern found.[/]")
+
+    metrics = report.metrics
+    console.print("\n[bold]Telemetry[/]")
+    console.print(
+        "  wall="
+        + (f"{metrics.wall_duration_ms:g} ms" if metrics.wall_duration_ms is not None else "unavailable")
+        + " · tokens="
+        + (str(metrics.total_tokens) if metrics.total_tokens is not None else "unavailable")
+        + " · cost="
+        + (
+            f"{metrics.total_cost} {metrics.cost_currency or ''}".rstrip()
+            if metrics.total_cost is not None
+            else "unavailable"
+        )
+    )
+    for evaluation in metrics.evaluations:
+        console.print(
+            f"  eval {escape(evaluation.name)}: "
+            f"label={escape(evaluation.label or 'unavailable')} "
+            f"score={evaluation.score if evaluation.score is not None else 'unavailable'}"
+        )
+
+    if report.decision_evidence:
+        console.print("\n[bold]External decision evidence[/]")
+        for item in report.decision_evidence:
+            console.print(
+                f"  {escape(item.source)} · verdict={escape(item.verdict)} · "
+                f"generation={item.graph_generation} · "
+                f"artifact={escape(item.artifact_digest)}"
+            )
+
+    if report.comparison:
+        comparison = report.comparison
+        console.print("\n[bold]Compared with baseline[/]")
+        topology = "identical" if comparison.topology_identical else "changed"
+        console.print(f"  topology: {topology}")
+        for change in comparison.behavior_changes:
+            console.print(
+                f"  • {escape(change.name or change.logical_step_key)}: "
+                f"{change.before or 'missing'} → {change.after or 'missing'}"
+            )
+        deltas = ", ".join(
+            f"{key}={value:+}" for key, value in comparison.pattern_count_deltas.items() if value
+        )
+        if deltas:
+            console.print(f"  pattern deltas: {deltas}")
+
+    console.print("\n[bold]Data fidelity / privacy[/]")
+    console.print(
+        f"  {report.causal_fidelity} · links_preserved={report.links_preserved} · "
+        f"privacy={report.privacy_profile}"
+    )
+    for warning in report.warnings:
+        console.print(f"  [yellow]⚠ {escape(warning)}[/]")
+
+
+def _artifact_files(paths: list[Path]) -> list[Path]:
+    """Expand files and directories (``*.json``) into artifact paths."""
+    files: list[Path] = []
+    for path in paths:
+        files.extend(sorted(path.glob("*.json")) if path.is_dir() else [path])
+    if not files:
+        raise typer.BadParameter("no artifact files found")
+    return files
 
 
 @dataclass(frozen=True)
@@ -209,18 +441,18 @@ def _store_cls(backend: QueryBackend) -> type[Any]:
     if backend is QueryBackend.MEMORY:
         return InMemoryStore
     try:
-        from tracegraph.store.kuzu import KuzuStore
+        from tracegraph.store.ladybug import LadybugStore
     except ModuleNotFoundError as exc:
-        if exc.name != "kuzu":
+        if exc.name != "ladybug":
             raise
         raise typer.BadParameter(
-            "--backend kuzu requires the optional tracegraph[cypher] dependency"
+            "--backend ladybug requires the optional tracegraph[cypher] dependency"
         ) from exc
-    return KuzuStore
+    return LadybugStore
 
 
 def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
-    # _store_cls may raise its own clean BadParameter (missing kuzu) — keep it outside the
+    # _store_cls may raise its own clean BadParameter (missing ladybug) — keep it outside the
     # try so we only translate *load* failures, not backend-selection ones.
     cls = _store_cls(backend)
     try:
@@ -253,12 +485,12 @@ def _search_with_backend(
             matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
         fell_back = fell_back or getattr(store, "fell_back_to_python", False)
     if fell_back:
-        # Honesty signal (off result stdout): the kuzu accelerator couldn't compile this
-        # pattern under Kùzu's 30-hop cap and ran the pure-Python matcher instead. Results
+        # Honesty signal (off result stdout): the ladybug accelerator couldn't compile this
+        # pattern under LadybugDB's 30-hop cap and ran the pure-Python matcher instead. Results
         # are identical — this just tells the user the accelerator deferred.
         err_console.print(
             "[dim]⚠ pattern not Cypher-compilable (unbounded gap); ran the pure-Python "
-            "matcher over the raw causal graph — results are identical to --backend kuzu's.[/]"
+            "matcher over the raw causal graph — results are identical to --backend ladybug's.[/]"
         )
     return matches, stores
 
@@ -318,13 +550,13 @@ def ingest(
     with SqliteSaver.from_conn_string(str(sqlite)) as saver:
         raw = LangGraphCheckpointAdapter(saver, error_channel=error_channel).ingest(thread)
     nt = normalize(raw)
-    artifact.save(nt, target)
+    artifact.save_atomic(nt, target)
     console.print(f"[green]ingested {len(nt.steps)} steps[/] → {target}")
 
 
 @app.command(name="ingest-otlp")
 def ingest_otlp(
-    file: Path = typer.Option(..., "--file", "-f", help="OTLP/JSON span export (resourceSpans)."),
+    file: Path = typer.Option(..., "--file", "-f", help="OTLP JSON/JSONL span export (resourceSpans)."),
     trace: str = typer.Option(None, "--trace", "-t", help="traceId to ingest (default: the file's only trace)."),
     out: Path = typer.Option(None, "--out", "-o", help="Artifact path (default <traceId>.json)."),
 ) -> None:
@@ -341,14 +573,97 @@ def ingest_otlp(
         trace = ids[0]
     nt = normalize(adapter.ingest(trace))
     target = out or Path(f"{trace}.json")
-    artifact.save(nt, target)
+    artifact.save_atomic(nt, target)
     console.print(f"[green]ingested {len(nt.steps)} spans[/] → {target}")
+
+
+@app.command(name="ingest-phoenix")
+def ingest_phoenix(
+    file: str = typer.Option(..., "--file", "-f", help="Phoenix CLI trace JSON or '-' for stdin."),
+    trace: str = typer.Option(None, "--trace", "-t", help="traceId (required for multi-trace exports)."),
+    out: Path = typer.Option(None, "--out", "-o", help="Body-free artifact path."),
+) -> None:
+    """Ingest one Phoenix CLI trace export into a body-free portable artifact."""
+    nt = _load_analysis_source(file, trace)
+    if nt.trace.source_kind != "phoenix_cli":
+        raise typer.BadParameter("--file must contain a Phoenix CLI trace export")
+    target = out or Path(f"{nt.trace.trace_id}.json")
+    artifact.save_atomic(nt, target)
+    console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {target}")
+
+
+@app.command(name="analyze")
+def analyze_command(
+    source: str = typer.Argument(..., help="Tracegraph artifact, Phoenix export, or '-' for stdin."),
+    trace: str = typer.Option(None, "--trace", "-t", help="Trace id for a multi-trace Phoenix input."),
+    baseline: str = typer.Option(None, "--baseline", help="Explicit artifact/Phoenix baseline."),
+    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace baseline."),
+    json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
+    limit: int = typer.Option(3, "--limit", "-l", help="Primary failures rendered in the terminal."),
+) -> None:
+    """Automatically diagnose failures, retries, telemetry, and an optional baseline."""
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be a positive integer")
+    nt = _load_analysis_source(source, trace)
+    baseline_nt = _load_analysis_source(baseline, baseline_trace) if baseline else None
+    report = build_analysis(nt, baseline=baseline_nt)
+    _render_analysis(report, limit=limit)
+    if json_out:
+        save_analysis_report(report, json_out)
+        console.print(f"\n[green]report[/] → {json_out}")
+
+
+@phoenix_app.command(name="diagnose")
+def phoenix_diagnose(
+    trace_id: str = typer.Argument(..., help="Phoenix trace id."),
+    baseline: str = typer.Option(None, "--baseline", help="Explicit Phoenix baseline trace id."),
+    save_artifact: Path = typer.Option(None, "--save-artifact", help="Save the body-free artifact."),
+    json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
+    limit: int = typer.Option(3, "--limit", "-l", help="Primary failures rendered in the terminal."),
+) -> None:
+    """Fetch through `px trace get` and diagnose without storing the raw export."""
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be a positive integer")
+    nt = _px_trace(trace_id)
+    baseline_nt = _px_trace(baseline) if baseline else None
+    report = build_analysis(nt, baseline=baseline_nt)
+    _render_analysis(report, limit=limit)
+    if save_artifact:
+        artifact.save_atomic(nt, save_artifact)
+        console.print(f"\n[green]artifact[/] → {save_artifact}")
+    if json_out:
+        save_analysis_report(report, json_out)
+        console.print(f"[green]report[/] → {json_out}")
 
 
 @app.command()
 def inspect(artifact_path: Path = typer.Argument(..., help="Artifact JSON from `ingest`.")) -> None:
     """Render a trace's derived causal tree."""
     _render_tree(_load(artifact_path))
+
+
+@app.command()
+def validate(
+    artifacts: list[Path] = typer.Argument(..., help="Artifact JSON files and/or directories."),
+) -> None:
+    """Validate artifacts against the canonical schema and causal-graph contract."""
+    files = _artifact_files(artifacts)
+    failures = 0
+    for path in files:
+        try:
+            nt = _load(path)
+        except Exception as exc:
+            failures += 1
+            console.print(f"[bold red]INVALID[/] {path}: {exc}")
+            continue
+        console.print(
+            f"[green]OK[/] {path}  [dim]{nt.trace.trace_id} · {len(nt.steps)} steps[/]"
+        )
+
+    if failures:
+        console.print(f"\n[bold red]{failures} invalid artifact(s)[/]")
+        raise typer.Exit(1)
+    console.print(f"\n[green]{len(files)} artifact(s) valid[/]")
 
 
 @app.command()

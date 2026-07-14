@@ -3,8 +3,8 @@
 Causal-graph analysis of LangGraph agent traces — *time-travel debugging and
 root-cause analysis on a causal graph.*
 
-tracegraph ingests agent execution traces that already exist (LangGraph checkpoint
-history and OpenInference/OTLP spans) into a **normalized causal graph**,
+tracegraph ingests agent execution traces that already exist (LangGraph checkpoint,
+Phoenix CLI exports, and OpenInference/OTLP spans) into a **normalized causal graph**,
 then runs analyses the mainstream observability tools don't:
 
 - **`explain`** — walk backward from a failure over the *raw* causal graph to every real cause.
@@ -13,7 +13,8 @@ then runs analyses the mainstream observability tools don't:
 
 It is **not** a checkpointer — a graph-backed `BaseCheckpointSaver` already exists.
 tracegraph is the read-path *analysis* layer. See [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md)
-for the full rationale and competitive landscape.
+for the full rationale and competitive landscape. Korean readers can start with
+[`docs/USAGE_KO.md`](docs/USAGE_KO.md).
 
 ## Design commitment: causality is never faked
 
@@ -38,15 +39,72 @@ tracegraph ingest --sqlite trace.db --thread B -o B.json
 tracegraph inspect A.json            # render the causal tree (errors in red)
 tracegraph explain A.json <step_id>  # raw causal chain back to the root cause
 tracegraph diff A.json B.json        # structural regression diff (AHU isomorphism)
+tracegraph validate A.json traces/   # validate artifacts before CI/query jobs
+tracegraph analyze A.json            # automatically select and explain failures
+
+# Phoenix: one command after configuring the official `px` CLI
+tracegraph phoenix diagnose <trace-id>
+# save only the body-free normalized evidence/report when needed
+tracegraph phoenix diagnose <trace-id> --save-artifact safe.json --json-out report.json
 
 tracegraph presets                   # list cross-trace query patterns
 tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
 tracegraph query tool-retry-failure *.json    # the marquee: same tool retried, then failing
-tracegraph query tool-failure --backend kuzu A.json B.json   # use the optional Cypher accelerator
+tracegraph query tool-failure --backend ladybug A.json B.json   # use the optional Cypher accelerator
 
 # export versioned, body-free governance evidence (an empty match set is a valid report)
 tracegraph export-review-candidates tool-retry-failure *.json -o candidates.json
 ```
+
+## Phoenix-first workflow
+
+Phoenix remains the trace UI, evaluation, and operational-observability layer. tracegraph
+adds deterministic causal diagnosis, retry-pattern detection, and baseline regression analysis
+without copying prompt or output bodies into its artifacts.
+
+Instrument LangGraph with the official OpenInference integration and configure the Phoenix
+CLI as described in the [Phoenix LangGraph guide](https://arize.com/docs/phoenix/integrations/python/langgraph/langgraph-tracing)
+and [Phoenix CLI reference](https://arize.com/docs/phoenix/sdk-api-reference/typescript/arizeai-phoenix-cli).
+With `px` on `PATH`, diagnose a trace directly:
+
+```bash
+tracegraph phoenix diagnose <trace-id>
+tracegraph phoenix diagnose <trace-id> --baseline <known-good-trace-id>
+```
+
+The command invokes the read-only `px trace get` export, analyzes it in memory, and does not
+persist the raw Phoenix response. For an already exported file or a shell pipeline:
+
+```bash
+tracegraph ingest-phoenix --file phoenix-trace.json --out tracegraph.json
+tracegraph analyze phoenix-trace.json --json-out analysis.json
+px trace get <trace-id> --format raw --no-progress | tracegraph analyze -
+```
+
+Phoenix exports preserve span parents but currently do not expose the original OTLP span
+links. These artifacts are explicitly marked `causal_fidelity=parent_only`; tracegraph warns
+that additional fan-in causes may be missing instead of claiming a complete DAG.
+
+The default `safe-v1` privacy contract retains structural IDs, identifier-shaped operation names,
+kind/status/time, tokens, explicit cost, and annotation name/label/score. It drops prompts,
+inputs/outputs, messages, tool arguments/results, retrieved documents, arbitrary metadata,
+raw errors and stacktraces, annotation explanations, session/user/project identifiers, and
+credentials. Missing metrics are reported as `unavailable`, never as zero.
+
+For link-preserving analysis, use the optional Collector fan-out example at
+[`examples/otel-collector-phoenix-tracegraph.yaml`](examples/otel-collector-phoenix-tracegraph.yaml).
+It sends the normal stream to Phoenix and an allowlisted JSONL copy to tracegraph. Then run:
+
+```bash
+tracegraph ingest-otlp --file /tmp/tracegraph-otlp.jsonl --trace <trace-id> -o full-dag.json
+tracegraph analyze full-dag.json
+```
+
+The JSON analysis-report contract is versioned at
+[`contracts/analysis-report.schema.json`](contracts/analysis-report.schema.json).
+Schema v2 can also carry body-free Toolgraph preflight evidence: an exact SHA-256 artifact
+digest, non-negative graph generation, and bounded verdict. This is trace metadata, never a
+`CAUSED_BY` edge.
 
 ```text
 $ tracegraph inspect A.json
@@ -79,9 +137,9 @@ tagline. It needs three things a flat predicate list can't express, all added to
 *same* tool X both times"), a **variable-length gap** (`gap=(lo, hi)`, "→ retry →" = some
 intervening steps), and **de-duplication** of fan-in paths. The gap is *unbounded* by default,
 because real traces are deep and a retry can be many super-steps later — so the pure-Python
-matcher (the system of record) catches it at any distance. Kùzu's openCypher backend hard-caps
+matcher (the system of record) catches it at any distance. LadybugDB's Cypher backend hard-caps
 variable-length hops at 30, so rather than silently truncate, `compile_to_cypher` refuses an
-unbounded gap (`UncompilablePattern`) and `KuzuStore` transparently falls back to the
+unbounded gap (`UncompilablePattern`) and `LadybugStore` transparently falls back to the
 pure-Python matcher — *the accelerator degrades to slower, never to wrong*. The bounded
 `tool-retry-failure-near` variant stays within the cap and runs as native Cypher.
 
@@ -120,31 +178,33 @@ result, blast radius, preflight result, or graph state.
 
 ## Status
 
-**MVP works** — ingest → inspect / explain / diff on real LangGraph traces.
+**MVP works** — LangGraph/Phoenix/OTLP ingest plus inspect, explain, analyze, diff, and query.
 
 - **Phase 0 (frozen contract):** `RawTrace` vs `NormalizedTrace`, portable JSON artifact (system of record), `validate_raw` → projection → `validate_tree`/`validate_normalized`, in-memory store, `explain`.
 - **Phase 1 (ingestion):** `LangGraphCheckpointAdapter` reads any `BaseCheckpointSaver`, including subgraph checkpoint namespaces, and reconstructs declared checkpoint parentage; `examples/tiny_agent.py` generates real traces.
 - **Phase 2 (analysis + CLI):** AHU rooted-tree diff and the Typer CLI.
 - **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. Supports variable-length **gaps** and **back-references** (`same_name_as`), which is what makes the marquee `tool-retry-failure` pattern expressible; uncompilable (unbounded) patterns degrade honestly rather than truncate.
-- **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests exported spans (Phoenix/Langfuse/Collector) into the same causal model — the source that actually exercises the raw/derived split.
-- **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `KuzuStore` that compiles the **same** `PathPattern` spec to openCypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
+- **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests Collector JSON/JSONL spans into the same causal model — the source that exercises full link-preserving raw/derived causality.
+- **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
+- **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
 - **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, and Toolgraph G3 artifact annotation are complete; live qualified-tool spans and operating review evaluation remain follow-ups.
+- **SyncMill contract completion:** route/pipeline/compete/council/decompose plus cancellation fixtures, stable span naming, body-free artifact digests, fail-open exporter reference behavior, operational failure presets, and non-causal Toolgraph preflight evidence are covered by executable tests.
 
-Caveats: this is a **checkpoint-level** view (one node per super-step); node names/kinds are
-best-effort display metadata. Subgraph checkpoints are ingested as namespaced steps, but
-cross-namespace causality is limited to parent links declared by LangGraph checkpoint
-metadata.
+Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
+super-step), and node names/kinds are best-effort metadata. Phoenix/OTLP adapters are
+span-level. Subgraph checkpoints are namespaced, but cross-namespace causality remains
+limited to parent links declared by LangGraph checkpoint metadata.
 
 ## Develop
 
 ```bash
 uv sync                    # core only
-uv sync --extra cypher     # include the optional Kùzu backend
+uv sync --extra cypher     # include the optional LadybugDB backend
 uv run pytest              # headless
 ```
 
-The optional Cypher accelerator (`tracegraph[cypher]`, Kùzu) is **not** required for the
-core; `explain` and `query` can opt into it with `--backend kuzu`. Its tests are marked
-`@pytest.mark.cypher` and skip cleanly without the extra. Kùzu is pinned because its
-upstream was archived in Oct 2025 — the embedded format isn't load-bearing here (the JSON
-artifact is).
+The optional Cypher accelerator (`tracegraph[cypher]`, LadybugDB) is **not** required for the
+core; `explain` and `query` can opt into it with `--backend ladybug`. Its tests are marked
+`@pytest.mark.cypher` and skip cleanly without the extra. The tested LadybugDB compatibility
+range is declared in `pyproject.toml`; its embedded cache format is not load-bearing because
+the portable JSON artifact remains authoritative and can rebuild the cache.

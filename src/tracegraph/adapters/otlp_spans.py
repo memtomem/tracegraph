@@ -1,8 +1,8 @@
 """Ingest OpenInference / OTLP spans into a :class:`RawTrace`.
 
 Parses an exported OTLP trace document (the protobuf-JSON shape with
-``resourceSpans[].scopeSpans[].spans[]`` emitted by Arize Phoenix, Langfuse, the
-OpenTelemetry Collector, etc.) and reconstructs one trace's *raw* causal graph. One span
+``resourceSpans[].scopeSpans[].spans[]`` emitted by the OpenTelemetry Collector or another
+OTLP source) and reconstructs one trace's *raw* causal graph. One span
 becomes one :class:`Step`; causal edges (``CAUSED_BY``, effect → cause) come from two
 **declared** signals only — never from inferred sibling order:
 
@@ -49,14 +49,21 @@ from __future__ import annotations
 import heapq
 import json
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+import re
 from typing import Any, Iterator
 
 from tracegraph.model import (
+    CausalFidelity,
+    DecisionEvidence,
     Edge,
+    EdgeOrigin,
     EdgeType,
+    EvaluationSummary,
     RawTrace,
     Step,
+    StepEvidence,
     StepKind,
     StepSource,
     StepStatus,
@@ -67,6 +74,9 @@ _SPAN_KIND_ATTR = "openinference.span.kind"
 _GRAPH_NODE_ID = "graph.node.id"
 _GRAPH_NODE_PARENT_ID = "graph.node.parent_id"
 _SYNCMILL_RUN_ID = "syncmill.run_id"
+_TOOLGRAPH_PREFLIGHT_DIGEST = "toolgraph.preflight.artifact_digest"
+_TOOLGRAPH_GRAPH_GENERATION = "toolgraph.graph_generation"
+_TOOLGRAPH_PREFLIGHT_VERDICT = "toolgraph.preflight.verdict"
 
 #: OpenInference span kinds that map cleanly onto a :class:`StepKind`. Anything else
 #: (EMBEDDING, RERANKER, GUARDRAIL, EVALUATOR, or absent) defaults to ``CHAIN`` — see
@@ -77,6 +87,12 @@ _KIND_MAP = {
     "TOOL": StepKind.TOOL,
     "LLM": StepKind.LLM,
     "RETRIEVER": StepKind.RETRIEVER,
+    "EMBEDDING": StepKind.EMBEDDING,
+    "RERANKER": StepKind.RERANKER,
+    "GUARDRAIL": StepKind.GUARDRAIL,
+    "EVALUATOR": StepKind.EVALUATOR,
+    "PROMPT": StepKind.PROMPT,
+    "UNKNOWN": StepKind.UNKNOWN,
 }
 
 _ERROR_CODES = {2, "STATUS_CODE_ERROR", "ERROR"}
@@ -110,8 +126,11 @@ def _attr_value(v: Any) -> Any:
 
 
 def _attributes(span: dict) -> dict[str, Any]:
+    raw = span.get("attributes") or []
+    if isinstance(raw, dict):
+        return dict(raw)
     out: dict[str, Any] = {}
-    for a in span.get("attributes") or []:
+    for a in raw:
         key = a.get("key")
         if key is not None:
             out[key] = _attr_value(a.get("value"))
@@ -138,9 +157,13 @@ def _exception_message(span: dict) -> str | None:
 
 def _status(span: dict) -> tuple[StepStatus, str | None]:
     st = span.get("status") or {}
-    if st.get("code") not in _ERROR_CODES:
-        return StepStatus.OK, None
-    return StepStatus.ERROR, st.get("message") or _exception_message(span) or "error"
+    code = st.get("code")
+    exception = _exception_message(span)
+    if code in _ERROR_CODES or exception is not None:
+        return StepStatus.ERROR, st.get("message") or exception or "error"
+    if code in (0, "STATUS_CODE_UNSET", "UNSET", None):
+        return StepStatus.UNSET, None
+    return StepStatus.OK, None
 
 
 def _iso_ts(start_nano: Any) -> str | None:
@@ -149,6 +172,87 @@ def _iso_ts(start_nano: Any) -> str | None:
     except (TypeError, ValueError):
         return None
     return datetime.fromtimestamp(nanos / 1e9, tz=timezone.utc).isoformat()
+
+
+def _int_attr(attrs: dict[str, Any], *names: str) -> int | None:
+    for name in names:
+        value = attrs.get(name)
+        if value is None:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed < 0 or (isinstance(value, float) and not value.is_integer()):
+            continue
+        return parsed
+    return None
+
+
+def _decimal_attr(attrs: dict[str, Any], *names: str) -> str | None:
+    for name in names:
+        value = attrs.get(name)
+        if value is None or not isinstance(value, (int, float, str)):
+            continue
+        try:
+            parsed = Decimal(str(value))
+        except InvalidOperation:
+            continue
+        if parsed.is_finite() and parsed >= 0:
+            return format(parsed, "f")
+    return None
+
+
+def _currency_attr(attrs: dict[str, Any]) -> str | None:
+    value = attrs.get("llm.cost.currency")
+    if not isinstance(value, str):
+        return None
+    normalized = value.upper()
+    return normalized if re.fullmatch(r"[A-Z]{3,8}", normalized) else None
+
+
+def _digest_attr(attrs: dict[str, Any], name: str) -> str | None:
+    value = attrs.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"{name} must be a lowercase sha256 digest")
+    return value
+
+
+def _evidence(span: dict, attrs: dict[str, Any]) -> StepEvidence | None:
+    start = _first(span, "startTimeUnixNano", "start_time_unix_nano")
+    end = _first(span, "endTimeUnixNano", "end_time_unix_nano")
+    duration_ms: float | None = None
+    try:
+        if start is not None and end is not None:
+            duration_ms = round((int(end) - int(start)) / 1_000_000, 6)
+    except (TypeError, ValueError):
+        duration_ms = None
+
+    evaluations = [
+        EvaluationSummary.model_validate(item)
+        for item in span.get("_tracegraph_evaluations", [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    evaluations.sort(key=lambda item: (item.name, item.label or "", item.score or 0.0))
+    evidence = StepEvidence(
+        end_ts=_iso_ts(end),
+        duration_ms=duration_ms,
+        prompt_tokens=_int_attr(attrs, "llm.token_count.prompt", "llm.token_count.input"),
+        completion_tokens=_int_attr(
+            attrs, "llm.token_count.completion", "llm.token_count.output"
+        ),
+        total_tokens=_int_attr(attrs, "llm.token_count.total"),
+        prompt_cost=_decimal_attr(attrs, "llm.cost.prompt", "llm.cost.input"),
+        completion_cost=_decimal_attr(attrs, "llm.cost.completion", "llm.cost.output"),
+        total_cost=_decimal_attr(attrs, "llm.cost.total"),
+        cost_currency=_currency_attr(attrs),
+        artifact_digest=_digest_attr(attrs, "syncmill.artifact_digest"),
+        evaluations=evaluations,
+    )
+    scalar_values = evidence.model_dump(exclude={"evaluations"}).values()
+    return evidence if evaluations or any(value is not None for value in scalar_values) else None
 
 
 class OTLPSpanAdapter:
@@ -161,6 +265,10 @@ class OTLPSpanAdapter:
         source_kind: str = "otlp",
         prefer_graph_parent: bool = True,
         links_as_causes: bool = True,
+        include_error_messages: bool = True,
+        preserve_unset_status: bool = False,
+        causal_fidelity: CausalFidelity | None = None,
+        links_preserved: bool | None = None,
     ) -> None:
         self._doc = document
         self._source_kind = source_kind
@@ -168,10 +276,29 @@ class OTLPSpanAdapter:
         self._prefer_graph_parent = prefer_graph_parent
         #: Treat OTLP span links as additional causes (the multi-parent fan-in source).
         self._links_as_causes = links_as_causes
+        self._include_error_messages = include_error_messages
+        self._preserve_unset_status = preserve_unset_status
+        self._causal_fidelity = causal_fidelity or (
+            CausalFidelity.DECLARED_DAG if links_as_causes else CausalFidelity.PARENT_ONLY
+        )
+        self._links_preserved = links_as_causes if links_preserved is None else links_preserved
 
     @classmethod
     def from_json(cls, text: str, **kwargs: Any) -> "OTLPSpanAdapter":
-        return cls(json.loads(text), **kwargs)
+        try:
+            payload = json.loads(text)
+            documents = payload if isinstance(payload, list) else [payload]
+        except json.JSONDecodeError:
+            # The Collector file exporter writes one top-level TracesData object per line.
+            documents = [json.loads(line) for line in text.splitlines() if line.strip()]
+        if not documents or not all(isinstance(item, dict) for item in documents):
+            raise ValueError("OTLP input must contain one or more JSON trace objects")
+        merged: dict[str, Any] = {"resourceSpans": []}
+        for document in documents:
+            merged["resourceSpans"].extend(
+                _first(document, "resourceSpans", "resource_spans", default=[]) or []
+            )
+        return cls(merged, **kwargs)
 
     @classmethod
     def from_file(cls, path: str | Path, **kwargs: Any) -> "OTLPSpanAdapter":
@@ -210,13 +337,15 @@ class OTLPSpanAdapter:
         # assign seq as a topological order of that DAG so a cause always precedes its
         # effect by construction (validate_raw can never reject our own ordering). A genuine
         # cycle in the declared parent/link edges raises rather than silently lying.
-        causes = self._causes(by_id, attrs, prerank, parent_span)
+        causes, origins = self._causes(by_id, attrs, prerank, parent_span)
         seq = self._topo_seq(by_id, causes, prerank)
 
         steps: list[Step] = []
         for sid in by_id:
             span = by_id[sid]
             status, err = _status(span)
+            if status is StepStatus.UNSET and not self._preserve_unset_status:
+                status = StepStatus.OK
             steps.append(
                 Step(
                     step_id=sid,
@@ -227,13 +356,19 @@ class OTLPSpanAdapter:
                     source=StepSource.LOOP,  # spans carry no LangGraph source semantics
                     name=span.get("name"),
                     status=status,
-                    error_msg=err,
+                    error_msg=err if self._include_error_messages else None,
+                    evidence=_evidence(span, attrs[sid]),
                 )
             )
         steps.sort(key=lambda s: s.seq)
 
         edges = [
-            Edge(type=EdgeType.CAUSED_BY, src=effect, dst=cause)
+            Edge(
+                type=EdgeType.CAUSED_BY,
+                src=effect,
+                dst=cause,
+                origin=origins[(effect, cause)],
+            )
             for effect in sorted(causes, key=lambda s: prerank[s])
             for cause in sorted(causes[effect], key=lambda c: prerank[c])
         ]
@@ -244,6 +379,9 @@ class OTLPSpanAdapter:
             run_id=run_id,
             thread_id=trace_id,
             status=StepStatus.ERROR if any_error else StepStatus.OK,
+            causal_fidelity=self._causal_fidelity,
+            links_preserved=self._links_preserved,
+            decision_evidence=self._decision_evidence(trace_id, attrs),
         )
         return RawTrace(trace=trace, steps=steps, causal_edges=edges)
 
@@ -275,6 +413,47 @@ class OTLPSpanAdapter:
         if len(values) > 1:
             raise ValueError(f"trace {trace_id!r} has conflicting syncmill.run_id values")
         return next(iter(values), None)
+
+    @staticmethod
+    def _decision_evidence(
+        trace_id: str, attrs: dict[str, dict[str, Any]]
+    ) -> list[DecisionEvidence]:
+        """Read one consistent, body-free Toolgraph preflight reference."""
+        records: set[tuple[str, int, str]] = set()
+        partial = False
+        for span_attrs in attrs.values():
+            has_digest = _TOOLGRAPH_PREFLIGHT_DIGEST in span_attrs
+            has_generation = _TOOLGRAPH_GRAPH_GENERATION in span_attrs
+            has_verdict = _TOOLGRAPH_PREFLIGHT_VERDICT in span_attrs
+            if not has_digest and not has_generation and not has_verdict:
+                continue
+            if not (has_digest and has_generation and has_verdict):
+                partial = True
+                continue
+            digest = span_attrs[_TOOLGRAPH_PREFLIGHT_DIGEST]
+            generation = span_attrs[_TOOLGRAPH_GRAPH_GENERATION]
+            verdict = span_attrs[_TOOLGRAPH_PREFLIGHT_VERDICT]
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph preflight digest")
+            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+                raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph graph generation")
+            if not isinstance(verdict, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", verdict):
+                raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph preflight verdict")
+            records.add((digest, generation, verdict))
+        if partial:
+            raise ValueError(
+                f"trace {trace_id!r} must declare Toolgraph preflight digest, graph generation, and verdict together"
+            )
+        if len(records) > 1:
+            raise ValueError(f"trace {trace_id!r} has conflicting Toolgraph preflight evidence")
+        return [
+            DecisionEvidence(
+                artifact_digest=digest,
+                graph_generation=generation,
+                verdict=verdict,
+            )
+            for digest, generation, verdict in sorted(records)
+        ]
 
     @staticmethod
     def _start_nano(span: dict) -> int:
@@ -333,7 +512,7 @@ class OTLPSpanAdapter:
         attrs: dict[str, dict],
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
-    ) -> dict[str, list[str]]:
+    ) -> tuple[dict[str, list[str]], dict[tuple[str, str], EdgeOrigin]]:
         """Reconstruct ``effect -> [causes]`` from declared signals: one parent + links."""
         node_index: dict[str, list[str]] = {}
         if self._prefer_graph_parent:
@@ -344,17 +523,21 @@ class OTLPSpanAdapter:
 
         causes: dict[str, list[str]] = {sid: [] for sid in by_id}
         seen: set[tuple[str, str]] = set()
+        origins: dict[tuple[str, str], EdgeOrigin] = {}
 
-        def add(effect: str, cause: str) -> None:
+        def add(effect: str, cause: str, origin: EdgeOrigin) -> None:
             if cause == effect or (effect, cause) in seen:
                 return  # self-edges and duplicates would both break validate_raw
             seen.add((effect, cause))
             causes[effect].append(cause)
+            origins[(effect, cause)] = origin
 
         for sid in by_id:
-            parent = self._resolve_parent(sid, attrs, node_index, prerank, parent_span)
+            parent, parent_origin = self._resolve_parent(
+                sid, attrs, node_index, prerank, parent_span
+            )
             if parent is not None:
-                add(sid, parent)
+                add(sid, parent, parent_origin)
             if self._links_as_causes:
                 own_trace = _first(by_id[sid], "traceId", "trace_id")
                 for link in _first(by_id[sid], "links", default=[]) or []:
@@ -366,8 +549,8 @@ class OTLPSpanAdapter:
                         continue
                     lsid = _first(link, "spanId", "span_id")
                     if lsid in by_id:
-                        add(sid, lsid)
-        return causes
+                        add(sid, lsid, EdgeOrigin.SPAN_LINK)
+        return causes, origins
 
     def _resolve_parent(
         self,
@@ -376,7 +559,7 @@ class OTLPSpanAdapter:
         node_index: dict[str, list[str]],
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
-    ) -> str | None:
+    ) -> tuple[str | None, EdgeOrigin]:
         """The single chosen parent cause: the logical graph parent if resolvable, else the
         declared span parent.
 
@@ -400,9 +583,9 @@ class OTLPSpanAdapter:
                 candidates = [c for c in node_index.get(str(pnode), []) if c != sid]
                 preceding = [c for c in candidates if prerank[c] < prerank[sid]]
                 if preceding:
-                    return max(preceding, key=lambda c: prerank[c])
+                    return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT
                 if len(candidates) == 1:
-                    return candidates[0]
+                    return candidates[0], EdgeOrigin.GRAPH_PARENT
                 if pid is None:
                     detail = "no in-trace span" if not candidates else "multiple ambiguous spans"
                     raise ValueError(
@@ -410,7 +593,7 @@ class OTLPSpanAdapter:
                         f"{detail} and has no parentSpanId fallback; tracegraph will not "
                         "fabricate a root for a declared logical parent it cannot honor"
                     )
-        return pid
+        return pid, EdgeOrigin.SPAN_PARENT_FALLBACK
 
     @staticmethod
     def _topo_seq(

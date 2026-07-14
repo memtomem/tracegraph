@@ -6,8 +6,8 @@ traces at once. Reads the raw ``CAUSED_BY`` layer — patterns are about real ca
 must see every real predecessor, not the lossy single-parent projection.
 
 A ``PathPattern`` is a backend-neutral spec: an ordered list of ``StepPredicate``. The matcher
-here is pure-Python (zero optional deps); the *same spec* also compiles to standard openCypher
-(see :func:`compile_to_cypher`), which is what the optional Kùzu backend runs. The compiler is
+here is pure-Python (zero optional deps); the *same spec* also compiles to standard Cypher
+(see :func:`compile_to_cypher`), which is what the optional LadybugDB backend runs. The compiler is
 deliberately kept here, next to the spec, so the spec is self-describing — "this is what a
 ``PathPattern`` means as a Cypher query" — and importable without the optional dependency.
 
@@ -22,9 +22,9 @@ make the marquee "tool X → retry → tool X → failure" pattern expressible:
 
 The pure-Python matcher is the **system of record** for every pattern. A bounded gap compiles
 to a faithful ``CAUSED_BY*lo..hi`` Cypher query; an *unbounded* (or over-cap) gap cannot be
-expressed within Kùzu's 30-hop variable-length ceiling, so :func:`compile_to_cypher` raises
-:class:`UncompilablePattern` rather than silently truncating — and the Kùzu backend falls back
-to a whole-graph pull plus this same matcher (see ``store/kuzu.py``). Nothing is ever silently
+expressed within LadybugDB's 30-hop variable-length ceiling, so :func:`compile_to_cypher` raises
+:class:`UncompilablePattern` rather than silently truncating — and the LadybugDB backend falls back
+to a whole-graph pull plus this same matcher (see ``store/ladybug.py``). Nothing is ever silently
 dropped.
 """
 
@@ -35,12 +35,12 @@ from dataclasses import dataclass, field
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step, StepKind, StepStatus
 
-#: Kùzu 0.11.3 **silently** caps the upper bound of any variable-length relationship pattern
+#: LadybugDB 0.18.1 caps the upper bound of any variable-length relationship pattern
 #: at 30 hops (``[:CAUSED_BY*2..1000000]`` raises "Upper bound of rel exceeds maximum: 30").
 #: 30 is therefore the largest gap upper bound that compiles to *faithful* Cypher. This is
-#: Kùzu's HARD FLOOR, not an arbitrary choice — do NOT raise it without raising Kùzu's cap
-#: first, or the compiled query would silently truncate. See store/kuzu.py:ancestors and the
-#: ``kuzu-varlength-hop-cap`` design note. Gaps larger than this (or unbounded) are matched by
+#: a verified backend limit, not an arbitrary choice — do NOT raise it without retesting the
+#: supported LadybugDB range. See store/ladybug.py:ancestors and the
+#: ``ladybug-varlength-hop-cap`` design note. Gaps larger than this (or unbounded) are matched by
 #: the pure-Python system of record and refused by the compiler (UncompilablePattern).
 MAX_GAP = 30
 
@@ -49,7 +49,7 @@ class UncompilablePattern(ValueError):
     """A pattern the pure-Python matcher accepts but Cypher cannot express faithfully.
 
     Raised by :func:`compile_to_cypher` for a gap that is unbounded or whose upper bound
-    exceeds Kùzu's 30-hop variable-length cap (:data:`MAX_GAP`). The backend must catch this
+    exceeds LadybugDB's 30-hop variable-length cap (:data:`MAX_GAP`). The backend must catch this
     and fall back to the pure-Python matcher (the system of record) rather than emit a query
     that silently truncates — so an uncompilable pattern degrades to *slower*, never to *wrong*.
     It subclasses ``ValueError`` so existing ``except ValueError`` callers stay correct.
@@ -73,6 +73,8 @@ class StepPredicate:
     """
 
     name: str | None = None
+    name_prefix: str | None = None
+    error_contains: str | None = None
     kind: StepKind | None = None
     status: StepStatus | None = None
     same_name_as: int | None = None
@@ -89,9 +91,17 @@ class StepPredicate:
                 raise ValueError(f"gap upper bound {hi} is below lower bound {lo}")
         if self.same_name_as is not None and self.same_name_as < 0:
             raise ValueError("same_name_as must be a non-negative predicate index")
+        if self.name is not None and self.name_prefix is not None:
+            raise ValueError("name and name_prefix are mutually exclusive")
+        if self.name_prefix == "" or self.error_contains == "":
+            raise ValueError("name_prefix and error_contains must be non-empty when set")
 
     def matches(self, step: Step) -> bool:
         if self.name is not None and step.name != self.name:
+            return False
+        if self.name_prefix is not None and not (step.name or "").startswith(self.name_prefix):
+            return False
+        if self.error_contains is not None and self.error_contains not in (step.error_msg or ""):
             return False
         if self.kind is not None and step.kind is not self.kind:
             return False
@@ -103,6 +113,10 @@ class StepPredicate:
         parts = []
         if self.name is not None:
             parts.append(f"name={self.name}")
+        if self.name_prefix is not None:
+            parts.append(f"name^={self.name_prefix}")
+        if self.error_contains is not None:
+            parts.append(f"error~={self.error_contains}")
         if self.kind is not None:
             parts.append(f"kind={self.kind.value}")
         if self.status is not None:
@@ -186,7 +200,7 @@ def find_matches(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
     (gap-interior steps are *not* included), so the match shape is independent of gap width.
 
     The result is deterministically ordered by ``(seq, step_id)`` per column and de-duplicated
-    on the full path tuple — matching the Kùzu backend's row sort and ``RETURN DISTINCT`` so the
+    on the full path tuple — matching the LadybugDB backend's row sort and ``RETURN DISTINCT`` so the
     two backends agree on a fan-in graph where one endpoint is reachable by several gap paths.
 
     Performance: the headline ``tool-retry-failure`` shape (a tool, then an *unbounded* gap to a
@@ -357,10 +371,10 @@ def search(traces: list[NormalizedTrace], pattern: PathPattern) -> list[Match]:
 
 @dataclass(frozen=True)
 class CompiledQuery:
-    """An openCypher query equivalent to a :class:`PathPattern`.
+    """A Cypher query equivalent to a :class:`PathPattern`.
 
     ``cypher`` uses parameter placeholders (``$name``) — never string-interpolated user data —
-    so the same compiled artifact is safe to run against any openCypher engine without
+    so the same compiled artifact is safe to run against any Cypher engine without
     rebuilding per call. ``result_vars`` lists the RETURN column aliases in pattern order:
     each row's columns are the matched step ids for predicate 0, 1, … in turn.
     """
@@ -375,7 +389,7 @@ def _where_clauses(idx: int, pred: StepPredicate, params: dict[str, str]) -> lis
 
     Only fields the predicate actually constrains become clauses (mirroring the pure-Python
     matcher's "unset = wildcard" rule). Enum values are stored as their ``.value`` strings,
-    matching how Kùzu (and any other backend) serializes a step row. A ``same_name_as`` adds a
+    matching how LadybugDB (and any other backend) serializes a step row. A ``same_name_as`` adds a
     column-to-column equality (not a param) plus a NOT-NULL guard so the backends agree on
     nameless steps (Cypher ``NULL = NULL`` is ``NULL`` → row dropped, matching the matcher).
     """
@@ -384,6 +398,14 @@ def _where_clauses(idx: int, pred: StepPredicate, params: dict[str, str]) -> lis
         key = f"s{idx}_name"
         params[key] = pred.name
         clauses.append(f"s{idx}.name = ${key}")
+    if pred.name_prefix is not None:
+        key = f"s{idx}_name_prefix"
+        params[key] = pred.name_prefix
+        clauses.append(f"s{idx}.name STARTS WITH ${key}")
+    if pred.error_contains is not None:
+        key = f"s{idx}_error_contains"
+        params[key] = pred.error_contains
+        clauses.append(f"s{idx}.error_msg CONTAINS ${key}")
     if pred.kind is not None:
         key = f"s{idx}_kind"
         params[key] = pred.kind.value
@@ -403,7 +425,7 @@ def _rel(pred: StepPredicate) -> str:
 
     Strict adjacency is a single backward ``CAUSED_BY`` hop (byte-identical to the pre-gap
     output). A bounded gap becomes a variable-length ``*lo..hi`` span. An unbounded or
-    over-cap gap can't be expressed within Kùzu's 30-hop ceiling, so we refuse rather than
+    over-cap gap can't be expressed within LadybugDB's 30-hop ceiling, so we refuse rather than
     emit a query that silently truncates.
     """
     if pred.gap is None:
@@ -411,19 +433,19 @@ def _rel(pred: StepPredicate) -> str:
     lo, hi = pred.gap
     if hi is None:
         raise UncompilablePattern(
-            f"unbounded gap (lo={lo}) cannot be compiled within Kùzu's {MAX_GAP}-hop "
+            f"unbounded gap (lo={lo}) cannot be compiled within LadybugDB's {MAX_GAP}-hop "
             "variable-length cap; the pure-Python matcher is the system of record for it"
         )
     if hi > MAX_GAP:
         raise UncompilablePattern(
-            f"gap upper bound {hi} exceeds Kùzu's {MAX_GAP}-hop variable-length cap; "
+            f"gap upper bound {hi} exceeds LadybugDB's {MAX_GAP}-hop variable-length cap; "
             "the pure-Python matcher is the system of record for it"
         )
     return f"<-[:CAUSED_BY*{lo}..{hi}]-"
 
 
 def compile_to_cypher(pattern: PathPattern) -> CompiledQuery:
-    """Compile a :class:`PathPattern` to a parameterized openCypher query.
+    """Compile a :class:`PathPattern` to a parameterized Cypher query.
 
     Edge direction note: the model stores ``CAUSED_BY`` as effect → cause, but a
     ``PathPattern`` reads cause → effect (predicate 0 is matched first, predicate 1 is its
@@ -437,7 +459,7 @@ def compile_to_cypher(pattern: PathPattern) -> CompiledQuery:
     produces. A ``same_name_as`` compiles to a column-equality back-reference.
 
     Raises :class:`UncompilablePattern` (a ``ValueError`` subclass) when a gap is unbounded or
-    exceeds :data:`MAX_GAP` — the caller (the Kùzu store) must then fall back to the pure-Python
+    exceeds :data:`MAX_GAP` — the caller (the LadybugDB store) must then fall back to the pure-Python
     matcher rather than run a query that would silently truncate. Raises plain ``ValueError`` on
     an empty pattern — that's a caller bug, not a query that returns nothing.
     """
@@ -498,12 +520,45 @@ PRESETS: dict[str, PathPattern] = {
         pattern_id="plan-then-tool-failure",
         pattern_version=1,
     ),
+    "timeout": PathPattern(
+        (StepPredicate(status=StepStatus.ERROR, error_contains="timeout"),),
+        "a step that failed with a bounded timeout status message",
+        pattern_id="timeout",
+        pattern_version=1,
+    ),
+    "repeated-agent-failure": PathPattern(
+        (
+            StepPredicate(kind=StepKind.AGENT, status=StepStatus.ERROR),
+            StepPredicate(
+                kind=StepKind.AGENT,
+                status=StepStatus.ERROR,
+                same_name_as=0,
+                gap=(1, None),
+            ),
+        ),
+        "the same agent failed again later on the causal path",
+        pattern_id="repeated-agent-failure",
+        pattern_version=1,
+    ),
+    "gate-failure-after-success": PathPattern(
+        (
+            StepPredicate(kind=StepKind.AGENT, status=StepStatus.OK),
+            StepPredicate(
+                kind=StepKind.TOOL,
+                status=StepStatus.ERROR,
+                name_prefix="gate:",
+            ),
+        ),
+        "a successful agent attempt immediately followed by a failing gate",
+        pattern_id="gate-failure-after-success",
+        pattern_version=1,
+    ),
     # The marquee cross-trace pattern advertised in the README / FEASIBILITY:
     # "tool X → retry → tool X → failure". Predicate 0 binds the first tool's name; predicate 1
     # requires the SAME name (same_name_as=0), a failing status, and an *unbounded* causal gap
     # (≥1 intervening step — the retry machinery). The gap is unbounded because real traces are
     # deep-linear and a retry can be many super-steps later; the pure-Python matcher catches it
-    # at any distance, and the Kùzu backend transparently falls back to it (the compiled form is
+    # at any distance, and the LadybugDB backend transparently falls back to it (the compiled form is
     # uncompilable past 30 hops). See `tool-retry-failure-near` for a Cypher-acceleratable bound.
     "tool-retry-failure": PathPattern(
         (
@@ -522,7 +577,7 @@ PRESETS: dict[str, PathPattern] = {
     ),
     # Bounded variant of the marquee: the failing retry within MAX_GAP causal hops of the first
     # call. Identical matches to `tool-retry-failure` for nearby retries, but it compiles to a
-    # faithful `CAUSED_BY*2..30` query so the Kùzu accelerator runs it natively.
+    # faithful `CAUSED_BY*2..30` query so the LadybugDB accelerator runs it natively.
     "tool-retry-failure-near": PathPattern(
         (
             StepPredicate(kind=StepKind.TOOL),

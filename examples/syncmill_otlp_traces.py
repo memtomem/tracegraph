@@ -45,11 +45,19 @@ SYNCMILL_ALLOWLIST = frozenset(
         "syncmill.worktree_slot",
         "syncmill.winner",
         "syncmill.files_changed_count",
+        "syncmill.artifact_digest",
     }
 )
 
 CONSUMED_KEYS = frozenset(
-    {"openinference.span.kind", "graph.node.id", "graph.node.parent_id"}
+    {
+        "openinference.span.kind",
+        "graph.node.id",
+        "graph.node.parent_id",
+        "toolgraph.preflight.artifact_digest",
+        "toolgraph.graph_generation",
+        "toolgraph.preflight.verdict",
+    }
 )
 
 
@@ -77,12 +85,15 @@ def _span(
     syncmill: dict[str, str | int | bool],
     status: dict | None = None,
     links: list[str] | None = None,
+    extra_attributes: dict[str, str | int | bool] | None = None,
 ) -> dict:
     attrs = [_attr("openinference.span.kind", kind), _attr("graph.node.id", node_id)]
     if node_parent is not None:
         attrs.append(_attr("graph.node.parent_id", node_parent))
     for key, value in syncmill.items():
         attrs.append(_attr(f"syncmill.{key}", value))
+    for key, value in (extra_attributes or {}).items():
+        attrs.append(_attr(key, value))
     span: dict = {
         "traceId": trace_id,
         "spanId": span_id,
@@ -105,7 +116,13 @@ def _document(spans: list[dict]) -> dict:
 
 
 def _run_span(
-    trace_id: str, run_id: str, strategy: str, *, end_ns: int, status: str = "completed"
+    trace_id: str,
+    run_id: str,
+    strategy: str,
+    *,
+    end_ns: int,
+    status: str = "completed",
+    preflight: tuple[str, int, str] | None = None,
 ) -> dict:
     return _span(
         trace_id,
@@ -124,6 +141,15 @@ def _run_span(
             "agent_id": "supervisor",
             "status": status,
         },
+        extra_attributes=(
+            {
+                "toolgraph.preflight.artifact_digest": preflight[0],
+                "toolgraph.graph_generation": preflight[1],
+                "toolgraph.preflight.verdict": preflight[2],
+            }
+            if preflight
+            else None
+        ),
     )
 
 
@@ -146,6 +172,7 @@ TRACE_IDS = {
     "pipeline-success": _trace_id(6),
     "council-success": _trace_id(7),
     "decompose-success": _trace_id(8),
+    "compete-cancelled": _trace_id(9),
 }
 
 
@@ -154,7 +181,13 @@ def route_success() -> dict:
     trace_id, run_id = TRACE_IDS["route-success"], "00000000-0000-4000-8000-000000000001"
     return _document(
         [
-            _run_span(trace_id, run_id, "route", end_ns=60_000),
+            _run_span(
+                trace_id,
+                run_id,
+                "route",
+                end_ns=60_000,
+                preflight=("sha256:" + "a" * 64, 7, "review"),
+            ),
             _span(
                 trace_id,
                 "bb00000000000001",
@@ -175,6 +208,7 @@ def route_success() -> dict:
                     "exit_code": 0,
                     "winner": True,
                     "files_changed_count": 2,
+                    "artifact_digest": "sha256:" + "d" * 64,
                 },
             ),
         ]
@@ -364,6 +398,56 @@ def compete_timeout() -> dict:
     )
 
 
+def compete_cancelled() -> dict:
+    """compete: duplicate agent names stay distinct by worktree slot; a cancelled sibling
+    remains a terminal fan-out leaf and is not presented as a cause of selection."""
+    trace_id = TRACE_IDS["compete-cancelled"]
+    run_id = "00000000-0000-4000-8000-000000000009"
+    common = {"schema_version": 1, "run_id": run_id, "phase": "attempt", "attempt": 0}
+    spans = [_run_span(trace_id, run_id, "compete", end_ns=160_000)]
+    for span_id, slot, end_ns, cancelled in (
+        ("bb00000000000001", 0, 70_000, False),
+        ("bb00000000000002", 1, 60_000, False),
+        ("bb00000000000003", 2, 140_000, True),
+    ):
+        spans.append(
+            _span(
+                trace_id,
+                span_id,
+                "attempt:codex",
+                "AGENT",
+                parent_span=_RUN,
+                node_id=f"attempt:codex:slot:{slot}",
+                node_parent="run",
+                start_ns=1_000,
+                end_ns=end_ns,
+                status=(
+                    {"code": "STATUS_CODE_ERROR", "message": "cancelled"}
+                    if cancelled
+                    else None
+                ),
+                syncmill={
+                    **common,
+                    "agent_id": "codex",
+                    "status": "cancelled" if cancelled else "completed",
+                    "worktree_slot": slot,
+                    **({} if cancelled else {"exit_code": 0}),
+                },
+            )
+        )
+    spans.append(
+        _select_span(
+            trace_id,
+            run_id,
+            "attempt:codex:slot:0",
+            ["bb00000000000002"],
+            start_ns=141_000,
+            end_ns=150_000,
+        )
+    )
+    return _document(spans)
+
+
 def compete_gate_reject() -> dict:
     """compete: the priority winner fails its quality gate; select falls to the
     next gate-passing candidate. Gate spans are TOOL steps caused by their attempt."""
@@ -508,6 +592,7 @@ GENERATORS = {
     "pipeline-success": pipeline_success,
     "council-success": council_success,
     "decompose-success": decompose_success,
+    "compete-cancelled": compete_cancelled,
 }
 
 

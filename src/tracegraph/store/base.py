@@ -1,13 +1,13 @@
 """The pluggable query backend interface — deliberately small.
 
-The store does **not** expose a ``query(cypher)`` method: that would leak openCypher
+The store does **not** expose a ``query(cypher)`` method: that would leak Cypher
 upward and make the pure-Python path a second-class citizen. Instead, analyses are
 expressed as *operations* the store implements; each backend supplies its own
-implementation (pure-Python traversal here; compiled openCypher in the optional Kùzu
+implementation (pure-Python traversal here; compiled Cypher in the optional LadybugDB
 backend for pattern matching).
 
 Pattern matching intentionally stays out of the minimal ``GraphStore`` protocol. It is a
-separate backend capability (pure-Python functions for the default path; ``KuzuStore`` adds
+separate backend capability (pure-Python functions for the default path; ``LadybugStore`` adds
 ``find_matches``) so RCA/diff callers do not depend on a Cypher-capable backend.
 """
 

@@ -5,10 +5,13 @@ fan-in (``synthesize`` caused by both its graph parent and a linked retriever sp
 which must be flagged ``projection_lossy`` yet still fully recoverable via ``explain``.
 """
 
+import json
+
 import pytest
 from otlp_agent_trace import sample_otlp_document
 
 from tracegraph.adapters import OTLPSpanAdapter
+from tracegraph.adapters.otlp_spans import _decimal_attr, _int_attr
 from tracegraph.analysis import explain
 from tracegraph.model import EdgeType, StepKind, StepStatus
 from tracegraph.normalize import normalize
@@ -60,6 +63,68 @@ def test_whitespace_in_syncmill_run_id_is_rejected_at_ingest():
     ]}]}]}
     with pytest.raises(ValueError, match="whitespace-containing"):
         OTLPSpanAdapter(doc).ingest("t")
+
+
+def test_toolgraph_preflight_evidence_is_preserved_as_noncausal_metadata():
+    attrs = [
+        {
+            "key": "toolgraph.preflight.artifact_digest",
+            "value": {"stringValue": "sha256:" + "a" * 64},
+        },
+        {"key": "toolgraph.graph_generation", "value": {"intValue": "7"}},
+        {"key": "toolgraph.preflight.verdict", "value": {"stringValue": "review"}},
+    ]
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "run", "attributes": attrs},
+    ]}]}]}
+    raw = OTLPSpanAdapter(doc).ingest("t")
+    assert raw.trace.decision_evidence[0].artifact_digest == "sha256:" + "a" * 64
+    assert raw.trace.decision_evidence[0].graph_generation == 7
+    assert raw.trace.decision_evidence[0].verdict == "review"
+    assert raw.causal_edges == []
+
+
+@pytest.mark.parametrize(
+    "attrs, message",
+    [
+        ([{"key": "toolgraph.graph_generation", "value": {"intValue": "1"}}], "together"),
+        ([
+            {"key": "toolgraph.preflight.artifact_digest", "value": {"stringValue": "bad"}},
+            {"key": "toolgraph.graph_generation", "value": {"intValue": "1"}},
+            {"key": "toolgraph.preflight.verdict", "value": {"stringValue": "review"}},
+        ], "invalid Toolgraph preflight digest"),
+    ],
+)
+def test_partial_or_invalid_toolgraph_evidence_is_rejected(attrs, message):
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "run", "attributes": attrs},
+    ]}]}]}
+    with pytest.raises(ValueError, match=message):
+        OTLPSpanAdapter(doc).ingest("t")
+
+
+def test_invalid_syncmill_artifact_digest_is_rejected():
+    attrs = [
+        {"key": "syncmill.artifact_digest", "value": {"stringValue": "/tmp/result.patch"}}
+    ]
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "attempt", "attributes": attrs},
+    ]}]}]}
+    with pytest.raises(ValueError, match="lowercase sha256"):
+        OTLPSpanAdapter(doc).ingest("t")
+
+
+def test_numeric_attribute_aliases_fall_through_invalid_primary_values():
+    assert _int_attr(
+        {"llm.token_count.prompt": "invalid", "llm.token_count.input": 7},
+        "llm.token_count.prompt",
+        "llm.token_count.input",
+    ) == 7
+    assert _decimal_attr(
+        {"llm.cost.prompt": "invalid", "llm.cost.input": "0.25"},
+        "llm.cost.prompt",
+        "llm.cost.input",
+    ) == "0.25"
 
 
 def test_ingest_unknown_trace_raises():
@@ -270,5 +335,17 @@ def test_snake_case_keys_are_accepted():
          "start_time_unix_nano": "2", "attributes": []},
     ]}]}]}
     adapter = OTLPSpanAdapter(doc)
+    assert adapter.discover() == ["t"]
+    assert _caused(adapter.ingest("t")) == {("b", "a")}
+
+
+def test_collector_jsonl_documents_are_merged():
+    first = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "root", "attributes": []}
+    ]}]}]}
+    second = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "b", "parentSpanId": "a", "name": "child", "attributes": []}
+    ]}]}]}
+    adapter = OTLPSpanAdapter.from_json(json.dumps(first) + "\n" + json.dumps(second) + "\n")
     assert adapter.discover() == ["t"]
     assert _caused(adapter.ingest("t")) == {("b", "a")}

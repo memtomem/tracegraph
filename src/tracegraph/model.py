@@ -23,6 +23,7 @@ See ``normalize.py`` for how the derived layer is computed from the raw layer.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -40,6 +41,12 @@ class StepKind(str, Enum):
     TOOL = "TOOL"
     LLM = "LLM"
     RETRIEVER = "RETRIEVER"
+    EMBEDDING = "EMBEDDING"
+    RERANKER = "RERANKER"
+    GUARDRAIL = "GUARDRAIL"
+    EVALUATOR = "EVALUATOR"
+    PROMPT = "PROMPT"
+    UNKNOWN = "UNKNOWN"
     DATA = "DATA"
 
 
@@ -55,6 +62,62 @@ class StepSource(str, Enum):
 class StepStatus(str, Enum):
     OK = "ok"
     ERROR = "error"
+    UNSET = "unset"
+
+
+class EdgeOrigin(str, Enum):
+    """Declared evidence behind a raw causal edge."""
+
+    CHECKPOINT_PARENT = "checkpoint_parent"
+    GRAPH_PARENT = "graph_parent"
+    SPAN_LINK = "span_link"
+    SPAN_PARENT_FALLBACK = "span_parent_fallback"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class CausalFidelity(str, Enum):
+    """How much of the source system's causal vocabulary survived export."""
+
+    DECLARED_DAG = "declared_dag"
+    PARENT_ONLY = "parent_only"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class EvaluationSummary(BaseModel):
+    """Body-free Phoenix/OpenInference annotation evidence."""
+
+    name: str
+    label: str | None = None
+    score: float | None = None
+
+
+class StepEvidence(BaseModel):
+    """Allowlisted operational telemetry; never prompt/output bodies."""
+
+    end_ts: str | None = None
+    duration_ms: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    prompt_cost: str | None = None
+    completion_cost: str | None = None
+    total_cost: str | None = None
+    cost_currency: str | None = None
+    artifact_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    evaluations: list[EvaluationSummary] = Field(default_factory=list)
+
+
+class DecisionEvidence(BaseModel):
+    """Body-free evidence from an external pre-execution policy decision.
+
+    It is trace metadata, never a causal edge: a preflight can constrain a run without
+    proving that it caused a later outcome.
+    """
+
+    source: Literal["toolgraph_preflight"] = "toolgraph_preflight"
+    artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    graph_generation: int = Field(ge=0)
+    verdict: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
 
 
 class EdgeType(str, Enum):
@@ -79,6 +142,7 @@ class Step(BaseModel):
     name: str | None = None
     status: StepStatus = StepStatus.OK
     error_msg: str | None = None
+    evidence: StepEvidence | None = None
     #: Set during normalization: True iff this step had >1 raw CAUSED_BY edge and
     #: the derived TREE_PARENT projection therefore dropped at least one real cause.
     projection_lossy: bool = False
@@ -90,6 +154,7 @@ class Edge(BaseModel):
     type: EdgeType
     src: str
     dst: str
+    origin: EdgeOrigin | None = None
 
 
 class Trace(BaseModel):
@@ -103,6 +168,9 @@ class Trace(BaseModel):
     )
     thread_id: str | None = None
     status: StepStatus = StepStatus.OK
+    causal_fidelity: CausalFidelity = CausalFidelity.LEGACY_UNKNOWN
+    links_preserved: bool | None = None
+    decision_evidence: list[DecisionEvidence] = Field(default_factory=list)
 
 
 class RawTrace(BaseModel):

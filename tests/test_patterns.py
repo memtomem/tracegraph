@@ -88,6 +88,34 @@ def test_cross_trace_search_filters():
     assert {m.trace_id for m in matches} == {"A"}  # only the erroring trace
 
 
+def test_operational_failure_presets_match_timeout_retry_and_gate():
+    timeout = _trace("T", ("attempt:codex", StepKind.AGENT, ERR))
+    timeout.steps[0].error_msg = "timeout"
+    assert find_matches(timeout, PRESETS["timeout"]) == [["T0"]]
+
+    repeated = _trace(
+        "R",
+        ("attempt:codex", StepKind.AGENT, ERR),
+        ("retry", StepKind.CHAIN, OK),
+        ("attempt:codex", StepKind.AGENT, ERR),
+    )
+    assert find_matches(repeated, PRESETS["repeated-agent-failure"]) == [["R0", "R2"]]
+
+    gate = _trace(
+        "G",
+        ("attempt:codex", StepKind.AGENT, OK),
+        ("gate:pytest", StepKind.TOOL, ERR),
+    )
+    assert find_matches(gate, PRESETS["gate-failure-after-success"]) == [["G0", "G1"]]
+
+
+def test_extended_predicate_validation():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        StepPredicate(name="gate", name_prefix="gate:")
+    with pytest.raises(ValueError, match="non-empty"):
+        StepPredicate(error_contains="")
+
+
 def test_preset_labels_are_readable():
     matches = search([_erroring_tool_trace("A")], PRESETS["plan-then-tool-failure"])
     assert len(matches) == 1

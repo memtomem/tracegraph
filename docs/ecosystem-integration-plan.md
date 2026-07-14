@@ -1,6 +1,7 @@
 # toolgraph, tracegraph, syncmill 연계 계획
 
-**상태:** 첫 통합 마일스톤, P3.1 preview, T3, SyncMill board import 및 Toolgraph G3 완료 (2026-07-12)
+**상태:** tracegraph 범위 0~5단계 구현 및 검증 완료 (2026-07-14). SyncMill의 실제
+producer 배포 설정과 exporter 운영은 정본 저장소의 후속 책임이다.
 **작성일:** 2026-07-11
 **정본:** [전체 계획](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/integration-plan.md) · [구현 설계](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/implementation-design.md) · [smoke runbook](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/smoke-runbook.md)
 
@@ -36,7 +37,7 @@ subprocess 실행을 OpenInference/OTLP span 또는 portable trace artifact로 �
 - LangGraph checkpoint와 OpenInference/OTLP span adapter를 제공한다.
 - raw multi-parent `CAUSED_BY` 그래프를 system of record로 유지한다.
 - `explain`, AHU 기반 `diff`, cross-trace pattern query를 제공한다.
-- portable JSON이 기준 artifact이고 Kuzu는 선택적 accelerator다.
+- portable JSON이 기준 artifact이고 LadybugDB는 선택적 Cypher accelerator다.
 
 ## 목표
 
@@ -50,7 +51,7 @@ subprocess 실행을 OpenInference/OTLP span 또는 portable trace artifact로 �
 - syncmill의 실행 엔진이나 memtomem을 tracegraph가 대체하는 것
 - 모든 stdout, prompt, patch 또는 메모리 내용을 trace artifact에 복제하는 것
 - tree projection을 RCA의 system of record로 사용하는 것
-- Kuzu 또는 특정 observability vendor를 필수 저장소로 만드는 것
+- LadybugDB 또는 특정 observability vendor를 필수 저장소로 만드는 것
 
 ## 제안 trace 계약
 
@@ -90,38 +91,59 @@ span name에는 agent id/phase/인덱스만 허용하고 uuid, timestamp, run_id
 
 ### 0단계: 모델 적합성 확인
 
-- [ ] 대표 strategy별 최소 trace fixture를 정의한다.
-- [ ] Supervisor, phase, agent attempt를 기존 step kind로 표현 가능한지 검토한다.
-- [ ] fan-out/fan-in 및 cancellation의 parent 규칙을 고정한다.
-- [ ] 민감 데이터 redaction과 attribute allowlist를 정의한다.
+- [x] 대표 strategy별 최소 trace fixture를 정의한다.
+- [x] Supervisor, phase, agent attempt를 기존 step kind로 표현 가능한지 검토한다.
+- [x] fan-out/fan-in 및 cancellation의 parent 규칙을 고정한다.
+- [x] 민감 데이터 redaction과 attribute allowlist를 정의한다.
 
 ### 1단계: syncmill OTLP fixture
 
-- [ ] 코드 결합 없이 합성 OTLP export fixture를 먼저 추가한다.
-- [ ] 기존 `OTLPSpanAdapter`가 run/strategy/agent 관계를 보존하는지 테스트한다.
-- [ ] `inspect`와 `explain`에서 timeout 및 gate failure를 역추적한다.
-- [ ] compete의 병렬 완료 순서가 허위 causal ordering을 만들지 않는지 검증한다.
+- [x] 코드 결합 없이 합성 OTLP export fixture를 먼저 추가한다.
+- [x] 기존 `OTLPSpanAdapter`가 run/strategy/agent 관계를 보존하는지 테스트한다.
+- [x] `inspect`와 `explain`에서 timeout 및 gate failure를 역추적한다.
+- [x] compete의 병렬 완료 순서가 허위 causal ordering을 만들지 않는지 검증한다.
 
 ### 2단계: 선택적 계측 adapter
 
-- [ ] syncmill 측에 vendor-neutral span naming convention을 제안한다.
-- [ ] 계측 비활성 상태에서 syncmill 동작과 성능이 변하지 않게 한다.
-- [ ] exporter 실패가 agent 실행 실패로 전파되지 않게 한다.
-- [ ] result/patch는 digest와 경로만 기록하고 본문은 저장하지 않는다.
+- [x] syncmill 측에 vendor-neutral span naming convention을 제안한다.
+- [x] 계측 비활성 상태에서 syncmill 동작과 결과가 변하지 않는 reference contract를 검증한다.
+- [x] exporter 실패가 agent 실행 실패로 전파되지 않는 fail-open contract를 검증한다.
+- [x] result/patch는 검증된 SHA-256 digest만 기록하고 본문이나 로컬 경로는 저장하지 않는다.
+
+실행 가능한 producer reference는 `examples/syncmill_instrumentation_contract.py`에 있다.
+이는 SyncMill이 vendor할 계측 동작을 고정하며, tracegraph가 SyncMill 런타임 의존성을
+가져오지는 않는다. 실제 SyncMill 배포 설정과 exporter 운영은 해당 저장소의 책임이다.
 
 ### 3단계: orchestration 분석
 
-- [ ] strategy 간 normalized structure diff 예제를 추가한다.
-- [ ] timeout, repeated-agent-failure, gate-failure-after-success preset을 검토한다.
-- [ ] agent 이름이 같은 재시도와 다른 worktree slot을 구분한다.
+- [x] strategy 간 normalized structure diff 예제를 추가한다.
+- [x] timeout, repeated-agent-failure, gate-failure-after-success preset을 추가한다.
+- [x] agent 이름이 같은 재시도와 다른 worktree slot을 구분한다.
 - [x] cross-run query 결과에 pattern version을 기록한다.
 
 ### 4단계: toolgraph provenance 연결
 
-- [ ] preflight artifact digest와 graph generation을 run metadata로 가져온다.
-- [ ] policy verdict를 causal edge가 아닌 외부 decision evidence로 표현한다.
+- [x] preflight artifact digest와 graph generation을 run metadata로 가져온다.
+- [x] policy verdict를 causal edge가 아닌 외부 decision evidence로 표현한다.
 - [x] failure pattern을 versioned governance review candidate JSON으로 내보낸다.
 - [x] tracegraph가 toolgraph manifest를 직접 수정하지 않는 경계를 테스트한다.
+
+### 5단계: 선택적 Cypher backend를 LadybugDB로 전환
+
+Kùzu 원본 저장소는 2025년 10월 10일 archived되어 read-only 상태다. 따라서
+유지보수가 중단된 Kùzu를 신규 backend로 유지하지 않고, Kùzu에서 fork되어 활발히
+개발되는 [LadybugDB](https://github.com/LadybugDB/ladybug)를 대상으로 구현한다.
+이 전환은 Phoenix 중심 분석 경로와 분리된 선택적 가속 계층이며, Phoenix export와
+portable JSON artifact는 LadybugDB 설치 여부와 관계없이 동일하게 동작해야 한다.
+
+- [x] `[cypher]` extra를 공식 `ladybug` Python 패키지로 교체한다.
+- [x] `LadybugStore`와 `--backend ladybug`를 공개 API/CLI 명칭으로 사용한다.
+- [x] DB 파일을 정본으로 승격하지 않고 JSON artifact에서 매번 재생성 가능하게 한다.
+- [x] pure-Python matcher와 LadybugDB Cypher 결과의 순서 포함 동등성을 검증한다.
+- [x] backend의 variable-length path 한계를 실제 지원 버전에서 검증하고, 표현할 수
+  없는 패턴은 pure-Python matcher로 명시적으로 fallback한다.
+- [x] Phoenix evidence, causal edge origin, run id가 LadybugDB round-trip에서 보존되는지
+  회귀 테스트한다.
 
 T3 producer는 `run_id`, `pattern_id`/`pattern_version`, qualified `tool_key`, 분석한
 normalized artifact의 `sha256:` digest만 내보낸다. 후보는 사람이 검토할 evidence이며
@@ -138,7 +160,7 @@ span과 운영 검토 평가는 별도 후속 작업이다.
 - 동일한 OTLP fixture가 안정적인 normalized artifact를 만든다.
 - 모든 RCA는 raw `CAUSED_BY`를 사용하고 projection loss를 숨기지 않는다.
 - 병렬 span의 timestamp 정렬이 인과 edge로 잘못 승격되지 않는다.
-- core test는 Kuzu와 syncmill 설치 없이 통과한다.
+- core test는 LadybugDB와 syncmill 설치 없이 통과한다.
 - prompt, credential, 전체 patch 및 memtomem 내용이 trace에 포함되지 않는다.
 
 ## 주요 위험과 대응

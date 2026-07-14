@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 from syncmill_otlp_traces import CONSUMED_KEYS, GENERATORS, SYNCMILL_ALLOWLIST, TRACE_IDS
+from tracegraph.adapters import OTLPSpanAdapter
+from tracegraph.model import EdgeType, StepKind, StepStatus
+from tracegraph.normalize import normalize
 
 # Redaction contract: no bodies/secrets/local paths in any trace attribute value,
 # span name, or status message. The allowlist test already bounds attribute KEYS;
@@ -57,10 +60,6 @@ def _scan(doc) -> list[str]:
                 violations.append(f"cred:{value}")
     return violations
 
-from tracegraph.adapters import OTLPSpanAdapter
-from tracegraph.model import StepKind, StepStatus
-from tracegraph.normalize import normalize
-
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "syncmill"
 
 RUN = "aa00000000000001"
@@ -96,6 +95,13 @@ EXPECTED_EDGES = {
         # leaf effects; the selected attempt (not its passing gate) is causal.
         (SELECT, A2),
         (SELECT, A1),  # link: the examined, gate-rejected one
+    },
+    "compete-cancelled": {
+        (A1, RUN),
+        (A2, RUN),
+        (A3, RUN),
+        (SELECT, A1),
+        (SELECT, A2),
     },
     "pipeline-success": {
         ("bb00000000000001", RUN),
@@ -155,7 +161,10 @@ def test_causal_edges_exact(name: str):
     assert caused == EXPECTED_EDGES[name]
 
 
-@pytest.mark.parametrize("name", ["compete-winner", "compete-timeout", "compete-gate-reject"])
+@pytest.mark.parametrize(
+    "name",
+    ["compete-winner", "compete-timeout", "compete-gate-reject", "compete-cancelled"],
+)
 def test_concurrent_siblings_share_no_edges(name: str):
     """Completion order must never look causal: no edge between fan-out siblings."""
     attempts = {A1, A2, A3}
@@ -196,6 +205,37 @@ def test_compete_timeout_surfaces_bounded_error():
     steps = _normalized("compete-timeout").steps_by_id()
     assert steps[A3].status is StepStatus.ERROR
     assert steps[A3].error_msg == "timeout"
+
+
+def test_cancelled_sibling_is_distinct_by_slot_and_not_a_selection_cause():
+    nt = _normalized("compete-cancelled")
+    steps = nt.steps_by_id()
+    attempts = [step for step in nt.steps if step.name == "attempt:codex"]
+    assert len(attempts) == 3 and len({step.step_id for step in attempts}) == 3
+    assert steps[A3].status is StepStatus.ERROR
+    assert steps[A3].error_msg == "cancelled"
+    select_causes = {
+        edge.dst
+        for edge in nt.edges_of(EdgeType.CAUSED_BY)
+        if edge.src == SELECT
+    }
+    assert select_causes == {A1, A2}
+    assert A3 not in select_causes
+
+
+def test_toolgraph_preflight_is_external_trace_evidence_not_causality():
+    nt = _normalized("route-success")
+    assert nt.trace.decision_evidence[0].artifact_digest == "sha256:" + "a" * 64
+    assert nt.trace.decision_evidence[0].graph_generation == 7
+    assert nt.trace.decision_evidence[0].verdict == "review"
+    assert all("toolgraph" not in (edge.src, edge.dst) for edge in nt.edges)
+
+
+def test_result_is_referenced_by_digest_without_body_or_local_path():
+    nt = _normalized("route-success")
+    attempt = next(step for step in nt.steps if step.name == "attempt:codex")
+    assert attempt.evidence is not None
+    assert attempt.evidence.artifact_digest == "sha256:" + "d" * 64
 
 
 def test_gate_spans_are_tool_steps():

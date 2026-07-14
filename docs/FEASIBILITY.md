@@ -72,13 +72,15 @@ on a general-purpose graph DB. That's the honest counter-signal to the thesis.
   product. Fine for self-hosted/dev use.
 - **FalkorDB:** SSPLv1 → source-available; commercial SaaS needs a license or source
   disclosure.
-- **KùzuDB:** MIT, embedded, openCypher — ideal UX, **but the repo was archived in
-  Oct 2025** and its on-disk format was never stabilized.
+- **KùzuDB:** MIT, embedded, Cypher — ideal UX, **but the original repo was archived on
+  2025-10-10** and is read-only.
+- **LadybugDB:** MIT, embedded, Cypher — an actively maintained Kùzu fork/successor and the
+  target of tracegraph's optional Cypher accelerator.
 
 Consequence for tracegraph: the **portable artifact is the system of record**, the
-**pure-Python in-memory store is the default**, and any graph DB (Kùzu now, something
-maintained later) is an *optional, rebuildable accelerator* behind the `GraphStore`
-interface — pinned, never load-bearing.
+**pure-Python in-memory store is the default**, and LadybugDB is an *optional, rebuildable
+accelerator* behind the `GraphStore` interface. Its database cache is never load-bearing;
+the portable JSON artifact remains authoritative across backend upgrades.
 
 ## The honest open question
 

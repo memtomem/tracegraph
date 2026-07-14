@@ -1,0 +1,62 @@
+{
+  "traceId": "trace-1",
+  "spans": [
+    {
+      "id": "root",
+      "context": {
+        "trace_id": "trace-1",
+        "span_id": "root"
+      },
+      "name": "Tell me Alice's private salary",
+      "span_kind": "AGENT",
+      "parent_id": null,
+      "start_time": "2026-07-14T00:00:00Z",
+      "end_time": "2026-07-14T00:00:01Z",
+      "status_code": "OK",
+      "attributes": {
+        "input.value": "TOP SECRET"
+      }
+    },
+    {
+      "id": "tool",
+      "context": {
+        "trace_id": "trace-1",
+        "span_id": "tool"
+      },
+      "parent_id": "root",
+      "name": "search",
+      "span_kind": "TOOL",
+      "start_time": "2026-07-14T00:00:00.1Z",
+      "end_time": "2026-07-14T00:00:00.6Z",
+      "status_code": "ERROR",
+      "status_message": "password=secret",
+      "attributes": {
+        "output.value": "PRIVATE RESULT",
+        "llm.token_count.prompt": 10,
+        "llm.token_count.completion": 4,
+        "llm.token_count.total": 14,
+        "llm.token_count.input": "SECRET TOKEN TEXT",
+        "llm.cost.prompt": "SECRET COST TEXT",
+        "llm.cost.total": "0.0042",
+        "llm.cost.currency": "USD"
+      },
+      "annotations": [
+        {
+          "name": "correctness",
+          "result": {
+            "label": "fail",
+            "score": 0.1
+          },
+          "explanation": "private rubric text"
+        }
+      ]
+    }
+  ],
+  "rootSpan": {
+    "id": "root"
+  },
+  "startTime": "2026-07-14T00:00:00Z",
+  "endTime": "2026-07-14T00:00:01Z",
+  "duration": 1000,
+  "status": "ERROR"
+}

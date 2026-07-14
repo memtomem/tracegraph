@@ -1,29 +1,29 @@
-"""Optional Kùzu-backed graph store — the openCypher cache the spec advertises.
+"""Optional LadybugDB-backed graph store — the Cypher cache the spec advertises.
 
 This is the **accelerator**, never the system of record. The JSON artifact remains
-authoritative (see :mod:`tracegraph.artifact`); a ``KuzuStore`` is rebuilt from it on load
+authoritative (see :mod:`tracegraph.artifact`); a ``LadybugStore`` is rebuilt from it on load
 and can be thrown away. The point of this backend is to *prove* the ``PathPattern`` spec
-compiles to standard openCypher — equivalence with the pure-Python matcher is what makes
+compiles to standard Cypher — equivalence with the pure-Python matcher is what makes
 the abstraction honest — so the bulk of the file is a faithful schema and a thin query
 runner, not a separate analysis library.
 
-In-memory by default (``kuzu.Database(":memory:")``) so it matches the InMemoryStore's
-ephemerality. Pass ``path=`` to persist; the on-disk format is **not** stable across Kùzu
-versions (the project's repo was archived October 2025, and 0.11.3 is the pinned floor),
-so durable durability is the JSON artifact, not the DB directory.
+In-memory by default (``ladybug.Database(":memory:")``) so it matches the InMemoryStore's
+ephemerality. Pass ``path=`` to persist. Database caches are version-local and rebuildable;
+durable persistence is the JSON artifact, not the DB directory.
 
 Requires the ``[cypher]`` extra (``pip install tracegraph[cypher]``). The import will fail
-cleanly with the ModuleNotFoundError raised by ``kuzu`` itself; the package's default install
+cleanly with the ModuleNotFoundError raised by ``ladybug`` itself; the package's default install
 never touches this module.
 """
 
 from __future__ import annotations
 
 from collections import deque
+import json
 from pathlib import Path
 from typing import Any
 
-import kuzu
+import ladybug
 
 from tracegraph import artifact
 from tracegraph.analysis.patterns import (
@@ -34,10 +34,12 @@ from tracegraph.analysis.patterns import (
 from tracegraph.analysis.patterns import find_matches as py_find_matches
 from tracegraph.model import (
     Edge,
+    EdgeOrigin,
     EdgeType,
     NormalizedTrace,
     RawTrace,
     Step,
+    StepEvidence,
     StepKind,
     StepSource,
     StepStatus,
@@ -57,35 +59,46 @@ _STEP_FIELDS: tuple[str, ...] = (
     "name",
     "status",
     "error_msg",
+    "evidence_json",
     "projection_lossy",
 )
 
-_TRACE_FIELDS: tuple[str, ...] = ("trace_id", "source_kind", "thread_id", "status")
+_TRACE_FIELDS: tuple[str, ...] = (
+    "trace_id",
+    "source_kind",
+    "run_id",
+    "thread_id",
+    "status",
+    "causal_fidelity",
+    "links_preserved",
+    "decision_evidence_json",
+)
 
 _SCHEMA_DDL: tuple[str, ...] = (
     # Step: STRING for the enum columns so the Cypher compiler can compare against
-    # ``StepKind.value`` / ``StepStatus.value`` directly (Kùzu has no native enums).
+    # ``StepKind.value`` / ``StepStatus.value`` directly (Ladybug has no native enums).
     "CREATE NODE TABLE Step ("
     "step_id STRING, trace_id STRING, seq INT64, ts STRING, "
     "kind STRING, source STRING, name STRING, status STRING, "
-    "error_msg STRING, projection_lossy BOOLEAN, "
+    "error_msg STRING, evidence_json STRING, projection_lossy BOOLEAN, "
     "PRIMARY KEY (step_id))",
     "CREATE NODE TABLE Trace ("
-    "trace_id STRING, source_kind STRING, thread_id STRING, status STRING, "
+    "trace_id STRING, source_kind STRING, run_id STRING, thread_id STRING, status STRING, "
+    "causal_fidelity STRING, links_preserved BOOLEAN, decision_evidence_json STRING, "
     "PRIMARY KEY (trace_id))",
-    "CREATE REL TABLE CAUSED_BY (FROM Step TO Step)",
+    "CREATE REL TABLE CAUSED_BY (FROM Step TO Step, origin STRING)",
     "CREATE REL TABLE TREE_PARENT (FROM Step TO Step)",
     "CREATE REL TABLE BELONGS_TO (FROM Step TO Trace)",
 )
 
 
-class KuzuStore:
-    """Implementation of :class:`~tracegraph.store.base.GraphStore` backed by Kùzu."""
+class LadybugStore:
+    """Implementation of :class:`~tracegraph.store.base.GraphStore` backed by LadybugDB."""
 
     def __init__(self, *, path: str | Path | None = None) -> None:
-        # ":memory:" is Kùzu's in-process sentinel; matches InMemoryStore's no-files default.
-        self._db = kuzu.Database(":memory:" if path is None else str(path))
-        self._conn = kuzu.Connection(self._db)
+        # ":memory:" is Ladybug's in-process sentinel; matches InMemoryStore's no-files default.
+        self._db = ladybug.Database(":memory:" if path is None else str(path))
+        self._conn = ladybug.Connection(self._db)
         self._trace: Trace | None = None
         #: True iff the most recent find_matches() could not compile to faithful Cypher
         #: (unbounded/over-cap gap) and ran the pure-Python matcher instead. Lets the CLI
@@ -95,7 +108,7 @@ class KuzuStore:
     # --- construction ---
 
     @classmethod
-    def from_trace(cls, nt: NormalizedTrace, *, path: str | Path | None = None) -> "KuzuStore":
+    def from_trace(cls, nt: NormalizedTrace, *, path: str | Path | None = None) -> "LadybugStore":
         """Load a normalized trace. Validates both edge layers at the boundary (same as
         InMemoryStore.from_trace) so a corrupt artifact can't enter the DB."""
         validate_normalized(nt)
@@ -108,12 +121,12 @@ class KuzuStore:
         return store
 
     @classmethod
-    def from_raw(cls, raw: RawTrace, *, path: str | Path | None = None) -> "KuzuStore":
+    def from_raw(cls, raw: RawTrace, *, path: str | Path | None = None) -> "LadybugStore":
         return cls.from_trace(normalize(raw), path=path)
 
     @classmethod
-    def load_artifact(cls, path: str | Path) -> "KuzuStore":
-        # ``path`` here is the **artifact** JSON, not the Kùzu DB directory — the artifact
+    def load_artifact(cls, path: str | Path) -> "LadybugStore":
+        # ``path`` here is the **artifact** JSON, not a Ladybug DB directory — the artifact
         # is the system of record, so loading by definition goes through it.
         return cls.from_trace(artifact.load(path))
 
@@ -124,7 +137,7 @@ class KuzuStore:
             self._conn.execute(ddl)
 
     def upsert_nodes(self, steps: list[Step]) -> None:
-        # Kùzu has no batch CREATE for parameterized rows in 0.11; one statement per step
+        # One parameterized statement per step is sufficient at MVP trace volumes
         # is fine at MVP volumes (a trace is hundreds of steps, not millions).
         placeholders = ", ".join(f"{f}: ${f}" for f in _STEP_FIELDS)
         stmt = f"CREATE (:Step {{{placeholders}}})"
@@ -141,9 +154,8 @@ class KuzuStore:
         Implementation: pull single-hop CAUSED_BY adjacency for the whole graph, then BFS in
         Python. The BFS preserves the in-memory store's edge-order semantics on fan-in
         (Cypher gives no row-order guarantee, so we'd otherwise diverge on multi-parent
-        steps). We deliberately do NOT use a variable-length match: Kùzu 0.11 hard-caps its
-        upper bound at 30 hops, which would silently truncate any chain deeper than that —
-        a partial RCA with no error, violating the "nothing is dropped" contract.
+        steps). We deliberately do NOT use a variable-length match here: a whole-graph pull
+        avoids backend-specific path bounds and guarantees complete RCA at any depth.
         """
         if not self._step_exists(step_id):
             raise KeyError(f"unknown step {step_id!r}")
@@ -183,14 +195,14 @@ class KuzuStore:
         return out
 
     def export_artifact(self, path: str | Path) -> None:
-        artifact.save(self.trace(), path)
+        artifact.save_atomic(self.trace(), path)
 
     def trace(self) -> NormalizedTrace:
         """Reconstruct the loaded trace from the DB by re-running :func:`normalize`.
 
-        We **only** pull the raw layer (steps + CAUSED_BY) from Kùzu and let normalize()
+        We **only** pull the raw layer (steps + CAUSED_BY) from LadybugDB and let normalize()
         re-derive ``BELONGS_TO``/``TREE_PARENT``/``projection_lossy``. That collapses two
-        round-trip invariants into one source of truth: KuzuStore is byte-stable iff
+        round-trip invariants into one source of truth: LadybugStore is byte-stable iff
         ``normalize()`` is deterministic (it is). The TREE_PARENT and BELONGS_TO rows that
         live in the DB are still useful for ad-hoc Cypher against the derived layer; they
         just aren't load-bearing for artifact round-trip.
@@ -202,29 +214,36 @@ class KuzuStore:
         ]
         caused_by_pairs = _collect(
             self._conn.execute(
-                "MATCH (a:Step)-[:CAUSED_BY]->(b:Step) RETURN a.step_id, b.step_id"
+                "MATCH (a:Step)-[e:CAUSED_BY]->(b:Step) "
+                "RETURN a.step_id, b.step_id, e.origin"
             )
         )
         raw_edges = [
-            Edge(type=EdgeType.CAUSED_BY, src=src, dst=dst) for src, dst in caused_by_pairs
+            Edge(
+                type=EdgeType.CAUSED_BY,
+                src=src,
+                dst=dst,
+                origin=EdgeOrigin(origin) if origin else None,
+            )
+            for src, dst, origin in caused_by_pairs
         ]
         return normalize(RawTrace(trace=self._trace, steps=raw_steps, causal_edges=raw_edges))
 
-    # --- pattern matching (the reason Kùzu earns its weight) ---
+    # --- pattern matching (the reason LadybugDB earns its weight) ---
 
     def find_matches(self, pattern: PathPattern) -> list[list[str]]:
-        """Run a :class:`PathPattern` as compiled openCypher.
+        """Run a :class:`PathPattern` as compiled Cypher.
 
         Returns the **same list, in the same order**, as
         :func:`tracegraph.analysis.find_matches` on the in-memory store. Pure-Python's
         traversal visits outer steps in canonical step order and expands each child level
         in canonical CAUSED_BY order — both of which, after :func:`normalize` canonicalization,
         sort to ``(seq, step_id)`` per position. So we reproduce that ordering on the rows
-        Kùzu returns. (Cypher itself gives no row-order guarantee; without this sort the
+        Ladybug returns. (Cypher itself gives no row-order guarantee; without this sort the
         backends would silently disagree.)
 
         Honest fallback: a pattern with an unbounded (or over-30-hop) gap cannot be expressed
-        within Kùzu's variable-length cap, so ``compile_to_cypher`` raises
+        within the compiler's verified variable-length cap, so ``compile_to_cypher`` raises
         :class:`~tracegraph.analysis.UncompilablePattern`. Rather than emit a query that would
         silently truncate, we fall back to a whole-graph pull (:meth:`trace`) plus the *same*
         pure-Python matcher — equivalence by identity, exactly the load-then-traverse posture
@@ -256,12 +275,20 @@ class KuzuStore:
     def _insert_edge(self, e: Edge) -> None:
         # BELONGS_TO targets a Trace node; the causal/tree edges stay Step→Step.
         target_label = "Trace" if e.type is EdgeType.BELONGS_TO else "Step"
+        relationship = (
+            f"[:{e.type.value} {{origin: $origin}}]"
+            if e.type is EdgeType.CAUSED_BY
+            else f"[:{e.type.value}]"
+        )
         stmt = (
             f"MATCH (src:Step), (dst:{target_label}) "
             f"WHERE src.step_id = $src AND dst.{'trace_id' if target_label == 'Trace' else 'step_id'} = $dst "
-            f"CREATE (src)-[:{e.type.value}]->(dst)"
+            f"CREATE (src)-{relationship}->(dst)"
         )
-        self._conn.execute(stmt, {"src": e.src, "dst": e.dst})
+        params = {"src": e.src, "dst": e.dst}
+        if e.type is EdgeType.CAUSED_BY:
+            params["origin"] = e.origin.value if e.origin else None
+        self._conn.execute(stmt, params)
 
     def _step_exists(self, step_id: str) -> bool:
         rows = _collect(
@@ -296,6 +323,11 @@ def _step_params(s: Step) -> dict[str, Any]:
         "name": s.name,
         "status": s.status.value,
         "error_msg": s.error_msg,
+        "evidence_json": (
+            json.dumps(s.evidence.model_dump(mode="json"), sort_keys=True)
+            if s.evidence is not None
+            else None
+        ),
         "projection_lossy": s.projection_lossy,
     }
 
@@ -304,8 +336,14 @@ def _trace_params(t: Trace) -> dict[str, Any]:
     return {
         "trace_id": t.trace_id,
         "source_kind": t.source_kind,
+        "run_id": t.run_id,
         "thread_id": t.thread_id,
         "status": t.status.value,
+        "causal_fidelity": t.causal_fidelity.value,
+        "links_preserved": t.links_preserved,
+        "decision_evidence_json": json.dumps(
+            [item.model_dump(mode="json") for item in t.decision_evidence], sort_keys=True
+        ),
     }
 
 
@@ -322,12 +360,17 @@ def _step_from_row(row: list[Any]) -> Step:
         name=by_name["name"],
         status=StepStatus(by_name["status"]),
         error_msg=by_name["error_msg"],
+        evidence=(
+            StepEvidence.model_validate(json.loads(by_name["evidence_json"]))
+            if by_name["evidence_json"]
+            else None
+        ),
         projection_lossy=by_name["projection_lossy"],
     )
 
 
 def _collect(result: Any) -> list[list[Any]]:
-    """Drain a Kùzu QueryResult into a plain list of rows."""
+    """Drain a Ladybug QueryResult into a plain list of rows."""
     rows: list[list[Any]] = []
     while result.has_next():
         rows.append(result.get_next())

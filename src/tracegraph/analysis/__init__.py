@@ -16,6 +16,7 @@ from tracegraph.analysis.ahu import (
     structure_only,
 )
 from tracegraph.analysis.explain import Explanation, explain
+from tracegraph.analysis.diagnose import AnalysisReport, analyze, dumps as dump_analysis
 from tracegraph.analysis.patterns import (
     MAX_GAP,
     PRESETS,
@@ -32,6 +33,9 @@ from tracegraph.analysis.patterns import (
 __all__ = [
     "Explanation",
     "explain",
+    "AnalysisReport",
+    "analyze",
+    "dump_analysis",
     "TreeDiff",
     "canonical",
     "default_label",
