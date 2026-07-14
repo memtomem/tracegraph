@@ -1,0 +1,8 @@
+{
+  "phoenix_cli": "1.8.1",
+  "phoenix_server": {
+    "image": "arizephoenix/phoenix",
+    "version": "18.0.0",
+    "digest": "sha256:949b445c8ce45b2bb98da42e7ec46dc2afc272c09edd69f9d063e343f5ec703c"
+  }
+}

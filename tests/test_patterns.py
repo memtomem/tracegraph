@@ -136,23 +136,18 @@ def _custom(tid, specs, edges):
 
 
 def _retry_trace(tid="R", first_status=OK):
-    """input → plan → search(first_status) → handle_error → replan → search(ERR) → respond.
-
-    The two 'search' TOOL steps are 3 causal hops apart with intervening retry machinery — the
-    canonical 'tool X → retry → tool X → failure' shape.
-    """
+    """input → plan → search(first_status) → retry:search → search(ERR) → respond."""
     return _custom(
         tid,
         [
             (0, "input", StepKind.CHAIN, OK),
             (1, "plan", StepKind.CHAIN, OK),
             (2, "search", StepKind.TOOL, first_status),
-            (3, "handle_error", StepKind.CHAIN, OK),
-            (4, "replan", StepKind.CHAIN, OK),
-            (5, "search", StepKind.TOOL, ERR),
-            (6, "respond", StepKind.CHAIN, OK),
+            (3, "retry:search", StepKind.CHAIN, OK),
+            (4, "search", StepKind.TOOL, ERR),
+            (5, "respond", StepKind.CHAIN, OK),
         ],
-        [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 5)],
+        [(1, 0), (2, 1), (3, 2), (4, 3), (5, 4)],
     )
 
 
@@ -160,10 +155,14 @@ def test_marquee_matches_same_tool_retried_then_failing():
     nt = _retry_trace()
     matches = find_matches(nt, PRESETS["tool-retry-failure"])
     assert len(matches) == 1
-    assert [nt.steps_by_id()[s].name for s in matches[0]] == ["search", "search"]
+    assert [nt.steps_by_id()[s].name for s in matches[0]] == [
+        "search",
+        "retry:search",
+        "search",
+    ]
     # the two distinct tool invocations, not the same step twice
-    assert matches[0][0] != matches[0][1]
-    assert matches[0] == ["R2", "R5"]
+    assert matches[0][0] != matches[0][2]
+    assert matches[0] == ["R2", "R3", "R4"]
 
 
 def test_marquee_status_agnostic_first_call_catches_both_ok_then_fail_and_fail_then_fail():
@@ -179,7 +178,7 @@ def test_marquee_does_not_match_when_second_tool_is_a_different_name():
         [
             (0, "input", StepKind.CHAIN, OK),
             (1, "search", StepKind.TOOL, OK),
-            (2, "handle", StepKind.CHAIN, OK),
+            (2, "retry:search", StepKind.CHAIN, OK),
             (3, "fetch", StepKind.TOOL, ERR),  # different tool name
         ],
         [(1, 0), (2, 1), (3, 2)],
@@ -188,12 +187,12 @@ def test_marquee_does_not_match_when_second_tool_is_a_different_name():
 
 
 def test_marquee_does_not_match_adjacent_same_tool_with_no_retry_gap():
-    # gap lo=2 requires ≥1 intervening step; back-to-back same-tool calls are not a 'retry'.
+    # Back-to-back same-tool calls without an explicit marker are not a retry.
     nt = _custom(
         "A",
         [
             (0, "search", StepKind.TOOL, OK),
-            (1, "search", StepKind.TOOL, ERR),  # directly caused by 0 → 1 hop, below gap lo=2
+            (1, "search", StepKind.TOOL, ERR),
         ],
         [(1, 0)],
     )
@@ -213,7 +212,7 @@ def test_gap_endpoint_reachable_by_two_paths_yields_one_deduped_match():
         ],
         [(1, 0), (2, 0), (3, 1), (3, 2)],
     )
-    matches = find_matches(nt, PRESETS["tool-retry-failure"])
+    matches = find_matches(nt, PRESETS["tool-repeat-failure-heuristic"])
     assert matches == [["G0", "G3"]]
 
 
@@ -229,15 +228,15 @@ def test_nameless_back_reference_never_matches():
         ],
         [(1, 0), (2, 1)],
     )
-    assert find_matches(nt, PRESETS["tool-retry-failure"]) == []
+    assert find_matches(nt, PRESETS["tool-repeat-failure-heuristic"]) == []
 
 
 def test_bounded_near_preset_matches_close_retry_but_misses_far_one():
     near = PRESETS["tool-retry-failure-near"]
-    unbounded = PRESETS["tool-retry-failure"]
-    # close retry (3 hops): both match
+    unbounded = PRESETS["tool-repeat-failure-heuristic"]
+    # close retry: both compatibility heuristics match
     close = _retry_trace("C")
-    assert find_matches(close, near) == find_matches(close, unbounded) == [["C2", "C5"]]
+    assert find_matches(close, near) == find_matches(close, unbounded) == [["C2", "C4"]]
 
 
 def test_unbounded_gap_matches_far_retry_on_deep_linear_trace_without_recursionerror():
@@ -252,7 +251,7 @@ def test_unbounded_gap_matches_far_retry_on_deep_linear_trace_without_recursione
     edges = [(i, i - 1) for i in range(1, n)]
     nt = _custom("L", specs, edges)
 
-    far = find_matches(nt, PRESETS["tool-retry-failure"])
+    far = find_matches(nt, PRESETS["tool-repeat-failure-heuristic"])
     assert far == [[f"L{5}", f"L{n - 5}"]]
     assert find_matches(nt, PRESETS["tool-retry-failure-near"]) == []  # > 30 hops apart
 
@@ -309,7 +308,7 @@ def test_unbounded_marquee_is_not_quadratic_on_tool_heavy_deep_linear_trace():
     nt = _custom("Q", specs, [(i, i - 1) for i in range(1, n)])
 
     t0 = time.perf_counter()
-    matches = find_matches(nt, PRESETS["tool-retry-failure"])
+    matches = find_matches(nt, PRESETS["tool-repeat-failure-heuristic"])
     elapsed = time.perf_counter() - t0
     # Every earlier 'search' tool ≥2 causal hops back pairs with the single failing one. The
     # immediate predecessor (distance 1) is excluded by the gap's lo=2 — so n-2, not n-1.
@@ -340,7 +339,7 @@ def test_ignored_first_predicate_gap_still_uses_unbounded_fast_path(monkeypatch)
         raise AssertionError("ignored first-predicate gap disabled the unbounded fast path")
 
     monkeypatch.setattr("tracegraph.analysis.patterns._find_matches_forward", fail_forward)
-    assert find_matches(nt, pattern) == [["R2", "R5"]]
+    assert find_matches(nt, pattern) == [["R2", "R4"]]
 
 
 @pytest.mark.parametrize("seed", range(12))
@@ -382,7 +381,9 @@ def test_fast_path_equals_forward_reference_on_random_dags(seed):
 def test_str_renders_gap_and_back_reference_readably():
     s = str(PRESETS["tool-retry-failure"])
     assert "{kind=TOOL}" in s
-    assert "→[gap 2..]→" in s  # unbounded upper bound renders as an open range
+    assert "name^=retry:" in s
     assert "name=#0" in s  # the back-reference to predicate 0
+    heuristic = str(PRESETS["tool-repeat-failure-heuristic"])
+    assert "→[gap 2..]→" in heuristic
     near = str(PRESETS["tool-retry-failure-near"])
     assert f"→[gap 2..{MAX_GAP}]→" in near

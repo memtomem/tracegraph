@@ -120,11 +120,18 @@ def test_bounded_gap_compiles_to_capped_var_length_with_distinct():
     assert q.result_vars == ("s0", "s1")
 
 
-def test_unbounded_gap_marquee_preset_refuses_to_compile():
-    # The headline preset uses an unbounded gap, which cannot be faithful under the 30-hop cap.
-    # Refusing (so the backend falls back to pure-Python) is correct; silently truncating is not.
+def test_unbounded_repeat_heuristic_refuses_to_compile():
+    # The legacy inference heuristic stays unbounded and therefore uses the pure-Python fallback.
     with pytest.raises(UncompilablePattern, match="unbounded gap"):
-        compile_to_cypher(PRESETS["tool-retry-failure"])
+        compile_to_cypher(PRESETS["tool-repeat-failure-heuristic"])
+
+
+def test_explicit_retry_preset_compiles_to_strict_native_cypher():
+    query = compile_to_cypher(PRESETS["tool-retry-failure"])
+    assert "CAUSED_BY*" not in query.cypher
+    assert query.result_vars == ("s0", "s1", "s2")
+    assert query.params["s1_name_prefix"] == "retry:"
+    assert "s2.name = s0.name" in query.cypher
 
 
 def test_over_cap_bounded_gap_refuses_to_compile():

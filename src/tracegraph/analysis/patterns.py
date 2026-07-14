@@ -140,6 +140,7 @@ class PathPattern:
     description: str = ""
     pattern_id: str | None = None
     pattern_version: int | None = None
+    review_eligible: bool = True
 
     def __post_init__(self) -> None:
         if (self.pattern_id is None) != (self.pattern_version is None):
@@ -203,8 +204,8 @@ def find_matches(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
     on the full path tuple — matching the LadybugDB backend's row sort and ``RETURN DISTINCT`` so the
     two backends agree on a fan-in graph where one endpoint is reachable by several gap paths.
 
-    Performance: the headline ``tool-retry-failure`` shape (a tool, then an *unbounded* gap to a
-    failing same-named tool) takes an endpoint-anchored fast path — see
+    Performance: two-step unbounded patterns such as ``tool-repeat-failure-heuristic`` take an
+    endpoint-anchored fast path — see
     :func:`_match_two_step_unbounded`. A naive forward walk from every tool would be O(n²) on the
     deep-linear traces this project targets; the fast path is output-optimal. Every other shape
     uses :func:`_find_matches_forward`, which is linear for bounded/strict patterns (a bounded gap
@@ -216,7 +217,7 @@ def find_matches(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
         return []
     _validate_backrefs(pattern.steps)
     preds = pattern.steps
-    # Fast path for the marquee shape: [p0, p1 (unbounded gap)]. A gap on p0 is deliberately
+    # Fast path for a two-step unbounded shape. A gap on p0 is deliberately
     # ignored by the PathPattern contract because no predicate precedes it, so it must not disable
     # this optimization. The forward matcher is correct here too but O(n²) when many steps match
     # p0; the endpoint-anchored variant is O(n·k).
@@ -553,14 +554,23 @@ PRESETS: dict[str, PathPattern] = {
         pattern_id="gate-failure-after-success",
         pattern_version=1,
     ),
-    # The marquee cross-trace pattern advertised in the README / FEASIBILITY:
-    # "tool X → retry → tool X → failure". Predicate 0 binds the first tool's name; predicate 1
-    # requires the SAME name (same_name_as=0), a failing status, and an *unbounded* causal gap
-    # (≥1 intervening step — the retry machinery). The gap is unbounded because real traces are
-    # deep-linear and a retry can be many super-steps later; the pure-Python matcher catches it
-    # at any distance, and the LadybugDB backend transparently falls back to it (the compiled form is
-    # uncompilable past 30 hops). See `tool-retry-failure-near` for a Cypher-acceleratable bound.
+    # Official retry diagnosis requires an explicit producer-authored marker. Mere repetition is
+    # retained below as a query-only heuristic and cannot create governance review candidates.
     "tool-retry-failure": PathPattern(
+        (
+            StepPredicate(kind=StepKind.TOOL),
+            StepPredicate(kind=StepKind.CHAIN, name_prefix="retry:"),
+            StepPredicate(
+                kind=StepKind.TOOL,
+                status=StepStatus.ERROR,
+                same_name_as=0,
+            ),
+        ),
+        "an explicitly linked retry of the same tool that fails",
+        pattern_id="tool-retry-failure",
+        pattern_version=2,
+    ),
+    "tool-repeat-failure-heuristic": PathPattern(
         (
             StepPredicate(kind=StepKind.TOOL),
             StepPredicate(
@@ -570,14 +580,12 @@ PRESETS: dict[str, PathPattern] = {
                 gap=(2, None),
             ),
         ),
-        "the same tool called again (after a retry) and failing — "
-        "'tool X → retry → tool X → failure' (any causal distance)",
-        pattern_id="tool-retry-failure",
+        "the same tool appears again later and fails; retry causality is only inferred",
+        pattern_id="tool-repeat-failure-heuristic",
         pattern_version=1,
+        review_eligible=False,
     ),
-    # Bounded variant of the marquee: the failing retry within MAX_GAP causal hops of the first
-    # call. Identical matches to `tool-retry-failure` for nearby retries, but it compiles to a
-    # faithful `CAUSED_BY*2..30` query so the LadybugDB accelerator runs it natively.
+    # Deprecated query-only compatibility preset from before explicit retry causality.
     "tool-retry-failure-near": PathPattern(
         (
             StepPredicate(kind=StepKind.TOOL),
@@ -592,6 +600,7 @@ PRESETS: dict[str, PathPattern] = {
         "(Cypher-acceleratable form of tool-retry-failure)",
         pattern_id="tool-retry-failure-near",
         pattern_version=1,
+        review_eligible=False,
     ),
 }
 

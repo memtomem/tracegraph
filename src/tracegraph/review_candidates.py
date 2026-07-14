@@ -46,7 +46,7 @@ def is_review_exportable(pattern: PathPattern) -> bool:
     Operational pseudo-tools such as ``gate:*`` use a name constraint and are diagnosis
     signals, not server-qualified governance candidates.
     """
-    if not pattern.steps:
+    if not pattern.review_eligible or not pattern.steps:
         return False
     endpoint = pattern.steps[-1]
     return (

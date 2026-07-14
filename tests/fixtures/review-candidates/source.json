@@ -54,7 +54,7 @@
       {
         "error_msg": null,
         "kind": "CHAIN",
-        "name": "retry",
+        "name": "retry:syncmill::board_stats",
         "projection_lossy": false,
         "seq": 1,
         "source": "loop",

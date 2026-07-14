@@ -168,8 +168,8 @@ def test_pattern_matches_equivalent_to_pure_python(preset_name: str) -> None:
     # Every shipped preset, on every shape we test elsewhere, must agree across backends —
     # exact list equality (not set equality): if LadybugDB reorders matches relative to the
     # pure-Python traversal, that's a real divergence we want to catch, not paper over.
-    # The retry fixtures exercise the gap presets across BOTH backend modes: the bounded
-    # 'near' preset compiles to capped Cypher; the unbounded marquee falls back to pure-Python.
+    # The retry fixtures exercise the compatibility gap presets across BOTH backend modes: the
+    # bounded 'near' preset compiles to capped Cypher; the unbounded heuristic falls back.
     pattern = PRESETS[preset_name]
     for nt in (
         _erroring_tool_trace(),
@@ -197,21 +197,38 @@ def test_gap_diamond_distinct_parity_one_row_per_endpoint_pair() -> None:
     assert store.fell_back_to_python is False  # bounded gap → ran as real Cypher
 
 
-def test_unbounded_marquee_falls_back_to_python_and_stays_equivalent() -> None:
-    # The unbounded marquee can't compile under the 30-hop cap, so LadybugStore must transparently
+def test_unbounded_repeat_heuristic_falls_back_to_python_and_stays_equivalent() -> None:
+    # The unbounded compatibility heuristic can't compile, so LadybugStore must transparently
     # run the pure-Python matcher (system of record) and flag that it did — never silently truncate.
     for nt in (_retry_trace(), _retry_diamond()):
         store = LadybugStore.from_trace(nt)
-        ku = store.find_matches(PRESETS["tool-retry-failure"])
+        ku = store.find_matches(PRESETS["tool-repeat-failure-heuristic"])
         assert store.fell_back_to_python is True
-        assert ku == find_matches(nt, PRESETS["tool-retry-failure"])
+        assert ku == find_matches(nt, PRESETS["tool-repeat-failure-heuristic"])
+
+
+def test_explicit_retry_runs_as_native_cypher_and_matches_python() -> None:
+    nt = _custom(
+        "EX",
+        [
+            (0, "syncmill::search", StepKind.TOOL, OK),
+            (1, "retry:syncmill::search", StepKind.CHAIN, OK),
+            (2, "syncmill::search", StepKind.TOOL, ERR),
+        ],
+        [(1, 0), (2, 1)],
+    )
+    store = LadybugStore.from_trace(nt)
+    assert store.find_matches(PRESETS["tool-retry-failure"]) == find_matches(
+        nt, PRESETS["tool-retry-failure"]
+    ) == [["EX0", "EX1", "EX2"]]
+    assert store.fell_back_to_python is False
 
 
 def test_fell_back_flag_resets_between_calls() -> None:
     # The flag reflects the MOST RECENT call: a fallback then a compilable call must clear it,
     # or the CLI honesty note would cry wolf on a subsequent native-Cypher query.
     store = LadybugStore.from_trace(_retry_trace())
-    store.find_matches(PRESETS["tool-retry-failure"])  # unbounded → fallback
+    store.find_matches(PRESETS["tool-repeat-failure-heuristic"])  # unbounded → fallback
     assert store.fell_back_to_python is True
     store.find_matches(PRESETS["tool-retry-failure-near"])  # bounded → native Cypher
     assert store.fell_back_to_python is False
@@ -228,9 +245,11 @@ def test_unbounded_fallback_matches_far_retry_past_the_hop_cap() -> None:
     nt = _custom("DEEP", specs, [(i, i - 1) for i in range(1, n)])
 
     store = LadybugStore.from_trace(nt)
-    ku = store.find_matches(PRESETS["tool-retry-failure"])
+    ku = store.find_matches(PRESETS["tool-repeat-failure-heuristic"])
     assert store.fell_back_to_python is True
-    assert ku == find_matches(nt, PRESETS["tool-retry-failure"]) == [["DEEP3", f"DEEP{n - 3}"]]
+    assert ku == find_matches(nt, PRESETS["tool-repeat-failure-heuristic"]) == [
+        ["DEEP3", f"DEEP{n - 3}"]
+    ]
     assert (n - 3) - 3 > MAX_GAP  # guard: the retry really is past the cap
     # the bounded variant, run as native Cypher, correctly finds nothing this far apart
     assert store.find_matches(PRESETS["tool-retry-failure-near"]) == []
@@ -452,13 +471,15 @@ def test_cli_query_can_use_ladybug_backend(tmp_path) -> None:
     assert "1 match(es)" in res.output
 
 
-def test_cli_query_ladybug_marquee_prints_honest_fallback_note(tmp_path) -> None:
-    # The unbounded marquee can't compile under LadybugDB's cap, so --backend ladybug transparently
+def test_cli_query_ladybug_repeat_heuristic_prints_honest_fallback_note(tmp_path) -> None:
+    # The unbounded heuristic can't compile under LadybugDB's cap, so LadybugDB transparently
     # runs the pure-Python matcher. The CLI must SAY so (the project's honesty ethos) while
     # still returning the correct match — never silently pretend the accelerator ran it.
     p = tmp_path / "retry.json"
     artifact.save(_retry_trace(), p)
-    res = runner.invoke(app, ["query", "tool-retry-failure", "--backend", "ladybug", str(p)])
+    res = runner.invoke(
+        app, ["query", "tool-repeat-failure-heuristic", "--backend", "ladybug", str(p)]
+    )
     assert res.exit_code == 0, res.output
     assert "1 match(es)" in res.output  # correct result ...
     assert "not Cypher-compilable" in res.output  # ... plus the honest deferral note
