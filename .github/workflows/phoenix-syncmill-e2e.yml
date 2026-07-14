@@ -20,10 +20,6 @@ jobs:
     env:
       SYNCMILL_REF: ${{ inputs.syncmill_ref || 'main' }}
       PHOENIX_PROJECT: tracegraph-syncmill-e2e
-      HOME: ${{ runner.temp }}/e2e-home
-      XDG_CONFIG_HOME: ${{ runner.temp }}/e2e-xdg/config
-      XDG_CACHE_HOME: ${{ runner.temp }}/e2e-xdg/cache
-      XDG_DATA_HOME: ${{ runner.temp }}/e2e-xdg/data
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +29,20 @@ jobs:
           repository: memtomem/syncmill
           ref: ${{ env.SYNCMILL_REF }}
           path: vendor/syncmill
+
+      # `runner.*` is a step-level context, so resolve these paths here rather than in
+      # job-level `env` (which makes GitHub reject the workflow before dispatch).
+      - name: Prepare isolated runtime paths
+        run: |
+          echo "HOME=$RUNNER_TEMP/e2e-home" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/e2e-xdg/config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=$RUNNER_TEMP/e2e-xdg/cache" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=$RUNNER_TEMP/e2e-xdg/data" >> "$GITHUB_ENV"
+          mkdir -p \
+            "$RUNNER_TEMP/e2e-home" \
+            "$RUNNER_TEMP/e2e-xdg/config" \
+            "$RUNNER_TEMP/e2e-xdg/cache" \
+            "$RUNNER_TEMP/e2e-xdg/data"
 
       - name: Record SyncMill revision
         run: echo "SYNCMILL_SHA=$(git -C vendor/syncmill rev-parse HEAD)" >> "$GITHUB_ENV"
@@ -64,7 +74,6 @@ jobs:
 
       - name: Start pinned Phoenix server
         run: |
-          mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
           IMAGE=$(jq -r '.phoenix_server | "\(.image):\(.version)@\(.digest)"' contracts/phoenix-runtime.json)
           docker pull "$IMAGE"
           docker run --detach --rm --name tracegraph-phoenix-e2e \
