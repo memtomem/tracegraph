@@ -8,6 +8,12 @@ The scheduled run resolves SyncMill `main` and records the exact commit SHA. A m
 select a branch, tag, or commit with the `syncmill_ref` input. This allows a coordinated SyncMill
 producer change to be tested before its default branch is updated.
 
+Both repositories are private. Configure the Tracegraph Actions secret `SYNCMILL_REPO_TOKEN`
+with a fine-grained token limited to the `memtomem/syncmill` repository and read-only
+**Contents** permission. The workflow validates that the secret exists before checkout and does
+not persist the credential in the checked-out repository. Do not use a broad classic `repo` token
+when a repository-scoped fine-grained token is available.
+
 The workflow proves the following real boundaries:
 
 1. A controlled SyncMill `AgentRunner` produces a successful baseline and a failed explicit
