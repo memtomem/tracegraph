@@ -1,0 +1,59 @@
+# Optional high-fidelity fan-out. Adjust endpoints/headers for your Phoenix deployment.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+  transform/tracegraph-safe:
+    error_mode: propagate
+    trace_statements:
+      - context: span
+        statements:
+          - set(status.message, "")
+          - keep_keys(resource.attributes, [])
+          - >-
+            keep_keys(attributes, [
+              "openinference.span.kind",
+              "graph.node.id",
+              "graph.node.parent_id",
+              "llm.token_count.prompt",
+              "llm.token_count.completion",
+              "llm.token_count.total",
+              "llm.token_count.input",
+              "llm.token_count.output",
+              "llm.cost.prompt",
+              "llm.cost.completion",
+              "llm.cost.total",
+              "llm.cost.input",
+              "llm.cost.output",
+              "llm.cost.currency"
+            ])
+      - context: spanevent
+        statements:
+          - keep_keys(attributes, [])
+
+exporters:
+  otlphttp/phoenix:
+    traces_endpoint: ${env:PHOENIX_OTLP_TRACES_ENDPOINT}
+    headers:
+      api_key: ${env:PHOENIX_API_KEY}
+  file/tracegraph:
+    path: /tmp/tracegraph-otlp.jsonl
+    format: json
+    append: true
+
+service:
+  pipelines:
+    traces/phoenix:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phoenix]
+    traces/tracegraph:
+      receivers: [otlp]
+      processors: [transform/tracegraph-safe, batch]
+      exporters: [file/tracegraph]

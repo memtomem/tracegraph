@@ -1,8 +1,8 @@
-"""Tests for the backend-neutral PathPattern → openCypher compiler.
+"""Tests for the backend-neutral PathPattern → Cypher compiler.
 
-No Kùzu dependency here — the compiler is pure stdlib so it stays importable (and verifiable)
+No LadybugDB dependency here — the compiler is pure stdlib so it stays importable (and verifiable)
 in the default install. Equivalence with the pure-Python matcher is tested separately in
-test_kuzu_store.py, which is the only place the contract "same input → same matches" must hold.
+test_ladybug_store.py, which is the only place the contract "same input → same matches" must hold.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def test_strict_patterns_keep_bare_return_no_distinct():
 
 def test_bounded_gap_compiles_to_capped_var_length_with_distinct():
     q = compile_to_cypher(PRESETS["tool-retry-failure-near"])
-    # capped variable-length span (never exceeds Kùzu's 30-hop ceiling) ...
+    # capped variable-length span (never exceeds LadybugDB's 30-hop ceiling) ...
     assert f"(s0:Step)<-[:CAUSED_BY*2..{MAX_GAP}]-(s1:Step)" in q.cypher
     # ... DISTINCT so a fan-in graph collapses to one row per endpoint pair ...
     assert q.cypher.startswith("MATCH") and "RETURN DISTINCT" in q.cypher
@@ -131,7 +131,7 @@ def test_over_cap_bounded_gap_refuses_to_compile():
     pattern = PathPattern(
         (StepPredicate(kind=StepKind.TOOL), StepPredicate(kind=StepKind.TOOL, gap=(2, MAX_GAP + 1)))
     )
-    with pytest.raises(UncompilablePattern, match=f"exceeds Kùzu's {MAX_GAP}-hop"):
+    with pytest.raises(UncompilablePattern, match=f"exceeds LadybugDB's {MAX_GAP}-hop"):
         compile_to_cypher(pattern)
 
 

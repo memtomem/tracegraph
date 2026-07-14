@@ -36,7 +36,7 @@ subprocess 실행을 OpenInference/OTLP span 또는 portable trace artifact로 �
 - LangGraph checkpoint와 OpenInference/OTLP span adapter를 제공한다.
 - raw multi-parent `CAUSED_BY` 그래프를 system of record로 유지한다.
 - `explain`, AHU 기반 `diff`, cross-trace pattern query를 제공한다.
-- portable JSON이 기준 artifact이고 Kuzu는 선택적 accelerator다.
+- portable JSON이 기준 artifact이고 LadybugDB는 선택적 Cypher accelerator다.
 
 ## 목표
 
@@ -50,7 +50,7 @@ subprocess 실행을 OpenInference/OTLP span 또는 portable trace artifact로 �
 - syncmill의 실행 엔진이나 memtomem을 tracegraph가 대체하는 것
 - 모든 stdout, prompt, patch 또는 메모리 내용을 trace artifact에 복제하는 것
 - tree projection을 RCA의 system of record로 사용하는 것
-- Kuzu 또는 특정 observability vendor를 필수 저장소로 만드는 것
+- LadybugDB 또는 특정 observability vendor를 필수 저장소로 만드는 것
 
 ## 제안 trace 계약
 
@@ -123,6 +123,23 @@ span name에는 agent id/phase/인덱스만 허용하고 uuid, timestamp, run_id
 - [x] failure pattern을 versioned governance review candidate JSON으로 내보낸다.
 - [x] tracegraph가 toolgraph manifest를 직접 수정하지 않는 경계를 테스트한다.
 
+### 5단계: 선택적 Cypher backend를 LadybugDB로 전환
+
+Kùzu 원본 저장소는 2025년 10월 10일 archived되어 read-only 상태다. 따라서
+유지보수가 중단된 Kùzu를 신규 backend로 유지하지 않고, Kùzu에서 fork되어 활발히
+개발되는 [LadybugDB](https://github.com/LadybugDB/ladybug)를 대상으로 구현한다.
+이 전환은 Phoenix 중심 분석 경로와 분리된 선택적 가속 계층이며, Phoenix export와
+portable JSON artifact는 LadybugDB 설치 여부와 관계없이 동일하게 동작해야 한다.
+
+- [x] `[cypher]` extra를 공식 `ladybug` Python 패키지로 교체한다.
+- [x] `LadybugStore`와 `--backend ladybug`를 공개 API/CLI 명칭으로 사용한다.
+- [x] DB 파일을 정본으로 승격하지 않고 JSON artifact에서 매번 재생성 가능하게 한다.
+- [x] pure-Python matcher와 LadybugDB Cypher 결과의 순서 포함 동등성을 검증한다.
+- [x] backend의 variable-length path 한계를 실제 지원 버전에서 검증하고, 표현할 수
+  없는 패턴은 pure-Python matcher로 명시적으로 fallback한다.
+- [x] Phoenix evidence, causal edge origin, run id가 LadybugDB round-trip에서 보존되는지
+  회귀 테스트한다.
+
 T3 producer는 `run_id`, `pattern_id`/`pattern_version`, qualified `tool_key`, 분석한
 normalized artifact의 `sha256:` digest만 내보낸다. 후보는 사람이 검토할 evidence이며
 SyncMill은 exact tuple을 idempotent `review`/`human-required` board item으로 가져온다.
@@ -138,7 +155,7 @@ span과 운영 검토 평가는 별도 후속 작업이다.
 - 동일한 OTLP fixture가 안정적인 normalized artifact를 만든다.
 - 모든 RCA는 raw `CAUSED_BY`를 사용하고 projection loss를 숨기지 않는다.
 - 병렬 span의 timestamp 정렬이 인과 edge로 잘못 승격되지 않는다.
-- core test는 Kuzu와 syncmill 설치 없이 통과한다.
+- core test는 LadybugDB와 syncmill 설치 없이 통과한다.
 - prompt, credential, 전체 patch 및 memtomem 내용이 trace에 포함되지 않는다.
 
 ## 주요 위험과 대응

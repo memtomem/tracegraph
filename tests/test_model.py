@@ -1,9 +1,12 @@
 """Contract + artifact round-trip."""
 
+import json
+
 import pytest
 
 from tracegraph import artifact
 from tracegraph.model import (
+    CausalFidelity,
     Edge,
     EdgeType,
     RawTrace,
@@ -33,6 +36,21 @@ def test_artifact_round_trip_is_stable():
     assert again == nt
     # dumps is deterministic (sorted keys) -> re-serializing the parsed trace matches.
     assert artifact.dumps(again) == text
+    assert json.loads(text)["schema_version"] == 2
+
+
+def test_v1_artifact_is_migrated_in_memory_without_rewriting():
+    payload = json.loads(artifact.dumps(normalize(_raw())))
+    payload["schema_version"] = 1
+    payload["trace"]["trace"].pop("causal_fidelity")
+    payload["trace"]["trace"].pop("links_preserved")
+    for step in payload["trace"]["steps"]:
+        step.pop("evidence")
+    for edge in payload["trace"]["edges"]:
+        edge.pop("origin")
+    loaded = artifact.loads(json.dumps(payload))
+    assert loaded.trace.causal_fidelity is CausalFidelity.LEGACY_UNKNOWN
+    assert loaded.edges_of(EdgeType.CAUSED_BY)[0].origin.value == "legacy_unknown"
 
 
 def test_save_load(tmp_path):

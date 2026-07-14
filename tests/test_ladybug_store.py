@@ -1,6 +1,6 @@
-"""KuzuStore tests — gated on the ``[cypher]`` extra.
+"""LadybugStore tests — gated on the ``[cypher]`` extra.
 
-The headline contract: for any normalized trace and any ``PathPattern``, the Kùzu backend
+The headline contract: for any normalized trace and any ``PathPattern``, the LadybugDB backend
 must return the **same match set** as the pure-Python matcher. The Cypher backend is an
 *accelerator*, not a separate analysis — divergence here would silently produce different
 RCA evidence depending on which backend a user happened to install.
@@ -11,23 +11,26 @@ from __future__ import annotations
 import pytest
 from typer.testing import CliRunner
 
-kuzu = pytest.importorskip("kuzu", reason="requires the [cypher] extra")
+ladybug = pytest.importorskip("ladybug", reason="requires the [cypher] extra")
 
 from tracegraph import artifact
 from tracegraph.analysis import MAX_GAP, PRESETS, PathPattern, StepPredicate, find_matches
 from tracegraph.cli import app
 from tracegraph.model import (
+    CausalFidelity,
     Edge,
+    EdgeOrigin,
     EdgeType,
     NormalizedTrace,
     RawTrace,
     Step,
+    StepEvidence,
     StepKind,
     StepStatus,
     Trace,
 )
 from tracegraph.normalize import normalize
-from tracegraph.store import InMemoryStore, KuzuStore
+from tracegraph.store import InMemoryStore, LadybugStore
 
 pytestmark = pytest.mark.cypher
 runner = CliRunner()
@@ -114,7 +117,7 @@ def _retry_trace(tid: str = "RT") -> NormalizedTrace:
 def _retry_diamond(tid: str = "RD") -> NormalizedTrace:
     """search(OK) → {a, b} → search(ERR): the failing retry is reachable by TWO gap paths.
 
-    This is the equivalence trap: a Kùzu variable-length match yields one row per *path*, so
+    This is the equivalence trap: a LadybugDB variable-length match yields one row per *path*, so
     without RETURN DISTINCT it would emit the (s0,s1) pair twice and diverge from the deduped
     pure-Python matcher.
     """
@@ -162,7 +165,7 @@ def _fanin_trace(tid: str = "C") -> NormalizedTrace:
 @pytest.mark.parametrize("preset_name", sorted(PRESETS.keys()))
 def test_pattern_matches_equivalent_to_pure_python(preset_name: str) -> None:
     # Every shipped preset, on every shape we test elsewhere, must agree across backends —
-    # exact list equality (not set equality): if Kùzu reorders matches relative to the
+    # exact list equality (not set equality): if LadybugDB reorders matches relative to the
     # pure-Python traversal, that's a real divergence we want to catch, not paper over.
     # The retry fixtures exercise the gap presets across BOTH backend modes: the bounded
     # 'near' preset compiles to capped Cypher; the unbounded marquee falls back to pure-Python.
@@ -174,7 +177,7 @@ def test_pattern_matches_equivalent_to_pure_python(preset_name: str) -> None:
         _retry_trace(),
         _retry_diamond(),
     ):
-        store = KuzuStore.from_trace(nt)
+        store = LadybugStore.from_trace(nt)
         assert store.find_matches(pattern) == find_matches(nt, pattern), (
             f"divergence on {preset_name} / {nt.trace.trace_id}"
         )
@@ -186,7 +189,7 @@ def test_gap_diamond_distinct_parity_one_row_per_endpoint_pair() -> None:
     # twice on this diamond — diverging from the deduped pure-Python matcher. With DISTINCT
     # both yield exactly one row. (If this regresses, the compiled query dropped DISTINCT.)
     nt = _retry_diamond()
-    store = KuzuStore.from_trace(nt)
+    store = LadybugStore.from_trace(nt)
     ku = store.find_matches(PRESETS["tool-retry-failure-near"])
     py = find_matches(nt, PRESETS["tool-retry-failure-near"])
     assert ku == py == [["RD0", "RD3"]]
@@ -194,10 +197,10 @@ def test_gap_diamond_distinct_parity_one_row_per_endpoint_pair() -> None:
 
 
 def test_unbounded_marquee_falls_back_to_python_and_stays_equivalent() -> None:
-    # The unbounded marquee can't compile under the 30-hop cap, so KuzuStore must transparently
+    # The unbounded marquee can't compile under the 30-hop cap, so LadybugStore must transparently
     # run the pure-Python matcher (system of record) and flag that it did — never silently truncate.
     for nt in (_retry_trace(), _retry_diamond()):
-        store = KuzuStore.from_trace(nt)
+        store = LadybugStore.from_trace(nt)
         ku = store.find_matches(PRESETS["tool-retry-failure"])
         assert store.fell_back_to_python is True
         assert ku == find_matches(nt, PRESETS["tool-retry-failure"])
@@ -206,7 +209,7 @@ def test_unbounded_marquee_falls_back_to_python_and_stays_equivalent() -> None:
 def test_fell_back_flag_resets_between_calls() -> None:
     # The flag reflects the MOST RECENT call: a fallback then a compilable call must clear it,
     # or the CLI honesty note would cry wolf on a subsequent native-Cypher query.
-    store = KuzuStore.from_trace(_retry_trace())
+    store = LadybugStore.from_trace(_retry_trace())
     store.find_matches(PRESETS["tool-retry-failure"])  # unbounded → fallback
     assert store.fell_back_to_python is True
     store.find_matches(PRESETS["tool-retry-failure-near"])  # bounded → native Cypher
@@ -214,7 +217,7 @@ def test_fell_back_flag_resets_between_calls() -> None:
 
 
 def test_unbounded_fallback_matches_far_retry_past_the_hop_cap() -> None:
-    # A retry well beyond Kùzu's 30-hop cap: the bounded 'near' Cypher would miss it, but the
+    # A retry well beyond LadybugDB's 30-hop cap: the bounded 'near' Cypher would miss it, but the
     # unbounded fallback (whole-graph pull + pure-Python) catches it AND equals the in-memory
     # store at that depth — the same load-then-traverse guarantee ancestors() makes.
     n = 80  # > MAX_GAP, so a *2..30 var-length query could never reach the failing retry
@@ -223,7 +226,7 @@ def test_unbounded_fallback_matches_far_retry_past_the_hop_cap() -> None:
     specs[n - 3] = (n - 3, "search", StepKind.TOOL, ERR)
     nt = _custom("DEEP", specs, [(i, i - 1) for i in range(1, n)])
 
-    store = KuzuStore.from_trace(nt)
+    store = LadybugStore.from_trace(nt)
     ku = store.find_matches(PRESETS["tool-retry-failure"])
     assert store.fell_back_to_python is True
     assert ku == find_matches(nt, PRESETS["tool-retry-failure"]) == [["DEEP3", f"DEEP{n - 3}"]]
@@ -236,7 +239,7 @@ def test_ad_hoc_pattern_with_only_kind_wildcard_status_matches_python() -> None:
     # Exercise a non-preset pattern so the equivalence isn't preset-shaped by accident.
     nt = _erroring_tool_trace()
     pattern = PathPattern((StepPredicate(kind=StepKind.CHAIN), StepPredicate(kind=StepKind.TOOL)))
-    store = KuzuStore.from_trace(nt)
+    store = LadybugStore.from_trace(nt)
     assert store.find_matches(pattern) == find_matches(nt, pattern)
 
 
@@ -247,7 +250,7 @@ def test_fanin_pattern_returns_one_row_per_real_cause_in_traversal_order() -> No
     # exercise the per-column seq tiebreaker explicitly.
     nt = _fanin_trace()
     pattern = PathPattern((StepPredicate(kind=StepKind.CHAIN), StepPredicate(kind=StepKind.TOOL)))
-    store = KuzuStore.from_trace(nt)
+    store = LadybugStore.from_trace(nt)
     ku = store.find_matches(pattern)
     py = find_matches(nt, pattern)
     assert ku == py
@@ -255,10 +258,10 @@ def test_fanin_pattern_returns_one_row_per_real_cause_in_traversal_order() -> No
 
 
 def test_empty_pattern_returns_no_matches_on_both_backends() -> None:
-    # find_matches in pure-Python short-circuits; KuzuStore must match the convention so
+    # find_matches in pure-Python short-circuits; LadybugStore must match the convention so
     # backend-agnostic callers don't need a special case.
     nt = _erroring_tool_trace()
-    assert KuzuStore.from_trace(nt).find_matches(PathPattern(())) == []
+    assert LadybugStore.from_trace(nt).find_matches(PathPattern(())) == []
     assert find_matches(nt, PathPattern(())) == []
 
 
@@ -270,7 +273,7 @@ def test_ancestors_returns_full_raw_chain_nearest_first_on_linear_trace() -> Non
     # InMemoryStore.ancestors. (The fan-in case below only asserts the set, since BFS order
     # over multi-parent steps isn't an externally-stable contract.)
     nt = _erroring_tool_trace()
-    store = KuzuStore.from_trace(nt)
+    store = LadybugStore.from_trace(nt)
     chain = store.ancestors("A3")  # respond <- call_tool <- plan <- input
     assert [s.step_id for s in chain] == ["A2", "A1", "A0"]
 
@@ -279,49 +282,82 @@ def test_ancestors_on_fanin_returns_every_real_cause() -> None:
     # The whole point of the raw layer: a fan-in step must surface BOTH causes, not just
     # the TREE_PARENT projection. (Order is unspecified for multi-parent, so compare sets.)
     nt = _fanin_trace()
-    store = KuzuStore.from_trace(nt)
+    store = LadybugStore.from_trace(nt)
     chain = store.ancestors("C3")
     assert {s.step_id for s in chain} == {"C0", "C1", "C2"}
 
 
 def test_ancestors_raises_on_unknown_step_id() -> None:
-    store = KuzuStore.from_trace(_erroring_tool_trace())
+    store = LadybugStore.from_trace(_erroring_tool_trace())
     with pytest.raises(KeyError, match="unknown step"):
         store.ancestors("does-not-exist")
 
 
 def test_ancestors_deep_chain_matches_in_memory_at_any_depth() -> None:
-    # Regression: Kùzu caps variable-length hops at 30, so a `CAUSED_BY*0..` ancestor query
+    # Regression: LadybugDB caps variable-length hops at 30, so a `CAUSED_BY*0..` ancestor query
     # silently truncated chains deeper than 31 — a partial RCA with no error. ancestors()
     # must reproduce InMemoryStore exactly at any depth, including well past the 30-hop cap.
     n = 100
     nt = _linear("D", *[(f"n{i}", StepKind.CHAIN, OK) for i in range(n)])
-    ku = KuzuStore.from_trace(nt).ancestors(f"D{n - 1}")
+    ku = LadybugStore.from_trace(nt).ancestors(f"D{n - 1}")
     mem = InMemoryStore.from_trace(nt).ancestors(f"D{n - 1}")
     assert [s.step_id for s in ku] == [s.step_id for s in mem]
     assert len(ku) == n - 1  # the full chain, not truncated at 31
 
 
 def test_artifact_roundtrip_preserves_normalized_trace(tmp_path) -> None:
-    # The artifact is the system of record. Loading into Kùzu and exporting must reproduce
+    # The artifact is the system of record. Loading into LadybugDB and exporting must reproduce
     # the JSON byte-for-byte — otherwise the Cypher backend isn't a true cache, it's a
     # second source that can drift.
     nt = _fanin_trace()
     src_path = tmp_path / "trace.json"
     artifact.save(nt, src_path)
 
-    store = KuzuStore.load_artifact(src_path)
+    store = LadybugStore.load_artifact(src_path)
     out_path = tmp_path / "out.json"
     store.export_artifact(out_path)
 
     assert out_path.read_bytes() == src_path.read_bytes()
 
 
+def test_v2_evidence_origin_and_run_id_survive_ladybug_roundtrip(tmp_path) -> None:
+    raw = RawTrace(
+        trace=Trace(
+            trace_id="evidence",
+            source_kind="phoenix_cli",
+            run_id="run-1",
+            causal_fidelity=CausalFidelity.PARENT_ONLY,
+            links_preserved=False,
+        ),
+        steps=[
+            Step(step_id="a", trace_id="evidence", seq=0, name="agent"),
+            Step(
+                step_id="b",
+                trace_id="evidence",
+                seq=1,
+                name="llm",
+                kind=StepKind.LLM,
+                evidence=StepEvidence(total_tokens=12, total_cost="0.01"),
+            ),
+        ],
+        causal_edges=[
+            Edge(
+                type=EdgeType.CAUSED_BY,
+                src="b",
+                dst="a",
+                origin=EdgeOrigin.SPAN_PARENT_FALLBACK,
+            )
+        ],
+    )
+    nt = normalize(raw)
+    assert LadybugStore.from_trace(nt).trace() == nt
+
+
 def test_roundtrip_is_byte_stable_even_for_non_canonical_raw_input(tmp_path) -> None:
     # The byte-stability claim is "any RawTrace that normalize() accepts round-trips" —
     # not "any RawTrace that happens to be in canonical order". Construct a RawTrace with
     # steps in reverse-seq order and CAUSED_BY edges in reverse-encountered order; after
-    # one normalize() pass it should land on the canonical artifact, and KuzuStore round-
+    # one normalize() pass it should land on the canonical artifact, and LadybugStore round-
     # trip must hold from there.
     steps = [
         Step(step_id="r3", trace_id="R", seq=3, name="merge", kind=StepKind.TOOL, status=ERR),
@@ -342,7 +378,7 @@ def test_roundtrip_is_byte_stable_even_for_non_canonical_raw_input(tmp_path) -> 
     artifact.save(nt, src_path)
 
     out_path = tmp_path / "out.json"
-    KuzuStore.load_artifact(src_path).export_artifact(out_path)
+    LadybugStore.load_artifact(src_path).export_artifact(out_path)
 
     assert out_path.read_bytes() == src_path.read_bytes()
 
@@ -358,36 +394,36 @@ def test_from_raw_normalizes_and_loads() -> None:
         ],
         causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
     )
-    store = KuzuStore.from_raw(raw)
+    store = LadybugStore.from_raw(raw)
     assert len(store.trace().steps) == len(nt.steps)
 
 
 def test_corrupt_trace_rejected_at_load_boundary() -> None:
     # Same boundary check as InMemoryStore: dangling edges must be caught before they
-    # enter the DB, where they'd silently disappear (Kùzu's MATCH-then-CREATE skips
+    # enter the DB, where they'd silently disappear (LadybugDB's MATCH-then-CREATE skips
     # missing endpoints, which would hide the bug).
     nt = _erroring_tool_trace()
     bad_edges = nt.edges + [Edge(type=EdgeType.CAUSED_BY, src="A3", dst="ghost")]
     corrupt = NormalizedTrace(trace=nt.trace, steps=nt.steps, edges=bad_edges)
     with pytest.raises(ValueError, match="ghost"):
-        KuzuStore.from_trace(corrupt)
+        LadybugStore.from_trace(corrupt)
 
 
 # --- CLI backend selection ---
 
 
-def test_cli_explain_can_use_kuzu_backend(tmp_path) -> None:
+def test_cli_explain_can_use_ladybug_backend(tmp_path) -> None:
     src_path = tmp_path / "trace.json"
     artifact.save(_erroring_tool_trace(), src_path)
 
-    res = runner.invoke(app, ["explain", "--backend", "kuzu", str(src_path), "A2"])
+    res = runner.invoke(app, ["explain", "--backend", "ladybug", str(src_path), "A2"])
 
     assert res.exit_code == 0, res.output
     assert "call_tool" in res.output
     assert "← plan" in res.output
 
 
-def test_cli_query_can_use_kuzu_backend(tmp_path) -> None:
+def test_cli_query_can_use_ladybug_backend(tmp_path) -> None:
     a_path = tmp_path / "A.json"
     b_path = tmp_path / "B.json"
     artifact.save(_erroring_tool_trace(), a_path)
@@ -395,7 +431,7 @@ def test_cli_query_can_use_kuzu_backend(tmp_path) -> None:
 
     res = runner.invoke(
         app,
-        ["query", "tool-failure", "--backend", "kuzu", str(a_path), str(b_path)],
+        ["query", "tool-failure", "--backend", "ladybug", str(a_path), str(b_path)],
     )
 
     assert res.exit_code == 0, res.output
@@ -404,23 +440,23 @@ def test_cli_query_can_use_kuzu_backend(tmp_path) -> None:
     assert "1 match(es)" in res.output
 
 
-def test_cli_query_kuzu_marquee_prints_honest_fallback_note(tmp_path) -> None:
-    # The unbounded marquee can't compile under Kùzu's cap, so --backend kuzu transparently
+def test_cli_query_ladybug_marquee_prints_honest_fallback_note(tmp_path) -> None:
+    # The unbounded marquee can't compile under LadybugDB's cap, so --backend ladybug transparently
     # runs the pure-Python matcher. The CLI must SAY so (the project's honesty ethos) while
     # still returning the correct match — never silently pretend the accelerator ran it.
     p = tmp_path / "retry.json"
     artifact.save(_retry_trace(), p)
-    res = runner.invoke(app, ["query", "tool-retry-failure", "--backend", "kuzu", str(p)])
+    res = runner.invoke(app, ["query", "tool-retry-failure", "--backend", "ladybug", str(p)])
     assert res.exit_code == 0, res.output
     assert "1 match(es)" in res.output  # correct result ...
     assert "not Cypher-compilable" in res.output  # ... plus the honest deferral note
 
 
-def test_cli_query_kuzu_bounded_marquee_runs_native_no_fallback_note(tmp_path) -> None:
+def test_cli_query_ladybug_bounded_marquee_runs_native_no_fallback_note(tmp_path) -> None:
     # The bounded variant DOES compile, so the fallback note must NOT appear (no crying wolf).
     p = tmp_path / "retry.json"
     artifact.save(_retry_trace(), p)
-    res = runner.invoke(app, ["query", "tool-retry-failure-near", "--backend", "kuzu", str(p)])
+    res = runner.invoke(app, ["query", "tool-retry-failure-near", "--backend", "ladybug", str(p)])
     assert res.exit_code == 0, res.output
     assert "1 match(es)" in res.output
     assert "not Cypher-compilable" not in res.output

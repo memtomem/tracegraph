@@ -176,16 +176,16 @@ def test_builder_deduplicates_and_only_indexes_matched_traces(tmp_path, monkeypa
 
 
 @pytest.mark.cypher
-def test_memory_and_kuzu_exports_are_byte_identical(tmp_path):
-    pytest.importorskip("kuzu")
+def test_memory_and_ladybug_exports_are_byte_identical(tmp_path):
+    pytest.importorskip("ladybug")
     source = tmp_path / "trace.json"
     memory_out = tmp_path / "memory.json"
-    kuzu_out = tmp_path / "kuzu.json"
+    ladybug_out = tmp_path / "ladybug.json"
     _write_trace(source, "backend", run_id="run-backend")
     memory = _export("tool-failure", source, memory_out)
-    kuzu = _export("tool-failure", source, kuzu_out, "--backend", "kuzu")
-    assert memory.exit_code == kuzu.exit_code == 0
-    assert memory_out.read_bytes() == kuzu_out.read_bytes()
+    ladybug = _export("tool-failure", source, ladybug_out, "--backend", "ladybug")
+    assert memory.exit_code == ladybug.exit_code == 0
+    assert memory_out.read_bytes() == ladybug_out.read_bytes()
 
 
 def test_no_match_writes_empty_report_and_succeeds_without_run_id(tmp_path):

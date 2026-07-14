@@ -15,9 +15,10 @@ dependencies = [
 tracegraph = "tracegraph.cli:main"
 
 # Optional accelerator backend — NOT needed for the pure-Python core (Phase 0–3).
-# Pinned because kuzu's repo was archived Oct 2025 and its on-disk format was never stabilized.
+# LadybugDB is the actively maintained successor to the archived Kùzu project. The JSON
+# artifact remains authoritative, so an accelerator cache is rebuilt across DB versions.
 [project.optional-dependencies]
-cypher = ["kuzu==0.11.3"]
+cypher = ["ladybug>=0.18,<0.19"]
 
 [dependency-groups]
 dev = [
@@ -37,5 +38,5 @@ packages = ["src/tracegraph"]
 testpaths = ["tests"]
 pythonpath = ["examples"]
 markers = [
-    "cypher: tests that require the optional [cypher] (Kùzu) backend",
+    "cypher: tests that require the optional [cypher] (LadybugDB) backend",
 ]

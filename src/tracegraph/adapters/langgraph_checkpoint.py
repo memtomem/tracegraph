@@ -33,7 +33,9 @@ import re
 from typing import Any
 
 from tracegraph.model import (
+    CausalFidelity,
     Edge,
+    EdgeOrigin,
     EdgeType,
     RawTrace,
     Step,
@@ -191,7 +193,12 @@ class LangGraphCheckpointAdapter:
                 steps[step_id].seq = seq
 
         edges = [
-            Edge(type=EdgeType.CAUSED_BY, src=step_id, dst=parent_id)
+            Edge(
+                type=EdgeType.CAUSED_BY,
+                src=step_id,
+                dst=parent_id,
+                origin=EdgeOrigin.CHECKPOINT_PARENT,
+            )
             for step_id, parents in parents_by_step.items()
             for parent_id in parents
         ]
@@ -219,6 +226,7 @@ class LangGraphCheckpointAdapter:
             source_kind=self._source_kind,
             thread_id=trace_id,
             status=StepStatus.ERROR if any_error else StepStatus.OK,
+            causal_fidelity=CausalFidelity.DECLARED_DAG,
         )
         return RawTrace(
             trace=trace,

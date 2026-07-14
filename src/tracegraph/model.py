@@ -40,6 +40,12 @@ class StepKind(str, Enum):
     TOOL = "TOOL"
     LLM = "LLM"
     RETRIEVER = "RETRIEVER"
+    EMBEDDING = "EMBEDDING"
+    RERANKER = "RERANKER"
+    GUARDRAIL = "GUARDRAIL"
+    EVALUATOR = "EVALUATOR"
+    PROMPT = "PROMPT"
+    UNKNOWN = "UNKNOWN"
     DATA = "DATA"
 
 
@@ -55,6 +61,48 @@ class StepSource(str, Enum):
 class StepStatus(str, Enum):
     OK = "ok"
     ERROR = "error"
+    UNSET = "unset"
+
+
+class EdgeOrigin(str, Enum):
+    """Declared evidence behind a raw causal edge."""
+
+    CHECKPOINT_PARENT = "checkpoint_parent"
+    GRAPH_PARENT = "graph_parent"
+    SPAN_LINK = "span_link"
+    SPAN_PARENT_FALLBACK = "span_parent_fallback"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class CausalFidelity(str, Enum):
+    """How much of the source system's causal vocabulary survived export."""
+
+    DECLARED_DAG = "declared_dag"
+    PARENT_ONLY = "parent_only"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class EvaluationSummary(BaseModel):
+    """Body-free Phoenix/OpenInference annotation evidence."""
+
+    name: str
+    label: str | None = None
+    score: float | None = None
+
+
+class StepEvidence(BaseModel):
+    """Allowlisted operational telemetry; never prompt/output bodies."""
+
+    end_ts: str | None = None
+    duration_ms: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    prompt_cost: str | None = None
+    completion_cost: str | None = None
+    total_cost: str | None = None
+    cost_currency: str | None = None
+    evaluations: list[EvaluationSummary] = Field(default_factory=list)
 
 
 class EdgeType(str, Enum):
@@ -79,6 +127,7 @@ class Step(BaseModel):
     name: str | None = None
     status: StepStatus = StepStatus.OK
     error_msg: str | None = None
+    evidence: StepEvidence | None = None
     #: Set during normalization: True iff this step had >1 raw CAUSED_BY edge and
     #: the derived TREE_PARENT projection therefore dropped at least one real cause.
     projection_lossy: bool = False
@@ -90,6 +139,7 @@ class Edge(BaseModel):
     type: EdgeType
     src: str
     dst: str
+    origin: EdgeOrigin | None = None
 
 
 class Trace(BaseModel):
@@ -103,6 +153,8 @@ class Trace(BaseModel):
     )
     thread_id: str | None = None
     status: StepStatus = StepStatus.OK
+    causal_fidelity: CausalFidelity = CausalFidelity.LEGACY_UNKNOWN
+    links_preserved: bool | None = None
 
 
 class RawTrace(BaseModel):

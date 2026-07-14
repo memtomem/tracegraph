@@ -5,6 +5,8 @@ fan-in (``synthesize`` caused by both its graph parent and a linked retriever sp
 which must be flagged ``projection_lossy`` yet still fully recoverable via ``explain``.
 """
 
+import json
+
 import pytest
 from otlp_agent_trace import sample_otlp_document
 
@@ -270,5 +272,17 @@ def test_snake_case_keys_are_accepted():
          "start_time_unix_nano": "2", "attributes": []},
     ]}]}]}
     adapter = OTLPSpanAdapter(doc)
+    assert adapter.discover() == ["t"]
+    assert _caused(adapter.ingest("t")) == {("b", "a")}
+
+
+def test_collector_jsonl_documents_are_merged():
+    first = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "root", "attributes": []}
+    ]}]}]}
+    second = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "b", "parentSpanId": "a", "name": "child", "attributes": []}
+    ]}]}]}
+    adapter = OTLPSpanAdapter.from_json(json.dumps(first) + "\n" + json.dumps(second) + "\n")
     assert adapter.discover() == ["t"]
     assert _caused(adapter.ingest("t")) == {("b", "a")}

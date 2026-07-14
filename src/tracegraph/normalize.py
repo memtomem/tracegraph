@@ -81,7 +81,7 @@ def validate_normalized(nt: NormalizedTrace) -> None:
     ``BELONGS_TO``, missing ``TREE_PARENT``, wrong ``projection_lossy``, or simply edges
     in non-canonical order) would pass the cheap structural checks and then silently
     drift: a backend rebuilding from the raw layer would emit different artifact bytes
-    on the next save. Rejecting here keeps every loader (InMemoryStore, KuzuStore, future
+    on the next save. Rejecting here keeps every loader (InMemoryStore, LadybugStore, future
     caches) honest about "the JSON is what normalize() produces, full stop."
     """
     _check_steps(nt.trace.trace_id, nt.steps)
@@ -152,7 +152,7 @@ def normalize(raw: RawTrace) -> NormalizedTrace:
     * **BELONGS_TO** then **TREE_PARENT** for each step, emitted in the canonical step order.
 
     This guarantee — not "the adapter happened to enumerate canonically" — is what makes
-    the optional Kùzu cache a true accelerator: any backend that rebuilds a trace from
+    the optional LadybugDB cache a true accelerator: any backend that rebuilds a trace from
     its raw layer lands on the same artifact bytes.
     """
     validate_raw(raw)

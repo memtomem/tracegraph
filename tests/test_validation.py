@@ -23,7 +23,7 @@ def test_unknown_cause_rejected():
 
 
 def test_normalize_output_is_canonically_ordered_independent_of_input_order():
-    """The contract Kùzu (and any other cache) relies on: ``normalize`` produces the same
+    """The contract LadybugDB (and any other cache) relies on: ``normalize`` produces the same
     artifact bytes regardless of how the adapter happened to enumerate steps and edges.
 
     We feed the SAME logical trace twice — once in canonical (seq-ASC) order, once
@@ -152,7 +152,7 @@ def test_from_trace_rejects_non_forest():
 #
 # These guard the stronger validate_normalized contract: a NormalizedTrace at the load
 # boundary must equal normalize(raw_layer). Anything less and a backend rebuilding from
-# the raw layer (KuzuStore) would silently emit different bytes — drift the artifact
+# the raw layer (LadybugStore) would silently emit different bytes — drift the artifact
 # format is meant to prevent.
 
 
@@ -195,7 +195,7 @@ def test_validate_normalized_rejects_wrong_projection_lossy_flag():
 
 def test_validate_normalized_rejects_non_canonical_edge_order():
     # Same logical trace, edges shuffled out of canonical order — must be rejected so the
-    # KuzuStore (which sorts queries canonically) can't silently disagree with a backend
+    # LadybugStore (which sorts queries canonically) can't silently disagree with a backend
     # that walked the edges in input order.
     nt = _canonical_two_step()
     shuffled = nt.model_copy(update={"edges": list(reversed(nt.edges))})

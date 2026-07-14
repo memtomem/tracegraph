@@ -82,7 +82,7 @@ class InMemoryStore:
         return out
 
     def export_artifact(self, path: str | Path) -> None:
-        artifact.save(self.trace(), path)
+        artifact.save_atomic(self.trace(), path)
 
     def trace(self) -> NormalizedTrace:
         if self._trace is None:

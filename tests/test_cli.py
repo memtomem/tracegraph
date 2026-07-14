@@ -1,7 +1,9 @@
 """CLI smoke test: ingest a real SqliteSaver DB, then inspect / explain / diff."""
 
 import builtins
+import json
 import re
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -25,6 +27,25 @@ from tracegraph.model import (
 from tracegraph.normalize import normalize
 
 runner = CliRunner()
+
+
+def _phoenix_export(trace_id="phoenix-1", *, status="ERROR"):
+    return {
+        "traceId": trace_id,
+        "spans": [
+            {
+                "id": "root",
+                "context": {"trace_id": trace_id, "span_id": "root"},
+                "name": "agent",
+                "span_kind": "AGENT",
+                "start_time": "2026-07-14T00:00:00Z",
+                "end_time": "2026-07-14T00:00:01Z",
+                "status_code": status,
+                "status_message": "password=secret",
+                "attributes": {"input.value": "private prompt"},
+            }
+        ],
+    }
 
 
 def _write_linear_trace(path, trace_id, *specs):
@@ -77,6 +98,133 @@ def test_inspect_renders_error_step(artifacts):
     assert res.exit_code == 0, res.output
     assert "call_tool" in res.output
     assert "error" in res.output.lower()
+
+
+def test_validate_accepts_artifact_files_and_directories(artifacts):
+    a_json, _ = artifacts
+    res = runner.invoke(app, ["validate", str(a_json), str(a_json.parent)])
+    assert res.exit_code == 0, res.output
+    assert "OK" in res.output
+    assert "3 artifact(s) valid" in res.output
+
+
+def test_validate_reports_corrupt_artifact(tmp_path):
+    valid = tmp_path / "valid.json"
+    corrupt = tmp_path / "corrupt.json"
+    _write_linear_trace(
+        valid,
+        "V",
+        ("input", StepKind.CHAIN, StepStatus.OK),
+        ("call_tool", StepKind.TOOL, StepStatus.ERROR),
+    )
+    payload = json.loads(valid.read_text(encoding="utf-8"))
+    payload["trace"]["edges"] = [
+        e for e in payload["trace"]["edges"] if e["type"] != EdgeType.TREE_PARENT.value
+    ]
+    corrupt.write_text(json.dumps(payload), encoding="utf-8")
+
+    res = runner.invoke(app, ["validate", str(valid), str(corrupt)])
+    assert res.exit_code == 1, res.output
+    assert "OK" in res.output
+    assert "INVALID" in res.output
+    assert "canonical form" in res.output
+    assert "1 invalid artifact(s)" in res.output
+
+
+def test_ingest_phoenix_and_analyze_are_body_free(tmp_path):
+    source = tmp_path / "phoenix.json"
+    target = tmp_path / "artifact.json"
+    report = tmp_path / "report.json"
+    source.write_text(json.dumps(_phoenix_export()), encoding="utf-8")
+
+    ingested = runner.invoke(
+        app, ["ingest-phoenix", "--file", str(source), "--out", str(target)]
+    )
+    assert ingested.exit_code == 0, ingested.output
+    analyzed = runner.invoke(app, ["analyze", str(target), "--json-out", str(report)])
+    assert analyzed.exit_code == 0, analyzed.output
+    assert "What failed" in analyzed.output
+    assert "parent_only" in analyzed.output
+    combined = target.read_text(encoding="utf-8") + report.read_text(encoding="utf-8")
+    assert "password=secret" not in combined
+    assert "private prompt" not in combined
+
+
+def test_analyze_accepts_phoenix_stdin():
+    result = runner.invoke(app, ["analyze", "-"], input=json.dumps(_phoenix_export()))
+    assert result.exit_code == 0, result.output
+    assert "phoenix-1" in result.output and "What failed" in result.output
+
+
+def test_phoenix_diagnose_uses_read_only_px_and_writes_safe_outputs(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_run(command, **kwargs):
+        seen.append((command, kwargs))
+        if command[1:3] == ["trace", "get"]:
+            return SimpleNamespace(stdout=json.dumps(_phoenix_export()))
+        span = _phoenix_export()["spans"][0]
+        return SimpleNamespace(
+            stdout=json.dumps([{**span, "annotations": [{"name": "quality", "score": 0.5}] }])
+        )
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    artifact_path = tmp_path / "safe.json"
+    report_path = tmp_path / "report.json"
+    result = runner.invoke(
+        app,
+        [
+            "phoenix",
+            "diagnose",
+            "phoenix-1",
+            "--save-artifact",
+            str(artifact_path),
+            "--json-out",
+            str(report_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen[0][0][:4] == ["px", "trace", "get", "phoenix-1"]
+    assert "--include-annotations" not in seen[0][0]
+    assert seen[0][1]["check"] is True
+    assert seen[1][0][1:3] == ["span", "list"]
+    assert artifact_path.exists() and report_path.exists()
+    assert "password=secret" not in artifact_path.read_text(encoding="utf-8")
+    assert json.loads(report_path.read_text())["metrics"]["evaluations"] == [
+        {
+            "step_id": "root",
+            "name": "quality",
+            "label": None,
+            "score": 0.5,
+        }
+    ]
+
+
+def test_phoenix_diagnose_missing_px_is_actionable(monkeypatch):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("px")
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", missing)
+    result = runner.invoke(app, ["phoenix", "diagnose", "t"])
+    assert result.exit_code != 0
+    assert "Phoenix CLI `px` was not found" in result.output
+
+
+def test_phoenix_diagnose_continues_when_optional_annotations_fail(monkeypatch):
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return SimpleNamespace(stdout=json.dumps(_phoenix_export()))
+        raise cli_mod.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "diagnose", "phoenix-1"])
+    assert result.exit_code == 0, result.output
+    assert "What failed" in result.output
+    assert "unavailable" in result.output
 
 
 def test_explain_shows_causal_chain(artifacts):
@@ -192,35 +340,35 @@ def test_query_marquee_no_match_on_single_clean_tool(tmp_path):
     assert "no matches" in res.output
 
 
-def test_kuzu_backend_missing_optional_dependency_reports_bad_parameter(monkeypatch):
-    monkeypatch.delitem(sys.modules, "tracegraph.store.kuzu", raising=False)
-    monkeypatch.delitem(sys.modules, "kuzu", raising=False)
+def test_ladybug_backend_missing_optional_dependency_reports_bad_parameter(monkeypatch):
+    monkeypatch.delitem(sys.modules, "tracegraph.store.ladybug", raising=False)
+    monkeypatch.delitem(sys.modules, "ladybug", raising=False)
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "kuzu":
-            raise ModuleNotFoundError("No module named 'kuzu'", name="kuzu")
+        if name == "ladybug":
+            raise ModuleNotFoundError("No module named 'ladybug'", name="ladybug")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(typer.BadParameter, match=r"tracegraph\[cypher\]"):
-        cli_mod._store_cls(cli_mod.QueryBackend.KUZU)
+        cli_mod._store_cls(cli_mod.QueryBackend.LADYBUG)
 
 
-def test_kuzu_backend_broken_import_is_not_hidden(monkeypatch):
-    monkeypatch.delitem(sys.modules, "tracegraph.store.kuzu", raising=False)
+def test_ladybug_backend_broken_import_is_not_hidden(monkeypatch):
+    monkeypatch.delitem(sys.modules, "tracegraph.store.ladybug", raising=False)
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name == "tracegraph.store.kuzu":
+        if name == "tracegraph.store.ladybug":
             raise ImportError("backend broken")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
     with pytest.raises(ImportError, match="backend broken"):
-        cli_mod._store_cls(cli_mod.QueryBackend.KUZU)
+        cli_mod._store_cls(cli_mod.QueryBackend.LADYBUG)
 
 
 # --- query --limit / --explain ------------------------------------------------------
