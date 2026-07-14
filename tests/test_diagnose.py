@@ -159,3 +159,23 @@ def test_metrics_never_sum_mixed_or_partially_unknown_currencies():
     metrics = analyze(nt).metrics
     assert metrics.total_cost is None
     assert metrics.cost_currency is None
+
+
+def test_comparison_only_subtracts_costs_with_the_same_known_currency():
+    baseline = _trace("baseline-cost", StepStatus.OK)
+    current = _trace("current-cost", StepStatus.OK)
+    baseline.steps[0].evidence = StepEvidence(total_cost="1.25", cost_currency="USD")
+    current.steps[0].evidence = StepEvidence(total_cost="2.50", cost_currency="USD")
+    comparison = analyze(current, baseline=baseline).comparison
+    assert comparison is not None
+    assert comparison.metric_deltas["total_cost"] == "1.25"
+
+    current.steps[0].evidence = StepEvidence(total_cost="2.50", cost_currency="EUR")
+    comparison = analyze(current, baseline=baseline).comparison
+    assert comparison is not None
+    assert comparison.metric_deltas["total_cost"] is None
+
+    current.steps[0].evidence = StepEvidence(total_cost="2.50")
+    comparison = analyze(current, baseline=baseline).comparison
+    assert comparison is not None
+    assert comparison.metric_deltas["total_cost"] is None

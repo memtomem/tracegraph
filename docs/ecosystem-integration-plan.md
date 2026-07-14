@@ -1,15 +1,16 @@
 # toolgraph, tracegraph, syncmill 연계 계획
 
-**상태:** tracegraph 범위 0~5단계 구현 및 검증 완료 (2026-07-14). SyncMill의 실제
-producer 배포 설정과 exporter 운영은 정본 저장소의 후속 책임이다.
+**상태:** tracegraph 범위 0~5단계와 고정 SHA 기반 live single-failure P4 검증 완료
+(2026-07-14). SyncMill의 Phoenix streaming exporter와 명시적 retry causality는 정본
+저장소의 후속 책임이다.
 **작성일:** 2026-07-11
 **정본:** [전체 계획](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/integration-plan.md) · [구현 설계](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/implementation-design.md) · [smoke runbook](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/smoke-runbook.md)
 
 > 실제 landed 순서와 설계 라벨은 정본에서 구분한다. P0/P1과 첫 마일스톤,
 > P2와 실제 identity/qualified-tool advisory P3/Gate D, opt-in strict P3.1 preview는
 > 완료됐다. Tracegraph T3 producer, SyncMill board import, Toolgraph G3 artifact
-> review도 완료됐다. Live qualified-tool telemetry와 운영 검토 평가를 포함한 전체
-> P4는 열려 있다.
+> review와 고정 SHA 기반 live qualified-tool single-failure 운영 검토도 완료됐다.
+> 이 판정은 자동 governance 변경이나 명시적 tool retry 관계를 승인하지 않는다.
 
 **핵심 결정:** 첫 통합 마일스톤에서 syncmill이 `OTLPSpanAdapter`가 소비하는 세 속성
 (`openinference.span.kind`, `graph.node.id`, `graph.node.parent_id` — 모두
@@ -152,8 +153,9 @@ import는 strict verdict를 재평가하거나 policy를 바꾸지 않는다. To
 SyncMill과 마찬가지로 exact candidate tuple에서 같은 UUIDv5를 계산해 correlation에만
 사용하고, exact report-byte digest에 묶인 별도 sidecar에서
 `open`/`accepted`/`dismissed`를 기록한다. Annotation은 SyncMill board, manifest,
-selector, blast radius, preflight 또는 graph state를 바꾸지 않는다. Live qualified-tool
-span과 운영 검토 평가는 별도 후속 작업이다.
+selector, blast radius, preflight 또는 graph state를 바꾸지 않는다. 고정 SHA 기반 live
+qualified-tool single-failure 운영 검토는 완료됐고, 명시적 retry causality와 SyncMill의
+Phoenix streaming exporter는 별도 후속 작업이다.
 
 ## 검증 기준
 

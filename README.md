@@ -43,7 +43,10 @@ tracegraph validate A.json traces/   # validate artifacts before CI/query jobs
 tracegraph analyze A.json            # automatically select and explain failures
 
 # Phoenix: one command after configuring the official `px` CLI
-tracegraph phoenix diagnose <trace-id>
+tracegraph phoenix doctor
+tracegraph phoenix diagnose                 # latest failed trace; latest trace as fallback
+tracegraph phoenix diagnose <trace-id>      # explicit trace
+tracegraph phoenix diagnose --project my-agent
 # save only the body-free normalized evidence/report when needed
 tracegraph phoenix diagnose <trace-id> --save-artifact safe.json --json-out report.json
 
@@ -62,18 +65,27 @@ Phoenix remains the trace UI, evaluation, and operational-observability layer. t
 adds deterministic causal diagnosis, retry-pattern detection, and baseline regression analysis
 without copying prompt or output bodies into its artifacts.
 
-Instrument LangGraph with the official OpenInference integration and configure the Phoenix
-CLI as described in the [Phoenix LangGraph guide](https://arize.com/docs/phoenix/integrations/python/langgraph/langgraph-tracing)
+Instrument LangGraph with the official OpenInference integration and configure Phoenix CLI
+1.0.4 or newer as described in the
+[Phoenix LangGraph guide](https://arize.com/docs/phoenix/integrations/python/langgraph/langgraph-tracing)
 and [Phoenix CLI reference](https://arize.com/docs/phoenix/sdk-api-reference/typescript/arizeai-phoenix-cli).
-With `px` on `PATH`, diagnose a trace directly:
+Check the connection, then diagnose without finding a trace id first:
 
 ```bash
+tracegraph phoenix doctor
+tracegraph phoenix diagnose
+tracegraph phoenix diagnose --project my-agent
 tracegraph phoenix diagnose <trace-id>
 tracegraph phoenix diagnose <trace-id> --baseline <known-good-trace-id>
 ```
 
-The command invokes the read-only `px trace get` export, analyzes it in memory, and does not
-persist the raw Phoenix response. For an already exported file or a shell pipeline:
+Without a trace id, tracegraph scans Phoenix's 20 newest traces and selects the newest failed
+trace. If none failed, it says so and diagnoses the newest trace, so a first successful run is
+still useful. Explicit ids bypass that selection. The command invokes only read-only
+`px trace list/get --include-annotations` exports, analyzes them in memory, and does not persist
+the raw Phoenix response. Phoenix connection details and credentials remain owned by `px`
+profiles or environment variables; tracegraph never accepts an API key option. For an already
+exported file or a shell pipeline:
 
 ```bash
 tracegraph ingest-phoenix --file phoenix-trace.json --out tracegraph.json
@@ -187,7 +199,7 @@ result, blast radius, preflight result, or graph state.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests Collector JSON/JSONL spans into the same causal model — the source that exercises full link-preserving raw/derived causality.
 - **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
-- **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, and Toolgraph G3 artifact annotation are complete; live qualified-tool spans and operating review evaluation remain follow-ups.
+- **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, Toolgraph G3 artifact annotation, and the pinned live single-failure review path are complete. Explicit retry causality and SyncMill-to-Phoenix streaming remain follow-ups.
 - **SyncMill contract completion:** route/pipeline/compete/council/decompose plus cancellation fixtures, stable span naming, body-free artifact digests, fail-open exporter reference behavior, operational failure presets, and non-causal Toolgraph preflight evidence are covered by executable tests.
 
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
