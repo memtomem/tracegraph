@@ -102,6 +102,9 @@ tracegraph analyze full-dag.json
 
 The JSON analysis-report contract is versioned at
 [`contracts/analysis-report.schema.json`](contracts/analysis-report.schema.json).
+Schema v2 can also carry body-free Toolgraph preflight evidence: an exact SHA-256 artifact
+digest, non-negative graph generation, and bounded verdict. This is trace metadata, never a
+`CAUSED_BY` edge.
 
 ```text
 $ tracegraph inspect A.json
@@ -185,6 +188,7 @@ result, blast radius, preflight result, or graph state.
 - **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
 - **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, and Toolgraph G3 artifact annotation are complete; live qualified-tool spans and operating review evaluation remain follow-ups.
+- **SyncMill contract completion:** route/pipeline/compete/council/decompose plus cancellation fixtures, stable span naming, body-free artifact digests, fail-open exporter reference behavior, operational failure presets, and non-causal Toolgraph preflight evidence are covered by executable tests.
 
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
 super-step), and node names/kinds are best-effort metadata. Phoenix/OTLP adapters are

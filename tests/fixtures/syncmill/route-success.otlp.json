@@ -52,6 +52,24 @@
                   "value": {
                     "stringValue": "completed"
                   }
+                },
+                {
+                  "key": "toolgraph.preflight.artifact_digest",
+                  "value": {
+                    "stringValue": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                  }
+                },
+                {
+                  "key": "toolgraph.graph_generation",
+                  "value": {
+                    "intValue": "7"
+                  }
+                },
+                {
+                  "key": "toolgraph.preflight.verdict",
+                  "value": {
+                    "stringValue": "review"
+                  }
                 }
               ]
             },
@@ -132,6 +150,12 @@
                   "key": "syncmill.files_changed_count",
                   "value": {
                     "intValue": "2"
+                  }
+                },
+                {
+                  "key": "syncmill.artifact_digest",
+                  "value": {
+                    "stringValue": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                   }
                 }
               ],

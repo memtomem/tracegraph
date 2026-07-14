@@ -273,6 +273,18 @@ uv run tracegraph explain --backend ladybug A.json <step_id>
 각 실행 단계의 고유 id입니다. `explain`에는 전체 id 또는 유일하게 구분되는 suffix를
 넣을 수 있습니다.
 
+## 외부 실행 근거 연결
+
+Toolgraph preflight를 함께 계측하는 경우 `toolgraph.preflight.artifact_digest`,
+`toolgraph.graph_generation`, `toolgraph.preflight.verdict`를 한 묶음으로 기록합니다.
+tracegraph는 이를 외부 판정 근거로
+보존하지만 실패 원인 edge로 승격하지 않습니다. 실행 결과나 patch는 본문이나 로컬
+경로 대신 `syncmill.artifact_digest=sha256:...`만 기록합니다.
+
+SyncMill exporter는 선택 기능이며 비활성 상태에서는 no-op이어야 합니다. Collector나
+파일 exporter가 실패해도 agent 실행 결과를 실패로 바꾸지 않는 reference 구현은
+`examples/syncmill_instrumentation_contract.py`에서 확인할 수 있습니다.
+
 ## 문제 해결
 
 ### `validate`가 실패합니다

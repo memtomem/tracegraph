@@ -273,6 +273,15 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
             f"score={evaluation.score if evaluation.score is not None else 'unavailable'}"
         )
 
+    if report.decision_evidence:
+        console.print("\n[bold]External decision evidence[/]")
+        for item in report.decision_evidence:
+            console.print(
+                f"  {escape(item.source)} · verdict={escape(item.verdict)} · "
+                f"generation={item.graph_generation} · "
+                f"artifact={escape(item.artifact_digest)}"
+            )
+
     if report.comparison:
         comparison = report.comparison
         console.print("\n[bold]Compared with baseline[/]")

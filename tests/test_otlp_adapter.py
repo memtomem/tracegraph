@@ -64,6 +64,55 @@ def test_whitespace_in_syncmill_run_id_is_rejected_at_ingest():
         OTLPSpanAdapter(doc).ingest("t")
 
 
+def test_toolgraph_preflight_evidence_is_preserved_as_noncausal_metadata():
+    attrs = [
+        {
+            "key": "toolgraph.preflight.artifact_digest",
+            "value": {"stringValue": "sha256:" + "a" * 64},
+        },
+        {"key": "toolgraph.graph_generation", "value": {"intValue": "7"}},
+        {"key": "toolgraph.preflight.verdict", "value": {"stringValue": "review"}},
+    ]
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "run", "attributes": attrs},
+    ]}]}]}
+    raw = OTLPSpanAdapter(doc).ingest("t")
+    assert raw.trace.decision_evidence[0].artifact_digest == "sha256:" + "a" * 64
+    assert raw.trace.decision_evidence[0].graph_generation == 7
+    assert raw.trace.decision_evidence[0].verdict == "review"
+    assert raw.causal_edges == []
+
+
+@pytest.mark.parametrize(
+    "attrs, message",
+    [
+        ([{"key": "toolgraph.graph_generation", "value": {"intValue": "1"}}], "together"),
+        ([
+            {"key": "toolgraph.preflight.artifact_digest", "value": {"stringValue": "bad"}},
+            {"key": "toolgraph.graph_generation", "value": {"intValue": "1"}},
+            {"key": "toolgraph.preflight.verdict", "value": {"stringValue": "review"}},
+        ], "invalid Toolgraph preflight digest"),
+    ],
+)
+def test_partial_or_invalid_toolgraph_evidence_is_rejected(attrs, message):
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "run", "attributes": attrs},
+    ]}]}]}
+    with pytest.raises(ValueError, match=message):
+        OTLPSpanAdapter(doc).ingest("t")
+
+
+def test_invalid_syncmill_artifact_digest_is_rejected():
+    attrs = [
+        {"key": "syncmill.artifact_digest", "value": {"stringValue": "/tmp/result.patch"}}
+    ]
+    doc = {"resourceSpans": [{"scopeSpans": [{"spans": [
+        {"traceId": "t", "spanId": "a", "name": "attempt", "attributes": attrs},
+    ]}]}]}
+    with pytest.raises(ValueError, match="lowercase sha256"):
+        OTLPSpanAdapter(doc).ingest("t")
+
+
 def test_ingest_unknown_trace_raises():
     with pytest.raises(KeyError):
         _adapter().ingest("nope")

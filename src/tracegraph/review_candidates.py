@@ -41,11 +41,20 @@ class ReviewCandidateReport(BaseModel):
 
 
 def is_review_exportable(pattern: PathPattern) -> bool:
-    """A review candidate must end at an explicitly failing TOOL predicate."""
+    """A review candidate must end at an unconstrained, explicitly failing TOOL.
+
+    Operational pseudo-tools such as ``gate:*`` use a name constraint and are diagnosis
+    signals, not server-qualified governance candidates.
+    """
     if not pattern.steps:
         return False
     endpoint = pattern.steps[-1]
-    return endpoint.kind is StepKind.TOOL and endpoint.status is StepStatus.ERROR
+    return (
+        endpoint.kind is StepKind.TOOL
+        and endpoint.status is StepStatus.ERROR
+        and endpoint.name is None
+        and endpoint.name_prefix is None
+    )
 
 
 def build_report(

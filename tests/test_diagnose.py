@@ -8,6 +8,7 @@ from jsonschema import Draft202012Validator
 from tracegraph.analysis.diagnose import analyze, dumps
 from tracegraph.model import (
     CausalFidelity,
+    DecisionEvidence,
     Edge,
     EdgeOrigin,
     EdgeType,
@@ -107,3 +108,22 @@ def test_report_matches_public_json_schema():
     payload = json.loads(dumps(analyze(_trace("bad", StepStatus.ERROR))))
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(payload)
+
+
+def test_report_exposes_body_free_external_decision_evidence():
+    nt = _trace("evidence", StepStatus.OK)
+    nt.trace.decision_evidence = [
+        DecisionEvidence(
+            artifact_digest="sha256:" + "c" * 64,
+            graph_generation=9,
+            verdict="allow",
+        )
+    ]
+    report = analyze(nt)
+    assert report.schema_version == 2
+    assert report.decision_evidence[0].model_dump() == {
+        "source": "toolgraph_preflight",
+        "artifact_digest": "sha256:" + "c" * 64,
+        "graph_generation": 9,
+        "verdict": "allow",
+    }

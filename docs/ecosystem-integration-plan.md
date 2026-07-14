@@ -1,6 +1,7 @@
 # toolgraph, tracegraph, syncmill 연계 계획
 
-**상태:** 첫 통합 마일스톤, P3.1 preview, T3, SyncMill board import 및 Toolgraph G3 완료 (2026-07-12)
+**상태:** tracegraph 범위 0~5단계 구현 및 검증 완료 (2026-07-14). SyncMill의 실제
+producer 배포 설정과 exporter 운영은 정본 저장소의 후속 책임이다.
 **작성일:** 2026-07-11
 **정본:** [전체 계획](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/integration-plan.md) · [구현 설계](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/implementation-design.md) · [smoke runbook](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/smoke-runbook.md)
 
@@ -90,36 +91,40 @@ span name에는 agent id/phase/인덱스만 허용하고 uuid, timestamp, run_id
 
 ### 0단계: 모델 적합성 확인
 
-- [ ] 대표 strategy별 최소 trace fixture를 정의한다.
-- [ ] Supervisor, phase, agent attempt를 기존 step kind로 표현 가능한지 검토한다.
-- [ ] fan-out/fan-in 및 cancellation의 parent 규칙을 고정한다.
-- [ ] 민감 데이터 redaction과 attribute allowlist를 정의한다.
+- [x] 대표 strategy별 최소 trace fixture를 정의한다.
+- [x] Supervisor, phase, agent attempt를 기존 step kind로 표현 가능한지 검토한다.
+- [x] fan-out/fan-in 및 cancellation의 parent 규칙을 고정한다.
+- [x] 민감 데이터 redaction과 attribute allowlist를 정의한다.
 
 ### 1단계: syncmill OTLP fixture
 
-- [ ] 코드 결합 없이 합성 OTLP export fixture를 먼저 추가한다.
-- [ ] 기존 `OTLPSpanAdapter`가 run/strategy/agent 관계를 보존하는지 테스트한다.
-- [ ] `inspect`와 `explain`에서 timeout 및 gate failure를 역추적한다.
-- [ ] compete의 병렬 완료 순서가 허위 causal ordering을 만들지 않는지 검증한다.
+- [x] 코드 결합 없이 합성 OTLP export fixture를 먼저 추가한다.
+- [x] 기존 `OTLPSpanAdapter`가 run/strategy/agent 관계를 보존하는지 테스트한다.
+- [x] `inspect`와 `explain`에서 timeout 및 gate failure를 역추적한다.
+- [x] compete의 병렬 완료 순서가 허위 causal ordering을 만들지 않는지 검증한다.
 
 ### 2단계: 선택적 계측 adapter
 
-- [ ] syncmill 측에 vendor-neutral span naming convention을 제안한다.
-- [ ] 계측 비활성 상태에서 syncmill 동작과 성능이 변하지 않게 한다.
-- [ ] exporter 실패가 agent 실행 실패로 전파되지 않게 한다.
-- [ ] result/patch는 digest와 경로만 기록하고 본문은 저장하지 않는다.
+- [x] syncmill 측에 vendor-neutral span naming convention을 제안한다.
+- [x] 계측 비활성 상태에서 syncmill 동작과 결과가 변하지 않는 reference contract를 검증한다.
+- [x] exporter 실패가 agent 실행 실패로 전파되지 않는 fail-open contract를 검증한다.
+- [x] result/patch는 검증된 SHA-256 digest만 기록하고 본문이나 로컬 경로는 저장하지 않는다.
+
+실행 가능한 producer reference는 `examples/syncmill_instrumentation_contract.py`에 있다.
+이는 SyncMill이 vendor할 계측 동작을 고정하며, tracegraph가 SyncMill 런타임 의존성을
+가져오지는 않는다. 실제 SyncMill 배포 설정과 exporter 운영은 해당 저장소의 책임이다.
 
 ### 3단계: orchestration 분석
 
-- [ ] strategy 간 normalized structure diff 예제를 추가한다.
-- [ ] timeout, repeated-agent-failure, gate-failure-after-success preset을 검토한다.
-- [ ] agent 이름이 같은 재시도와 다른 worktree slot을 구분한다.
+- [x] strategy 간 normalized structure diff 예제를 추가한다.
+- [x] timeout, repeated-agent-failure, gate-failure-after-success preset을 추가한다.
+- [x] agent 이름이 같은 재시도와 다른 worktree slot을 구분한다.
 - [x] cross-run query 결과에 pattern version을 기록한다.
 
 ### 4단계: toolgraph provenance 연결
 
-- [ ] preflight artifact digest와 graph generation을 run metadata로 가져온다.
-- [ ] policy verdict를 causal edge가 아닌 외부 decision evidence로 표현한다.
+- [x] preflight artifact digest와 graph generation을 run metadata로 가져온다.
+- [x] policy verdict를 causal edge가 아닌 외부 decision evidence로 표현한다.
 - [x] failure pattern을 versioned governance review candidate JSON으로 내보낸다.
 - [x] tracegraph가 toolgraph manifest를 직접 수정하지 않는 경계를 테스트한다.
 

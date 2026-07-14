@@ -19,12 +19,13 @@
     "propagated_failures",
     "patterns",
     "metrics",
+    "decision_evidence",
     "comparison",
     "warnings",
     "privacy_profile"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "kind": {"const": "tracegraph.analysis"},
     "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "trace_id": {"type": "string"},
@@ -38,11 +39,26 @@
     "propagated_failures": {"type": "array", "items": {"$ref": "#/$defs/step"}},
     "patterns": {"type": "array", "items": {"$ref": "#/$defs/pattern"}},
     "metrics": {"$ref": "#/$defs/metrics"},
+    "decision_evidence": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/decisionEvidence"}
+    },
     "comparison": {"type": ["object", "null"]},
     "warnings": {"type": "array", "items": {"type": "string"}},
     "privacy_profile": {"const": "safe-v1"}
   },
   "$defs": {
+    "decisionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "artifact_digest", "graph_generation", "verdict"],
+      "properties": {
+        "source": {"const": "toolgraph_preflight"},
+        "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "graph_generation": {"type": "integer", "minimum": 0},
+        "verdict": {"type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "maxLength": 64}
+      }
+    },
     "step": {
       "type": "object",
       "additionalProperties": false,

@@ -71,6 +71,7 @@ _TRACE_FIELDS: tuple[str, ...] = (
     "status",
     "causal_fidelity",
     "links_preserved",
+    "decision_evidence_json",
 )
 
 _SCHEMA_DDL: tuple[str, ...] = (
@@ -83,7 +84,7 @@ _SCHEMA_DDL: tuple[str, ...] = (
     "PRIMARY KEY (step_id))",
     "CREATE NODE TABLE Trace ("
     "trace_id STRING, source_kind STRING, run_id STRING, thread_id STRING, status STRING, "
-    "causal_fidelity STRING, links_preserved BOOLEAN, "
+    "causal_fidelity STRING, links_preserved BOOLEAN, decision_evidence_json STRING, "
     "PRIMARY KEY (trace_id))",
     "CREATE REL TABLE CAUSED_BY (FROM Step TO Step, origin STRING)",
     "CREATE REL TABLE TREE_PARENT (FROM Step TO Step)",
@@ -340,6 +341,9 @@ def _trace_params(t: Trace) -> dict[str, Any]:
         "status": t.status.value,
         "causal_fidelity": t.causal_fidelity.value,
         "links_preserved": t.links_preserved,
+        "decision_evidence_json": json.dumps(
+            [item.model_dump(mode="json") for item in t.decision_evidence], sort_keys=True
+        ),
     }
 
 

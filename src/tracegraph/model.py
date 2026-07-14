@@ -23,6 +23,7 @@ See ``normalize.py`` for how the derived layer is computed from the raw layer.
 from __future__ import annotations
 
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -102,7 +103,21 @@ class StepEvidence(BaseModel):
     completion_cost: str | None = None
     total_cost: str | None = None
     cost_currency: str | None = None
+    artifact_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     evaluations: list[EvaluationSummary] = Field(default_factory=list)
+
+
+class DecisionEvidence(BaseModel):
+    """Body-free evidence from an external pre-execution policy decision.
+
+    It is trace metadata, never a causal edge: a preflight can constrain a run without
+    proving that it caused a later outcome.
+    """
+
+    source: Literal["toolgraph_preflight"] = "toolgraph_preflight"
+    artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    graph_generation: int = Field(ge=0)
+    verdict: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
 
 
 class EdgeType(str, Enum):
@@ -155,6 +170,7 @@ class Trace(BaseModel):
     status: StepStatus = StepStatus.OK
     causal_fidelity: CausalFidelity = CausalFidelity.LEGACY_UNKNOWN
     links_preserved: bool | None = None
+    decision_evidence: list[DecisionEvidence] = Field(default_factory=list)
 
 
 class RawTrace(BaseModel):

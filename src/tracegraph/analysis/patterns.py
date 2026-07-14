@@ -73,6 +73,8 @@ class StepPredicate:
     """
 
     name: str | None = None
+    name_prefix: str | None = None
+    error_contains: str | None = None
     kind: StepKind | None = None
     status: StepStatus | None = None
     same_name_as: int | None = None
@@ -89,9 +91,17 @@ class StepPredicate:
                 raise ValueError(f"gap upper bound {hi} is below lower bound {lo}")
         if self.same_name_as is not None and self.same_name_as < 0:
             raise ValueError("same_name_as must be a non-negative predicate index")
+        if self.name is not None and self.name_prefix is not None:
+            raise ValueError("name and name_prefix are mutually exclusive")
+        if self.name_prefix == "" or self.error_contains == "":
+            raise ValueError("name_prefix and error_contains must be non-empty when set")
 
     def matches(self, step: Step) -> bool:
         if self.name is not None and step.name != self.name:
+            return False
+        if self.name_prefix is not None and not (step.name or "").startswith(self.name_prefix):
+            return False
+        if self.error_contains is not None and self.error_contains not in (step.error_msg or ""):
             return False
         if self.kind is not None and step.kind is not self.kind:
             return False
@@ -103,6 +113,10 @@ class StepPredicate:
         parts = []
         if self.name is not None:
             parts.append(f"name={self.name}")
+        if self.name_prefix is not None:
+            parts.append(f"name^={self.name_prefix}")
+        if self.error_contains is not None:
+            parts.append(f"error~={self.error_contains}")
         if self.kind is not None:
             parts.append(f"kind={self.kind.value}")
         if self.status is not None:
@@ -384,6 +398,14 @@ def _where_clauses(idx: int, pred: StepPredicate, params: dict[str, str]) -> lis
         key = f"s{idx}_name"
         params[key] = pred.name
         clauses.append(f"s{idx}.name = ${key}")
+    if pred.name_prefix is not None:
+        key = f"s{idx}_name_prefix"
+        params[key] = pred.name_prefix
+        clauses.append(f"s{idx}.name STARTS WITH ${key}")
+    if pred.error_contains is not None:
+        key = f"s{idx}_error_contains"
+        params[key] = pred.error_contains
+        clauses.append(f"s{idx}.error_msg CONTAINS ${key}")
     if pred.kind is not None:
         key = f"s{idx}_kind"
         params[key] = pred.kind.value
@@ -496,6 +518,39 @@ PRESETS: dict[str, PathPattern] = {
         ),
         "a 'plan' step immediately followed (causally) by a failing tool",
         pattern_id="plan-then-tool-failure",
+        pattern_version=1,
+    ),
+    "timeout": PathPattern(
+        (StepPredicate(status=StepStatus.ERROR, error_contains="timeout"),),
+        "a step that failed with a bounded timeout status message",
+        pattern_id="timeout",
+        pattern_version=1,
+    ),
+    "repeated-agent-failure": PathPattern(
+        (
+            StepPredicate(kind=StepKind.AGENT, status=StepStatus.ERROR),
+            StepPredicate(
+                kind=StepKind.AGENT,
+                status=StepStatus.ERROR,
+                same_name_as=0,
+                gap=(1, None),
+            ),
+        ),
+        "the same agent failed again later on the causal path",
+        pattern_id="repeated-agent-failure",
+        pattern_version=1,
+    ),
+    "gate-failure-after-success": PathPattern(
+        (
+            StepPredicate(kind=StepKind.AGENT, status=StepStatus.OK),
+            StepPredicate(
+                kind=StepKind.TOOL,
+                status=StepStatus.ERROR,
+                name_prefix="gate:",
+            ),
+        ),
+        "a successful agent attempt immediately followed by a failing gate",
+        pattern_id="gate-failure-after-success",
         pattern_version=1,
     ),
     # The marquee cross-trace pattern advertised in the README / FEASIBILITY:

@@ -248,4 +248,6 @@ def test_presets_and_query_stamp_pattern_version(tmp_path):
     assert listed.exit_code == queried.exit_code == 0
     assert "tool-failure@v1" in listed.output
     assert "review-exportable" in listed.output
+    gate_line = next(line for line in listed.output.splitlines() if line.startswith("gate-failure"))
+    assert "review-exportable" not in gate_line
     assert "tool-failure@v1" in queried.output

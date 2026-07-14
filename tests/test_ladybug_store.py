@@ -13,11 +13,12 @@ from typer.testing import CliRunner
 
 ladybug = pytest.importorskip("ladybug", reason="requires the [cypher] extra")
 
-from tracegraph import artifact
-from tracegraph.analysis import MAX_GAP, PRESETS, PathPattern, StepPredicate, find_matches
-from tracegraph.cli import app
-from tracegraph.model import (
+from tracegraph import artifact  # noqa: E402
+from tracegraph.analysis import MAX_GAP, PRESETS, PathPattern, StepPredicate, find_matches  # noqa: E402
+from tracegraph.cli import app  # noqa: E402
+from tracegraph.model import (  # noqa: E402
     CausalFidelity,
+    DecisionEvidence,
     Edge,
     EdgeOrigin,
     EdgeType,
@@ -29,8 +30,8 @@ from tracegraph.model import (
     StepStatus,
     Trace,
 )
-from tracegraph.normalize import normalize
-from tracegraph.store import InMemoryStore, LadybugStore
+from tracegraph.normalize import normalize  # noqa: E402
+from tracegraph.store import InMemoryStore, LadybugStore  # noqa: E402
 
 pytestmark = pytest.mark.cypher
 runner = CliRunner()
@@ -328,6 +329,13 @@ def test_v2_evidence_origin_and_run_id_survive_ladybug_roundtrip(tmp_path) -> No
             run_id="run-1",
             causal_fidelity=CausalFidelity.PARENT_ONLY,
             links_preserved=False,
+            decision_evidence=[
+                DecisionEvidence(
+                    artifact_digest="sha256:" + "e" * 64,
+                    graph_generation=4,
+                    verdict="review",
+                )
+            ],
         ),
         steps=[
             Step(step_id="a", trace_id="evidence", seq=0, name="agent"),
@@ -337,7 +345,11 @@ def test_v2_evidence_origin_and_run_id_survive_ladybug_roundtrip(tmp_path) -> No
                 seq=1,
                 name="llm",
                 kind=StepKind.LLM,
-                evidence=StepEvidence(total_tokens=12, total_cost="0.01"),
+                evidence=StepEvidence(
+                    total_tokens=12,
+                    total_cost="0.01",
+                    artifact_digest="sha256:" + "f" * 64,
+                ),
             ),
         ],
         causal_edges=[

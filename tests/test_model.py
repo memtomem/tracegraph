@@ -7,6 +7,7 @@ import pytest
 from tracegraph import artifact
 from tracegraph.model import (
     CausalFidelity,
+    DecisionEvidence,
     Edge,
     EdgeType,
     RawTrace,
@@ -37,6 +38,21 @@ def test_artifact_round_trip_is_stable():
     # dumps is deterministic (sorted keys) -> re-serializing the parsed trace matches.
     assert artifact.dumps(again) == text
     assert json.loads(text)["schema_version"] == 2
+
+
+def test_external_decision_evidence_round_trips_without_becoming_an_edge():
+    raw = _raw()
+    raw.trace.decision_evidence = [
+        DecisionEvidence(
+            artifact_digest="sha256:" + "b" * 64,
+            graph_generation=3,
+            verdict="review",
+        )
+    ]
+    nt = normalize(raw)
+    loaded = artifact.loads(artifact.dumps(nt))
+    assert loaded.trace.decision_evidence == raw.trace.decision_evidence
+    assert all(edge.type is not EdgeType.CAUSED_BY or edge.src != "toolgraph" for edge in loaded.edges)
 
 
 def test_v1_artifact_is_migrated_in_memory_without_rewriting():

@@ -18,8 +18,16 @@ from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, find_matches
 from tracegraph.model import EdgeType, NormalizedTrace, Step, StepKind, StepStatus
 
-REPORT_SCHEMA_VERSION = 1
-_AUTO_PRESETS = ("tool-retry-failure", "plan-then-tool-failure", "tool-failure", "error")
+REPORT_SCHEMA_VERSION = 2
+_AUTO_PRESETS = (
+    "tool-retry-failure",
+    "repeated-agent-failure",
+    "gate-failure-after-success",
+    "timeout",
+    "plan-then-tool-failure",
+    "tool-failure",
+    "error",
+)
 
 
 class DiagnosticStep(BaseModel):
@@ -66,6 +74,13 @@ class MetricSummary(BaseModel):
     evaluations: list[EvaluationFinding] = Field(default_factory=list)
 
 
+class DecisionEvidenceFinding(BaseModel):
+    source: str
+    artifact_digest: str
+    graph_generation: int
+    verdict: str
+
+
 class BehaviorChange(BaseModel):
     logical_step_key: str
     name: str | None
@@ -97,6 +112,7 @@ class AnalysisReport(BaseModel):
     propagated_failures: list[DiagnosticStep]
     patterns: list[PatternFinding]
     metrics: MetricSummary
+    decision_evidence: list[DecisionEvidenceFinding] = Field(default_factory=list)
     comparison: ComparisonSummary | None = None
     warnings: list[str] = Field(default_factory=list)
     privacy_profile: str = "safe-v1"
@@ -355,6 +371,9 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         propagated_failures=propagated,
         patterns=_patterns(nt),
         metrics=_metrics(nt),
+        decision_evidence=[
+            DecisionEvidenceFinding(**item.model_dump()) for item in nt.trace.decision_evidence
+        ],
         comparison=_comparison(nt, baseline) if baseline else None,
         warnings=warnings,
     )

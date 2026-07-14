@@ -160,3 +160,13 @@ def test_first_predicate_gap_is_ignored_without_spurious_distinct():
     q = compile_to_cypher(pattern)
     assert "RETURN DISTINCT" not in q.cypher
     assert "RETURN s0.step_id AS s0, s1.step_id AS s1" in q.cypher
+
+
+def test_prefix_and_error_substring_compile_as_parameters():
+    gate = compile_to_cypher(PRESETS["gate-failure-after-success"])
+    assert "s1.name STARTS WITH $s1_name_prefix" in gate.cypher
+    assert gate.params["s1_name_prefix"] == "gate:"
+
+    timeout = compile_to_cypher(PRESETS["timeout"])
+    assert "s0.error_msg CONTAINS $s0_error_contains" in timeout.cypher
+    assert timeout.params["s0_error_contains"] == "timeout"

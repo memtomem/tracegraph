@@ -56,6 +56,7 @@ from typing import Any, Iterator
 
 from tracegraph.model import (
     CausalFidelity,
+    DecisionEvidence,
     Edge,
     EdgeOrigin,
     EdgeType,
@@ -73,6 +74,9 @@ _SPAN_KIND_ATTR = "openinference.span.kind"
 _GRAPH_NODE_ID = "graph.node.id"
 _GRAPH_NODE_PARENT_ID = "graph.node.parent_id"
 _SYNCMILL_RUN_ID = "syncmill.run_id"
+_TOOLGRAPH_PREFLIGHT_DIGEST = "toolgraph.preflight.artifact_digest"
+_TOOLGRAPH_GRAPH_GENERATION = "toolgraph.graph_generation"
+_TOOLGRAPH_PREFLIGHT_VERDICT = "toolgraph.preflight.verdict"
 
 #: OpenInference span kinds that map cleanly onto a :class:`StepKind`. Anything else
 #: (EMBEDDING, RERANKER, GUARDRAIL, EVALUATOR, or absent) defaults to ``CHAIN`` — see
@@ -207,6 +211,15 @@ def _currency_attr(attrs: dict[str, Any]) -> str | None:
     return normalized if re.fullmatch(r"[A-Z]{3,8}", normalized) else None
 
 
+def _digest_attr(attrs: dict[str, Any], name: str) -> str | None:
+    value = attrs.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+        raise ValueError(f"{name} must be a lowercase sha256 digest")
+    return value
+
+
 def _evidence(span: dict, attrs: dict[str, Any]) -> StepEvidence | None:
     start = _first(span, "startTimeUnixNano", "start_time_unix_nano")
     end = _first(span, "endTimeUnixNano", "end_time_unix_nano")
@@ -235,6 +248,7 @@ def _evidence(span: dict, attrs: dict[str, Any]) -> StepEvidence | None:
         completion_cost=_decimal_attr(attrs, "llm.cost.completion", "llm.cost.output"),
         total_cost=_decimal_attr(attrs, "llm.cost.total"),
         cost_currency=_currency_attr(attrs),
+        artifact_digest=_digest_attr(attrs, "syncmill.artifact_digest"),
         evaluations=evaluations,
     )
     return evidence if any(value is not None for key, value in evidence.model_dump().items() if key != "evaluations") or evaluations else None
@@ -366,6 +380,7 @@ class OTLPSpanAdapter:
             status=StepStatus.ERROR if any_error else StepStatus.OK,
             causal_fidelity=self._causal_fidelity,
             links_preserved=self._links_preserved,
+            decision_evidence=self._decision_evidence(trace_id, attrs),
         )
         return RawTrace(trace=trace, steps=steps, causal_edges=edges)
 
@@ -397,6 +412,47 @@ class OTLPSpanAdapter:
         if len(values) > 1:
             raise ValueError(f"trace {trace_id!r} has conflicting syncmill.run_id values")
         return next(iter(values), None)
+
+    @staticmethod
+    def _decision_evidence(
+        trace_id: str, attrs: dict[str, dict[str, Any]]
+    ) -> list[DecisionEvidence]:
+        """Read one consistent, body-free Toolgraph preflight reference."""
+        records: set[tuple[str, int, str]] = set()
+        partial = False
+        for span_attrs in attrs.values():
+            has_digest = _TOOLGRAPH_PREFLIGHT_DIGEST in span_attrs
+            has_generation = _TOOLGRAPH_GRAPH_GENERATION in span_attrs
+            has_verdict = _TOOLGRAPH_PREFLIGHT_VERDICT in span_attrs
+            if not has_digest and not has_generation and not has_verdict:
+                continue
+            if not (has_digest and has_generation and has_verdict):
+                partial = True
+                continue
+            digest = span_attrs[_TOOLGRAPH_PREFLIGHT_DIGEST]
+            generation = span_attrs[_TOOLGRAPH_GRAPH_GENERATION]
+            verdict = span_attrs[_TOOLGRAPH_PREFLIGHT_VERDICT]
+            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph preflight digest")
+            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+                raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph graph generation")
+            if not isinstance(verdict, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", verdict):
+                raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph preflight verdict")
+            records.add((digest, generation, verdict))
+        if partial:
+            raise ValueError(
+                f"trace {trace_id!r} must declare Toolgraph preflight digest, graph generation, and verdict together"
+            )
+        if len(records) > 1:
+            raise ValueError(f"trace {trace_id!r} has conflicting Toolgraph preflight evidence")
+        return [
+            DecisionEvidence(
+                artifact_digest=digest,
+                graph_generation=generation,
+                verdict=verdict,
+            )
+            for digest, generation, verdict in sorted(records)
+        ]
 
     @staticmethod
     def _start_nano(span: dict) -> int:
