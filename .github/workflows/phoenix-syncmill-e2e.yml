@@ -23,12 +23,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify private SyncMill checkout token
+        env:
+          SYNCMILL_REPO_TOKEN: ${{ secrets.SYNCMILL_REPO_TOKEN }}
+        run: |
+          if [ -z "$SYNCMILL_REPO_TOKEN" ]; then
+            echo "::error::SYNCMILL_REPO_TOKEN must grant read-only Contents access to memtomem/syncmill"
+            exit 1
+          fi
+
       - name: Check out SyncMill
         uses: actions/checkout@v4
         with:
           repository: memtomem/syncmill
           ref: ${{ env.SYNCMILL_REF }}
           path: vendor/syncmill
+          token: ${{ secrets.SYNCMILL_REPO_TOKEN }}
+          persist-credentials: false
 
       # `runner.*` is a step-level context, so resolve these paths here rather than in
       # job-level `env` (which makes GitHub reject the workflow before dispatch).
