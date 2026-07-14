@@ -2,7 +2,9 @@
 
 import builtins
 import json
+import os
 import re
+import subprocess
 from types import SimpleNamespace
 import sys
 
@@ -20,6 +22,7 @@ from tracegraph.model import (
     EdgeType,
     RawTrace,
     Step,
+    StepEvidence,
     StepKind,
     StepStatus,
     Trace,
@@ -32,6 +35,7 @@ runner = CliRunner()
 def _phoenix_export(trace_id="phoenix-1", *, status="ERROR"):
     return {
         "traceId": trace_id,
+        "status": status,
         "spans": [
             {
                 "id": "root",
@@ -161,12 +165,13 @@ def test_phoenix_diagnose_uses_read_only_px_and_writes_safe_outputs(tmp_path, mo
 
     def fake_run(command, **kwargs):
         seen.append((command, kwargs))
+        if command == ["px", "--version"]:
+            return SimpleNamespace(stdout="1.8.1\n")
         if command[1:3] == ["trace", "get"]:
-            return SimpleNamespace(stdout=json.dumps(_phoenix_export()))
-        span = _phoenix_export()["spans"][0]
-        return SimpleNamespace(
-            stdout=json.dumps([{**span, "annotations": [{"name": "quality", "score": 0.5}] }])
-        )
+            payload = _phoenix_export()
+            payload["spans"][0]["annotations"] = [{"name": "quality", "score": 0.5}]
+            return SimpleNamespace(stdout=json.dumps(payload))
+        raise AssertionError(f"unexpected px command: {command}")
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
     artifact_path = tmp_path / "safe.json"
@@ -184,10 +189,11 @@ def test_phoenix_diagnose_uses_read_only_px_and_writes_safe_outputs(tmp_path, mo
         ],
     )
     assert result.exit_code == 0, result.output
-    assert seen[0][0][:4] == ["px", "trace", "get", "phoenix-1"]
-    assert "--include-annotations" not in seen[0][0]
-    assert seen[0][1]["check"] is True
-    assert seen[1][0][1:3] == ["span", "list"]
+    assert seen[0][0] == ["px", "--version"]
+    assert seen[1][0][:4] == ["px", "trace", "get", "phoenix-1"]
+    assert "--include-annotations" in seen[1][0]
+    assert seen[1][1]["check"] is True
+    assert all(command[1] not in {"annotate", "add-note", "delete"} for command, _ in seen)
     assert artifact_path.exists() and report_path.exists()
     assert "password=secret" not in artifact_path.read_text(encoding="utf-8")
     assert json.loads(report_path.read_text())["metrics"]["evaluations"] == [
@@ -210,35 +216,238 @@ def test_phoenix_diagnose_missing_px_is_actionable(monkeypatch):
     assert "Phoenix CLI `px` was not found" in result.output
 
 
-def test_phoenix_diagnose_continues_when_optional_annotations_fail(monkeypatch):
+def test_phoenix_diagnose_auto_selects_latest_error_and_forwards_project(monkeypatch):
+    seen = []
+
+    def fake_run(command, **kwargs):
+        seen.append(command)
+        if command == ["px", "--version"]:
+            return SimpleNamespace(stdout="@arizeai/phoenix-cli 1.8.1")
+        if command[1:3] == ["trace", "list"]:
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    [
+                        _phoenix_export("latest-ok", status="OK"),
+                        _phoenix_export("latest-error", status="ERROR"),
+                    ]
+                )
+            )
+        raise AssertionError(f"unexpected px command: {command}")
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "diagnose", "--project", "agent-prod"])
+    assert result.exit_code == 0, result.output
+    assert "selected latest failed Phoenix trace" in result.output
+    assert "latest-error" in result.output
+    assert seen[1][1:3] == ["trace", "list"]
+    assert "--include-annotations" in seen[1]
+    assert seen[1][-2:] == ["--project", "agent-prod"]
+    assert not any(command[1:3] == ["trace", "get"] for command in seen)
+
+
+def test_phoenix_diagnose_forwards_project_to_trace_and_baseline(monkeypatch):
+    seen = []
+
+    def fake_run(command, **kwargs):
+        seen.append(command)
+        if command == ["px", "--version"]:
+            return SimpleNamespace(stdout="1.8.1")
+        if command[1:3] == ["trace", "get"]:
+            return SimpleNamespace(stdout=json.dumps(_phoenix_export(command[3], status="OK")))
+        raise AssertionError(f"unexpected px command: {command}")
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(
+        app,
+        [
+            "phoenix",
+            "diagnose",
+            "current",
+            "--baseline",
+            "baseline",
+            "--project",
+            "agent-prod",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    get_commands = [command for command in seen if command[1:3] == ["trace", "get"]]
+    assert [command[3] for command in get_commands] == ["current", "baseline"]
+    assert all(command[-2:] == ["--project", "agent-prod"] for command in get_commands)
+
+
+def test_phoenix_diagnose_falls_back_to_newest_trace(monkeypatch):
+    def fake_run(command, **kwargs):
+        if command == ["px", "--version"]:
+            return SimpleNamespace(stdout="1.8.1")
+        return SimpleNamespace(
+            stdout=json.dumps(
+                [_phoenix_export("newest", status="OK"), _phoenix_export("older", status="OK")]
+            )
+        )
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "diagnose"])
+    assert result.exit_code == 0, result.output
+    assert "No failed trace found in the latest 2" in result.output
+    assert "newest" in result.output
+
+
+def test_phoenix_diagnose_empty_project_is_actionable(monkeypatch):
+    def fake_run(command, **kwargs):
+        return SimpleNamespace(stdout="1.8.1" if command == ["px", "--version"] else "[]")
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "diagnose"])
+    assert result.exit_code != 0
+    assert "configured Phoenix project has no traces" in result.output
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (subprocess.TimeoutExpired(["px"], 60), "timed out"),
+        (subprocess.CalledProcessError(1, ["px"], stderr="password=secret"), "failed with exit 1"),
+    ],
+)
+def test_phoenix_diagnose_sanitizes_px_process_failures(monkeypatch, failure, expected):
     calls = 0
 
     def fake_run(command, **kwargs):
         nonlocal calls
         calls += 1
         if calls == 1:
-            return SimpleNamespace(stdout=json.dumps(_phoenix_export()))
-        raise cli_mod.subprocess.CalledProcessError(1, command)
+            return SimpleNamespace(stdout="1.8.1")
+        raise failure
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
-    result = runner.invoke(app, ["phoenix", "diagnose", "phoenix-1"])
+    result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
+    assert result.exit_code != 0
+    assert expected in result.output
+    assert "password=secret" not in result.output
+
+
+def test_phoenix_diagnose_rejects_malformed_px_json(monkeypatch):
+    responses = iter(["1.8.1", "not-json"])
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=next(responses)),
+    )
+    result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
+    assert result.exit_code != 0
+    assert "returned invalid JSON" in result.output
+
+
+@pytest.mark.parametrize("version", ["0.9.9", "unknown"])
+def test_phoenix_diagnose_rejects_unsupported_px_versions(monkeypatch, version):
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=version),
+    )
+    result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
+    assert result.exit_code != 0
+    assert "1.0.4" in result.output
+
+
+def test_phoenix_doctor_reports_ready_warn_and_fail(monkeypatch):
+    responses = iter(["1.8.1", "[]", json.dumps([_phoenix_export(status="OK")])])
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=next(responses)),
+    )
+    ready = runner.invoke(app, ["phoenix", "doctor", "--project", "agent-prod"])
+    assert ready.exit_code == 0, ready.output
+    assert "READY" in ready.output and "agent-prod" in ready.output
+
+    responses = iter(["1.8.1", "[]", "[]"])
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout=next(responses)),
+    )
+    warning = runner.invoke(app, ["phoenix", "doctor"])
+    assert warning.exit_code == 0, warning.output
+    assert "WARN" in warning.output and "no traces yet" in warning.output
+
+    monkeypatch.setattr(
+        cli_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("px")),
+    )
+    failed = runner.invoke(app, ["phoenix", "doctor"])
+    assert failed.exit_code == 1
+    assert "FAIL" in failed.stderr and "px` was not found" in failed.stderr
+
+
+def test_phoenix_diagnose_crosses_real_subprocess_boundary(tmp_path, monkeypatch):
+    payload = _phoenix_export("subprocess-trace")
+    payload["spans"][0]["annotations"] = [{"name": "quality", "label": "fail"}]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_px = bin_dir / "px"
+    log = tmp_path / "px.log"
+    fake_px.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['FAKE_PX_LOG'], 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('1.8.1')\n"
+        "elif sys.argv[1:3] == ['trace', 'list']:\n"
+        f"    print({json.dumps([payload])!r})\n"
+        "else:\n"
+        "    raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+    fake_px.chmod(0o755)
+    monkeypatch.setenv("FAKE_PX_LOG", str(log))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    safe = tmp_path / "safe.json"
+    report = tmp_path / "report.json"
+    result = runner.invoke(
+        app,
+        [
+            "phoenix",
+            "diagnose",
+            "--save-artifact",
+            str(safe),
+            "--json-out",
+            str(report),
+        ],
+    )
     assert result.exit_code == 0, result.output
-    assert "What failed" in result.output
-    assert "unavailable" in result.output
+    combined = result.output + safe.read_text() + report.read_text()
+    assert "private prompt" not in combined
+    assert "password=secret" not in combined
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    assert commands[0] == ["--version"]
+    assert commands[1][:2] == ["trace", "list"]
+    assert "--include-annotations" in commands[1]
 
 
-def test_phoenix_diagnose_warns_when_annotation_lookup_hits_limit(monkeypatch):
-    def fake_run(command, **kwargs):
-        if command[1:3] == ["trace", "get"]:
-            return SimpleNamespace(stdout=json.dumps(_phoenix_export()))
-        span = _phoenix_export()["spans"][0]
-        return SimpleNamespace(stdout=json.dumps([span] * 10_000))
+def test_analyze_renders_baseline_telemetry_deltas(tmp_path):
+    baseline = tmp_path / "baseline.json"
+    current = tmp_path / "current.json"
+    _write_linear_trace(baseline, "baseline", ("agent", StepKind.AGENT, StepStatus.OK))
+    _write_linear_trace(current, "current", ("agent", StepKind.AGENT, StepStatus.OK))
+    baseline_trace = artifact.load(baseline)
+    baseline_trace.steps[0].evidence = StepEvidence(
+        total_tokens=10, total_cost="1.00", cost_currency="USD"
+    )
+    artifact.save(baseline_trace, baseline)
+    current_trace = artifact.load(current)
+    current_trace.steps[0].evidence = StepEvidence(
+        total_tokens=16, total_cost="1.15", cost_currency="USD"
+    )
+    artifact.save(current_trace, current)
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
-    result = runner.invoke(app, ["phoenix", "diagnose", "phoenix-1"])
+    result = runner.invoke(app, ["analyze", str(current), "--baseline", str(baseline)])
     assert result.exit_code == 0, result.output
-    assert "10,000-span limit" in result.stderr
-    assert "may be incomplete" in result.stderr
+    assert "telemetry delta:" in result.output
+    assert "tokens=+6" in result.output
+    assert "cost=+0.15 USD" in result.output
 
 
 def test_explain_shows_causal_chain(artifacts):

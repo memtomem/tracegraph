@@ -165,14 +165,24 @@ Phoenix CLI인 `px`를 설정합니다.
 - [Phoenix LangGraph 계측](https://arize.com/docs/phoenix/integrations/python/langgraph/langgraph-tracing)
 - [Phoenix CLI](https://arize.com/docs/phoenix/sdk-api-reference/typescript/arizeai-phoenix-cli)
 
-`px`가 PATH에 있고 Phoenix 인증이 설정돼 있다면 trace id만 넘기면 됩니다.
+`px` 1.0.4 이상이 PATH에 있고 Phoenix 인증이 설정돼 있다면 먼저 연결 상태를
+확인하고, trace id 없이도 최근 실패를 진단할 수 있습니다.
 
 ```bash
+uv run tracegraph phoenix doctor
+uv run tracegraph phoenix diagnose
+uv run tracegraph phoenix diagnose --project my-agent
 uv run tracegraph phoenix diagnose <trace-id>
 ```
 
-정상 실행을 명시적으로 비교하려면 baseline trace id를 넘깁니다. tracegraph가 최근
-실행을 임의로 고르지는 않습니다.
+trace id를 생략하면 최근 20개 중 가장 최신 실패 trace를 선택합니다. 실패 trace가
+없으면 그 사실을 알리고 가장 최신 정상 trace를 진단합니다. 특정 trace를 지정하면
+최근 목록 조회 없이 해당 trace만 가져옵니다. Phoenix project를 명시할 때는
+`--project`를 사용하고, endpoint와 인증정보는 `px` profile 또는 환경 변수에서
+관리합니다. tracegraph는 API key를 인자로 받거나 출력하지 않습니다.
+
+정상 실행을 명시적으로 비교하려면 baseline trace id를 넘깁니다. 진단 대상은 자동으로
+고를 수 있지만 baseline은 의미가 같은 실행인지 추측하지 않고 항상 명시적으로 받습니다.
 
 ```bash
 uv run tracegraph phoenix diagnose <failed-trace-id> --baseline <successful-trace-id>
@@ -187,7 +197,9 @@ uv run tracegraph phoenix diagnose <trace-id> \
 ```
 
 Phoenix raw export에는 prompt와 output이 포함될 수 있지만 `phoenix diagnose`는 이를
-메모리에서 바로 제거하며 raw 응답을 저장하지 않습니다. artifact와 report에는 구조
+메모리에서 바로 제거하며 raw 응답을 저장하지 않습니다. 조회는 annotation을 포함한
+read-only `px trace list/get`만 사용하고 Phoenix 데이터를 수정하는 annotate, note,
+delete 명령은 호출하지 않습니다. artifact와 report에는 구조
 식별자, identifier 형태의 step 이름, kind/status/time, token, 명시적 cost, 평가의 name/label/score만
 남습니다. prompt, message, tool 인자/결과, 검색 문서, raw error, 평가 explanation,
 사용자·세션·프로젝트 식별자는 저장하지 않습니다.

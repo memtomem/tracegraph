@@ -18,6 +18,29 @@ permissions:
   contents: read
 
 jobs:
+  phoenix-cli-contract:
+    name: Phoenix CLI contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Phoenix is an external runtime CLI rather than a Python dependency. Pin the
+      # exact package used to verify the read-only flags tracegraph relies on; the
+      # runtime floor remains 1.0.4, when trace annotation export became available.
+      - name: Verify px read contract
+        run: |
+          set -euo pipefail
+          test "$(npx --yes @arizeai/phoenix-cli@1.8.1 --version)" = "1.8.1"
+          npx --yes @arizeai/phoenix-cli@1.8.1 trace get --help | grep -F -- '--include-annotations'
+          npx --yes @arizeai/phoenix-cli@1.8.1 trace get --help | grep -F -- '--project'
+          npx --yes @arizeai/phoenix-cli@1.8.1 trace list --help | grep -F -- '--include-annotations'
+          npx --yes @arizeai/phoenix-cli@1.8.1 trace list --help | grep -F -- '--project'
+          npx --yes @arizeai/phoenix-cli@1.8.1 project list --help | grep -F -- '--format'
+
   base:
     name: pure-python core
     runs-on: ubuntu-latest

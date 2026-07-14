@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -51,10 +53,19 @@ app.add_typer(phoenix_app, name="phoenix")
 console = Console()
 err_console = Console(stderr=True)  # diagnostics (warnings) — keep them off result stdout
 
+_PX_MIN_VERSION = (1, 0, 4)
+_PX_SCAN_LIMIT = 20
+_PX_TIMEOUT_SECONDS = 60
+_PX_VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
+
 
 class QueryBackend(str, Enum):
     MEMORY = "memory"
     LADYBUG = "ladybug"
+
+
+class _PxError(RuntimeError):
+    """An actionable, body-free failure at the external Phoenix CLI boundary."""
 
 
 # Exceptions that mean "this file isn't a usable tracegraph artifact" (bad path, non-JSON,
@@ -131,94 +142,129 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
         raise typer.BadParameter(f"cannot load analysis input {source}: {_load_reason(exc)}") from exc
 
 
-def _px_trace(trace_id: str) -> NormalizedTrace:
-    """Read one trace through the official px CLI without persisting its raw body."""
-    command = [
-        "px",
-        "trace",
-        "get",
-        trace_id,
-        "--format",
-        "raw",
-        "--no-progress",
-    ]
+def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECONDS) -> str:
+    """Run one read-only ``px`` command without echoing its potentially-sensitive output."""
     try:
         result = subprocess.run(
             command,
             check=True,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
-        raise typer.BadParameter(
+        raise _PxError(
             "Phoenix CLI `px` was not found; install/configure @arizeai/phoenix-cli first"
         ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise typer.BadParameter("px trace get timed out after 60 seconds") from exc
+        raise _PxError(f"{action} timed out after {timeout} seconds") from exc
     except subprocess.CalledProcessError as exc:
-        raise typer.BadParameter(
-            f"px trace get failed with exit {exc.returncode}; verify Phoenix endpoint and authentication"
+        raise _PxError(
+            f"{action} failed with exit {exc.returncode}; verify Phoenix endpoint, authentication, "
+            "and project configuration"
         ) from exc
-    try:
-        payload = json.loads(result.stdout)
-        # `trace get` has no annotation flag. Fetch the same trace's annotated spans through
-        # the documented read-only span command and merge only annotation objects by span id.
-        try:
-            annotated = subprocess.run(
-                [
-                    "px",
-                    "span",
-                    "list",
-                    "--trace-id",
-                    trace_id,
-                    "--limit",
-                    "10000",
-                    "--include-annotations",
-                    "--format",
-                    "raw",
-                    "--no-progress",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            span_payload = json.loads(annotated.stdout)
-            annotated_spans = span_payload if isinstance(span_payload, list) else []
-            if len(annotated_spans) >= 10_000:
-                err_console.print(
-                    "[yellow]⚠ Phoenix annotation lookup reached the 10,000-span limit; "
-                    "evaluation evidence may be incomplete.[/]"
-                )
-            annotations_by_id = {
-                (item.get("context") or {}).get("span_id") or item.get("id"): item.get("annotations")
-                for item in annotated_spans
-                if isinstance(item, dict) and item.get("annotations")
-            }
-            for span in payload.get("spans", []) if isinstance(payload, dict) else []:
-                span_id = (span.get("context") or {}).get("span_id") or span.get("id")
-                if span_id in annotations_by_id:
-                    span["annotations"] = annotations_by_id[span_id]
-        except (
-            FileNotFoundError,
-            subprocess.CalledProcessError,
-            subprocess.TimeoutExpired,
-            json.JSONDecodeError,
-            ValueError,
-        ):
-            # Annotations are optional evidence. The trace itself remains diagnosable and
-            # missing evaluations are rendered as unavailable, never as zero/pass.
-            pass
+    return result.stdout
 
+
+def _px_version() -> str:
+    text = _px_run(["px", "--version"], action="px version check", timeout=10).strip()
+    match = _PX_VERSION_RE.search(text)
+    if match is None:
+        raise _PxError("could not determine the Phoenix CLI version; install px >= 1.0.4")
+    parsed = tuple(int(part) for part in match.groups())
+    if parsed < _PX_MIN_VERSION:
+        raise _PxError(
+            f"Phoenix CLI {match.group(0)} is too old; install px >= 1.0.4 with "
+            "`npm install -g @arizeai/phoenix-cli@latest`"
+        )
+    return match.group(0)
+
+
+def _px_json(command: list[str], *, action: str) -> Any:
+    text = _px_run(command, action=action)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _PxError(f"{action} returned invalid JSON") from exc
+
+
+def _px_project_args(project: str | None) -> list[str]:
+    return ["--project", project] if project else []
+
+
+def _px_normalize(payload: Any, trace_id: str) -> NormalizedTrace:
+    try:
         from tracegraph.adapters import PhoenixExportAdapter
 
         adapter = PhoenixExportAdapter(payload)
-        return normalize(adapter.ingest(trace_id))
-    except (ValueError, json.JSONDecodeError, KeyError) as exc:
-        raise typer.BadParameter(
+        nt = normalize(adapter.ingest(trace_id))
+        validate_normalized(nt)
+        return nt
+    except (ValueError, KeyError) as exc:
+        raise _PxError(
             f"px returned an unsupported or incomplete trace export: {_load_reason(exc)}"
         ) from exc
+
+
+def _px_trace(trace_id: str, *, project: str | None = None) -> NormalizedTrace:
+    """Read one annotated trace through ``px`` without persisting its raw body."""
+    command = [
+        "px",
+        "trace",
+        "get",
+        trace_id,
+        "--include-annotations",
+        "--format",
+        "raw",
+        "--no-progress",
+        *_px_project_args(project),
+    ]
+    payload = _px_json(command, action="px trace get")
+    return _px_normalize(payload, trace_id)
+
+
+def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bool, int]:
+    """Select the newest error, or the newest trace when the scan contains no error."""
+    command = [
+        "px",
+        "trace",
+        "list",
+        "--limit",
+        str(_PX_SCAN_LIMIT),
+        "--include-annotations",
+        "--format",
+        "raw",
+        "--no-progress",
+        *_px_project_args(project),
+    ]
+    payload = _px_json(command, action="px trace list")
+    if not isinstance(payload, list):
+        raise _PxError("px trace list returned an unsupported response; expected a JSON array")
+    if not payload:
+        raise _PxError("the configured Phoenix project has no traces")
+
+    try:
+        from tracegraph.adapters import PhoenixExportAdapter
+
+        adapter = PhoenixExportAdapter(payload)
+        ids = adapter.discover()
+    except ValueError as exc:
+        raise _PxError(
+            f"px returned an unsupported or incomplete trace list: {_load_reason(exc)}"
+        ) from exc
+
+    error_index = next(
+        (
+            index
+            for index, trace in enumerate(payload)
+            if str(trace.get("status", "")).upper() == "ERROR"
+        ),
+        None,
+    )
+    selected_index = error_index if error_index is not None else 0
+    selected_id = ids[selected_index]
+    nt = _px_normalize(payload[selected_index], selected_id)
+    return nt, error_index is not None, len(payload)
 
 
 def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
@@ -302,6 +348,20 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
         )
         if deltas:
             console.print(f"  pattern deltas: {deltas}")
+        metric_deltas = comparison.metric_deltas
+        wall_delta = metric_deltas["wall_duration_ms"]
+        token_delta = metric_deltas["total_tokens"]
+        cost_delta = metric_deltas["total_cost"]
+        wall_text = f"{wall_delta:+g} ms" if wall_delta is not None else "unavailable"
+        token_text = f"{token_delta:+d}" if token_delta is not None else "unavailable"
+        cost_text = (
+            f"{Decimal(str(cost_delta)):+f} {report.metrics.cost_currency}"
+            if cost_delta is not None and report.metrics.cost_currency
+            else "unavailable"
+        )
+        console.print(
+            f"  telemetry delta: wall={wall_text} · tokens={token_text} · cost={cost_text}"
+        )
 
     console.print("\n[bold]Data fidelity / privacy[/]")
     console.print(
@@ -615,17 +675,35 @@ def analyze_command(
 
 @phoenix_app.command(name="diagnose")
 def phoenix_diagnose(
-    trace_id: str = typer.Argument(..., help="Phoenix trace id."),
+    trace_id: str = typer.Argument(None, help="Phoenix trace id (default: latest failed trace)."),
+    project: str = typer.Option(None, "--project", help="Phoenix project name or id."),
     baseline: str = typer.Option(None, "--baseline", help="Explicit Phoenix baseline trace id."),
     save_artifact: Path = typer.Option(None, "--save-artifact", help="Save the body-free artifact."),
     json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
     limit: int = typer.Option(3, "--limit", "-l", help="Primary failures rendered in the terminal."),
 ) -> None:
-    """Fetch through `px trace get` and diagnose without storing the raw export."""
+    """Diagnose an explicit trace or automatically select a recent failure."""
     if limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
-    nt = _px_trace(trace_id)
-    baseline_nt = _px_trace(baseline) if baseline else None
+    try:
+        _px_version()
+        if trace_id:
+            nt = _px_trace(trace_id, project=project)
+        else:
+            nt, selected_error, scanned = _px_latest_trace(project=project)
+            trace_id = nt.trace.trace_id
+            if selected_error:
+                console.print(
+                    f"[cyan]selected latest failed Phoenix trace[/] {escape(trace_id)}"
+                )
+            else:
+                console.print(
+                    f"[yellow]No failed trace found in the latest {scanned}; "
+                    f"diagnosing the newest trace[/] {escape(trace_id)}"
+                )
+        baseline_nt = _px_trace(baseline, project=project) if baseline else None
+    except _PxError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     report = build_analysis(nt, baseline=baseline_nt)
     _render_analysis(report, limit=limit)
     if save_artifact:
@@ -634,6 +712,63 @@ def phoenix_diagnose(
     if json_out:
         save_analysis_report(report, json_out)
         console.print(f"[green]report[/] → {json_out}")
+
+
+@phoenix_app.command(name="doctor")
+def phoenix_doctor(
+    project: str = typer.Option(None, "--project", help="Phoenix project name or id."),
+) -> None:
+    """Check the read-only Phoenix CLI, connection, authentication, and project access."""
+    try:
+        version = _px_version()
+        projects = _px_json(
+            [
+                "px",
+                "project",
+                "list",
+                "--limit",
+                "1",
+                "--format",
+                "raw",
+                "--no-progress",
+            ],
+            action="px project list",
+        )
+        if not isinstance(projects, list):
+            raise _PxError("px project list returned an unsupported response; expected a JSON array")
+        traces = _px_json(
+            [
+                "px",
+                "trace",
+                "list",
+                "--limit",
+                "1",
+                "--format",
+                "raw",
+                "--no-progress",
+                *_px_project_args(project),
+            ],
+            action="px trace list",
+        )
+        if not isinstance(traces, list):
+            raise _PxError("px trace list returned an unsupported response; expected a JSON array")
+        if traces:
+            from tracegraph.adapters import PhoenixExportAdapter
+
+            PhoenixExportAdapter(traces)
+    except (ValueError, _PxError) as exc:
+        err_console.print(f"[bold red]FAIL[/] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
+
+    target = escape(project or "configured project")
+    if not traces:
+        console.print(
+            f"[bold yellow]WARN[/] px {version} can access {target}, but it has no traces yet."
+        )
+        console.print("  Instrument and run the agent once, then retry `tracegraph phoenix diagnose`.")
+        return
+    console.print(f"[bold green]READY[/] px {version} can read {target}.")
+    console.print("  Run `tracegraph phoenix diagnose` to inspect the latest failed trace.")
 
 
 @app.command()

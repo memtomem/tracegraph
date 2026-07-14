@@ -343,7 +343,12 @@ def _comparison(current: NormalizedTrace, baseline: NormalizedTrace) -> Comparis
     }
     bm, cm = _metrics(baseline), _metrics(current)
     cost_delta: str | None = None
-    if bm.total_cost is not None and cm.total_cost is not None:
+    if (
+        bm.total_cost is not None
+        and cm.total_cost is not None
+        and bm.cost_currency is not None
+        and bm.cost_currency == cm.cost_currency
+    ):
         cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
