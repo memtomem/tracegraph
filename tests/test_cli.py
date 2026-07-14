@@ -302,6 +302,21 @@ def test_phoenix_diagnose_empty_project_is_actionable(monkeypatch):
     assert "configured Phoenix project has no traces" in result.output
 
 
+def test_phoenix_diagnose_rejects_trace_list_without_aggregate_status(monkeypatch):
+    payload = _phoenix_export("missing-status")
+    payload.pop("status")
+
+    def fake_run(command, **kwargs):
+        if command == ["px", "--version"]:
+            return SimpleNamespace(stdout="1.8.1")
+        return SimpleNamespace(stdout=json.dumps([payload]))
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "diagnose"])
+    assert result.exit_code != 0
+    assert "required" in result.output and "status" in result.output
+
+
 @pytest.mark.parametrize(
     ("failure", "expected"),
     [

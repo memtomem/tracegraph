@@ -253,11 +253,22 @@ def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bo
             f"px returned an unsupported or incomplete trace list: {_load_reason(exc)}"
         ) from exc
 
+    statuses: list[str] = []
+    for trace in payload:
+        # px 1.8.1's buildTrace() derives this aggregate from child span statuses. The
+        # report below independently normalizes those spans, so selection and diagnosis
+        # deliberately remain separate checks rather than treating the aggregate as evidence.
+        status = trace.get("status")
+        if status not in {"OK", "ERROR"}:
+            raise _PxError(
+                "px trace list returned a trace without the required OK/ERROR status"
+            )
+        statuses.append(status)
+
+    # The pinned CLI contract test verifies that trace list emits newest-first order.
     error_index = next(
         (
-            index
-            for index, trace in enumerate(payload)
-            if str(trace.get("status", "")).upper() == "ERROR"
+            index for index, status in enumerate(statuses) if status == "ERROR"
         ),
         None,
     )
@@ -675,7 +686,9 @@ def analyze_command(
 
 @phoenix_app.command(name="diagnose")
 def phoenix_diagnose(
-    trace_id: str = typer.Argument(None, help="Phoenix trace id (default: latest failed trace)."),
+    trace_id: str | None = typer.Argument(
+        None, help="Phoenix trace id (default: latest failed trace)."
+    ),
     project: str = typer.Option(None, "--project", help="Phoenix project name or id."),
     baseline: str = typer.Option(None, "--baseline", help="Explicit Phoenix baseline trace id."),
     save_artifact: Path = typer.Option(None, "--save-artifact", help="Save the body-free artifact."),

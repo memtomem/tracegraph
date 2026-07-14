@@ -23,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -40,6 +42,11 @@ jobs:
           npx --yes @arizeai/phoenix-cli@1.8.1 trace list --help | grep -F -- '--include-annotations'
           npx --yes @arizeai/phoenix-cli@1.8.1 trace list --help | grep -F -- '--project'
           npx --yes @arizeai/phoenix-cli@1.8.1 project list --help | grep -F -- '--format'
+
+      - name: Verify px trace-list output schema
+        run: >-
+          python3 scripts/verify_phoenix_cli_contract.py
+          npx --yes @arizeai/phoenix-cli@1.8.1
 
   base:
     name: pure-python core
