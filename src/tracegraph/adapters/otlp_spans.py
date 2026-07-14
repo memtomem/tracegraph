@@ -182,9 +182,9 @@ def _int_attr(attrs: dict[str, Any], *names: str) -> int | None:
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            return None
+            continue
         if parsed < 0 or (isinstance(value, float) and not value.is_integer()):
-            return None
+            continue
         return parsed
     return None
 
@@ -197,7 +197,7 @@ def _decimal_attr(attrs: dict[str, Any], *names: str) -> str | None:
         try:
             parsed = Decimal(str(value))
         except InvalidOperation:
-            return None
+            continue
         if parsed.is_finite() and parsed >= 0:
             return format(parsed, "f")
     return None
@@ -251,7 +251,8 @@ def _evidence(span: dict, attrs: dict[str, Any]) -> StepEvidence | None:
         artifact_digest=_digest_attr(attrs, "syncmill.artifact_digest"),
         evaluations=evaluations,
     )
-    return evidence if any(value is not None for key, value in evidence.model_dump().items() if key != "evaluations") or evaluations else None
+    scalar_values = evidence.model_dump(exclude={"evaluations"}).values()
+    return evidence if evaluations or any(value is not None for value in scalar_values) else None
 
 
 class OTLPSpanAdapter:

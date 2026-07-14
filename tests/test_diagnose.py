@@ -14,6 +14,7 @@ from tracegraph.model import (
     EdgeType,
     RawTrace,
     Step,
+    StepEvidence,
     StepKind,
     StepStatus,
     Trace,
@@ -127,3 +128,34 @@ def test_report_exposes_body_free_external_decision_evidence():
         "graph_generation": 9,
         "verdict": "allow",
     }
+
+
+def test_metrics_include_non_llm_evidence():
+    nt = _trace("telemetry", StepStatus.OK)
+    nt.steps[1].evidence = StepEvidence(
+        prompt_tokens=10,
+        completion_tokens=4,
+        total_tokens=14,
+        total_cost="0.0042",
+        cost_currency="USD",
+    )
+    metrics = analyze(nt).metrics
+    assert metrics.prompt_tokens == 10
+    assert metrics.completion_tokens == 4
+    assert metrics.total_tokens == 14
+    assert metrics.total_cost == "0.0042"
+    assert metrics.cost_currency == "USD"
+
+
+def test_metrics_never_sum_mixed_or_partially_unknown_currencies():
+    nt = _trace("mixed", StepStatus.OK)
+    nt.steps[0].evidence = StepEvidence(total_cost="1.25", cost_currency="USD")
+    nt.steps[1].evidence = StepEvidence(total_cost="2.50", cost_currency="EUR")
+    metrics = analyze(nt).metrics
+    assert metrics.total_cost is None
+    assert metrics.cost_currency is None
+
+    nt.steps[1].evidence = StepEvidence(total_cost="2.50")
+    metrics = analyze(nt).metrics
+    assert metrics.total_cost is None
+    assert metrics.cost_currency is None

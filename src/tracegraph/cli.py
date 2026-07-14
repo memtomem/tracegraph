@@ -186,6 +186,11 @@ def _px_trace(trace_id: str) -> NormalizedTrace:
             )
             span_payload = json.loads(annotated.stdout)
             annotated_spans = span_payload if isinstance(span_payload, list) else []
+            if len(annotated_spans) >= 10_000:
+                err_console.print(
+                    "[yellow]⚠ Phoenix annotation lookup reached the 10,000-span limit; "
+                    "evaluation evidence may be incomplete.[/]"
+                )
             annotations_by_id = {
                 (item.get("context") or {}).get("span_id") or item.get("id"): item.get("annotations")
                 for item in annotated_spans

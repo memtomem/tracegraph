@@ -11,6 +11,7 @@ import pytest
 from otlp_agent_trace import sample_otlp_document
 
 from tracegraph.adapters import OTLPSpanAdapter
+from tracegraph.adapters.otlp_spans import _decimal_attr, _int_attr
 from tracegraph.analysis import explain
 from tracegraph.model import EdgeType, StepKind, StepStatus
 from tracegraph.normalize import normalize
@@ -111,6 +112,19 @@ def test_invalid_syncmill_artifact_digest_is_rejected():
     ]}]}]}
     with pytest.raises(ValueError, match="lowercase sha256"):
         OTLPSpanAdapter(doc).ingest("t")
+
+
+def test_numeric_attribute_aliases_fall_through_invalid_primary_values():
+    assert _int_attr(
+        {"llm.token_count.prompt": "invalid", "llm.token_count.input": 7},
+        "llm.token_count.prompt",
+        "llm.token_count.input",
+    ) == 7
+    assert _decimal_attr(
+        {"llm.cost.prompt": "invalid", "llm.cost.input": "0.25"},
+        "llm.cost.prompt",
+        "llm.cost.input",
+    ) == "0.25"
 
 
 def test_ingest_unknown_trace_raises():

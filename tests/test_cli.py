@@ -227,6 +227,20 @@ def test_phoenix_diagnose_continues_when_optional_annotations_fail(monkeypatch):
     assert "unavailable" in result.output
 
 
+def test_phoenix_diagnose_warns_when_annotation_lookup_hits_limit(monkeypatch):
+    def fake_run(command, **kwargs):
+        if command[1:3] == ["trace", "get"]:
+            return SimpleNamespace(stdout=json.dumps(_phoenix_export()))
+        span = _phoenix_export()["spans"][0]
+        return SimpleNamespace(stdout=json.dumps([span] * 10_000))
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "diagnose", "phoenix-1"])
+    assert result.exit_code == 0, result.output
+    assert "10,000-span limit" in result.stderr
+    assert "may be incomplete" in result.stderr
+
+
 def test_explain_shows_causal_chain(artifacts):
     a_json, _ = artifacts
     store_res = runner.invoke(app, ["inspect", str(a_json)])

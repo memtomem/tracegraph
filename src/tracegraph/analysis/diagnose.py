@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from tracegraph import artifact
 from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, find_matches
-from tracegraph.model import EdgeType, NormalizedTrace, Step, StepKind, StepStatus
+from tracegraph.model import CausalFidelity, EdgeType, NormalizedTrace, Step, StepStatus
 
 REPORT_SCHEMA_VERSION = 2
 _AUTO_PRESETS = (
@@ -229,24 +229,34 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
     if starts and ends:
         wall = round((max(ends) - min(starts)).total_seconds() * 1000, 6)
 
-    llm = [step.evidence for step in nt.steps if step.kind is StepKind.LLM and step.evidence]
+    evidence_items = [step.evidence for step in nt.steps if step.evidence]
 
     def total_int(field: str) -> int | None:
-        values = [getattr(item, field) for item in llm if getattr(item, field) is not None]
+        values = [
+            getattr(item, field)
+            for item in evidence_items
+            if getattr(item, field) is not None
+        ]
         return sum(values) if values else None
 
     costs: list[Decimal] = []
-    currencies: set[str] = set()
-    for evidence in llm:
+    cost_currencies: set[str] = set()
+    has_currencyless_cost = False
+    for evidence in evidence_items:
         if evidence.total_cost is not None:
             try:
                 parsed = Decimal(evidence.total_cost)
                 if parsed.is_finite() and parsed >= 0:
                     costs.append(parsed)
+                    if evidence.cost_currency:
+                        cost_currencies.add(evidence.cost_currency)
+                    else:
+                        has_currencyless_cost = True
             except InvalidOperation:
                 pass
-        if evidence.cost_currency:
-            currencies.add(evidence.cost_currency)
+    ambiguous_cost = len(cost_currencies) > 1 or (
+        bool(cost_currencies) and has_currencyless_cost
+    )
     evaluations = [
         EvaluationFinding(
             step_id=step.step_id,
@@ -264,8 +274,12 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
         prompt_tokens=total_int("prompt_tokens"),
         completion_tokens=total_int("completion_tokens"),
         total_tokens=total_int("total_tokens"),
-        total_cost=(format(sum(costs), "f") if costs else None),
-        cost_currency=(next(iter(currencies)) if len(currencies) == 1 else None),
+        total_cost=(format(sum(costs), "f") if costs and not ambiguous_cost else None),
+        cost_currency=(
+            next(iter(cost_currencies))
+            if len(cost_currencies) == 1 and not ambiguous_cost
+            else None
+        ),
         evaluations=evaluations,
     )
 
@@ -354,7 +368,7 @@ def _digest(nt: NormalizedTrace) -> str:
 def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> AnalysisReport:
     primary, propagated = _failures(nt)
     warnings: list[str] = []
-    if nt.trace.causal_fidelity.value == "parent_only":
+    if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
             "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
         )

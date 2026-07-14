@@ -7,6 +7,7 @@ import pytest
 
 from tracegraph import artifact
 from tracegraph.adapters import PhoenixExportAdapter
+from tracegraph.analysis.diagnose import analyze
 from tracegraph.model import CausalFidelity, EdgeOrigin, EdgeType, StepKind, StepStatus
 from tracegraph.normalize import normalize
 
@@ -36,6 +37,10 @@ def test_phoenix_export_maps_parent_kind_status_and_metrics():
     }
     (edge,) = nt.edges_of(EdgeType.CAUSED_BY)
     assert edge.origin is EdgeOrigin.SPAN_PARENT_FALLBACK
+    metrics = analyze(nt).metrics
+    assert metrics.total_tokens == 14
+    assert metrics.total_cost == "0.0042"
+    assert metrics.cost_currency == "USD"
 
 
 def test_phoenix_artifact_is_body_free_and_v2():
