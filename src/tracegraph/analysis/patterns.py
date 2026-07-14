@@ -554,8 +554,10 @@ PRESETS: dict[str, PathPattern] = {
         pattern_id="gate-failure-after-success",
         pattern_version=1,
     ),
-    # Official retry diagnosis requires an explicit producer-authored marker. Mere repetition is
-    # retained below as a query-only heuristic and cannot create governance review candidates.
+    # Official retry diagnosis requires an explicit producer-authored marker. The adjacency is
+    # intentionally strict: producers own this three-node causal contract rather than asking the
+    # consumer to guess across interposed steps. Mere repetition is retained below as a query-only
+    # heuristic and cannot create governance review candidates.
     "tool-retry-failure": PathPattern(
         (
             StepPredicate(kind=StepKind.TOOL),

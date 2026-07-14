@@ -39,17 +39,17 @@ jobs:
       - name: Verify px read contract
         run: |
           set -euo pipefail
-          test "$(npx --yes @arizeai/phoenix-cli@$PX_VERSION --version)" = "$PX_VERSION"
-          npx --yes @arizeai/phoenix-cli@$PX_VERSION trace get --help | grep -F -- '--include-annotations'
-          npx --yes @arizeai/phoenix-cli@$PX_VERSION trace get --help | grep -F -- '--project'
-          npx --yes @arizeai/phoenix-cli@$PX_VERSION trace list --help | grep -F -- '--include-annotations'
-          npx --yes @arizeai/phoenix-cli@$PX_VERSION trace list --help | grep -F -- '--project'
-          npx --yes @arizeai/phoenix-cli@$PX_VERSION project list --help | grep -F -- '--format'
+          test "$(npx --yes "@arizeai/phoenix-cli@$PX_VERSION" --version)" = "$PX_VERSION"
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace get --help | grep -F -- '--include-annotations'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace get --help | grep -F -- '--project'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace list --help | grep -F -- '--include-annotations'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" trace list --help | grep -F -- '--project'
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION" project list --help | grep -F -- '--format'
 
       - name: Verify px trace-list output schema
         run: >-
           python3 scripts/verify_phoenix_cli_contract.py
-          npx --yes @arizeai/phoenix-cli@$PX_VERSION
+          npx --yes "@arizeai/phoenix-cli@$PX_VERSION"
 
   base:
     name: pure-python core

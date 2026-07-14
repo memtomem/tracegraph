@@ -52,7 +52,7 @@ tracegraph phoenix diagnose <trace-id> --save-artifact safe.json --json-out repo
 
 tracegraph presets                   # list cross-trace query patterns
 tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
-tracegraph query tool-retry-failure *.json    # the marquee: same tool retried, then failing
+tracegraph query tool-retry-failure *.json    # explicit retry marker, then same tool failing
 tracegraph query tool-failure --backend ladybug A.json B.json   # use the optional Cypher accelerator
 
 # export versioned, body-free governance evidence (an empty match set is a valid report)
@@ -86,6 +86,12 @@ still useful. Explicit ids bypass that selection. The command invokes only read-
 the raw Phoenix response. Phoenix connection details and credentials remain owned by `px`
 profiles or environment variables; tracegraph never accepts an API key option. For an already
 exported file or a shell pipeline:
+
+Automatic retry diagnosis intentionally requires an upstream `retry:` CHAIN marker. SyncMill's
+controlled retry telemetry emits this contract; generic OTLP and LangGraph-checkpoint producers
+that do not emit it will not be labeled as retries automatically. Their repeated-tool signal
+remains available with `tracegraph query tool-repeat-failure-heuristic`, but this inference-only
+preset cannot create governance review candidates.
 
 ```bash
 tracegraph ingest-phoenix --file phoenix-trace.json --out tracegraph.json
