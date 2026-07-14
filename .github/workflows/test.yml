@@ -23,12 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Load Phoenix runtime pins
         run: echo "PX_VERSION=$(jq -r .phoenix_cli contracts/phoenix-runtime.json)" >> "$GITHUB_ENV"
@@ -58,12 +59,12 @@ jobs:
       # First-party actions (actions/*) stay tag-pinned: a tag rotation would
       # require a GitHub-owned org compromise. Third-party actions below are
       # SHA-pinned because their tag-mutation surface is unilateral.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      # Pinned to the v4.2.0 commit SHA (not the mutable `v4` tag) so a hijacked
+      # Pinned to the v8.1.0 commit SHA (not the mutable major tag) so a hijacked
       # tag can't silently swap the action body under us. Bump deliberately.
       - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
 
@@ -96,10 +97,10 @@ jobs:
     name: with [cypher] extra (LadybugDB)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
 
