@@ -11,3 +11,4 @@ wheels/
 
 # Local Codex/dev-trio review artifacts (logs, manifests, run metadata).
 .dev-trio/
+.DS_Store

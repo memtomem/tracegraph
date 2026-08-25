@@ -100,18 +100,28 @@ class LangGraphCheckpointAdapter:
 
     def discover(self) -> list[str]:
         """Distinct thread ids known to the saver (best effort; not all savers support it)."""
+        list_fn = getattr(self._saver, "list", None)
+        if list_fn is None:
+            raise NotImplementedError(
+                "this checkpointer does not support listing all threads"
+            )
         try:
-            tuples = list(self._saver.list(None))
-        except Exception as exc:  # noqa: BLE001 - surface as a clear capability error
+            tuples = list(list_fn(None))
+        except NotImplementedError as exc:
+            # Only the documented capability signal becomes "unsupported"; any other
+            # failure (sqlite corruption, I/O error, a saver bug) must propagate, not
+            # masquerade as a missing capability.
             raise NotImplementedError(
                 "this checkpointer does not support listing all threads"
             ) from exc
-        seen: list[str] = []
+        seen: set[str] = set()
+        ordered: list[str] = []
         for t in tuples:
             tid = (t.config.get("configurable") or {}).get("thread_id")
             if tid is not None and tid not in seen:
-                seen.append(tid)
-        return seen
+                seen.add(tid)
+                ordered.append(tid)
+        return ordered
 
     def ingest(self, trace_id: str) -> RawTrace:
         config = {"configurable": {"thread_id": trace_id}}
@@ -146,7 +156,13 @@ class LangGraphCheckpointAdapter:
             step_id_by_key[key] = step_id
             key_by_step_id[step_id] = key
             checkpoints[step_id] = cp
-            original_seq[step_id] = int(md.get("step", 0))
+            try:
+                original_seq[step_id] = int(md.get("step", 0))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"checkpoint {cid!r} in thread {trace_id!r} has a non-integer "
+                    f"metadata step: {md.get('step')!r}"
+                ) from exc
             parent_keys[step_id] = self._declared_parent_keys(t, ns)
             steps[step_id] = Step(
                 step_id=step_id,

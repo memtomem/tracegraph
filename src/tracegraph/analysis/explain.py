@@ -29,9 +29,17 @@ class Explanation:
         return bool(self.lossy_steps)
 
 
-def explain(store: GraphStore, step_id: str) -> Explanation:
-    """Build the raw causal chain leading to ``step_id``."""
-    steps = store.trace().steps_by_id()
+def explain(
+    store: GraphStore, step_id: str, *, steps: dict[str, Step] | None = None
+) -> Explanation:
+    """Build the raw causal chain leading to ``step_id``.
+
+    ``steps`` lets a caller that already holds the trace's step map (e.g. the CLI
+    explaining many matches against one store) skip re-materializing the whole trace
+    per call — ``store.trace()`` can be a full graph pull on the LadybugDB backend.
+    """
+    if steps is None:
+        steps = store.trace().steps_by_id()
     target = steps[step_id]
     chain = store.ancestors(step_id)
     lossy = [s.step_id for s in [target, *chain] if s.projection_lossy]

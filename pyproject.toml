@@ -39,4 +39,5 @@ testpaths = ["tests"]
 pythonpath = ["examples"]
 markers = [
     "cypher: tests that require the optional [cypher] (LadybugDB) backend",
+    "perf: wall-clock regression guards; deselect with -m 'not perf' on loaded machines",
 ]

@@ -99,11 +99,49 @@ class LadybugStore:
         # ":memory:" is Ladybug's in-process sentinel; matches InMemoryStore's no-files default.
         self._db = ladybug.Database(":memory:" if path is None else str(path))
         self._conn = ladybug.Connection(self._db)
+        self._closed = False
         self._trace: Trace | None = None
+        # Read caches over the DB contents, invalidated by the corresponding upsert. The
+        # store is an accelerator over an immutable-once-loaded trace, so repeated queries
+        # (ancestors per failure, find_matches per preset) shouldn't re-dump the graph.
+        self._steps_cache: list[Step] | None = None
+        self._causes_cache: dict[str, list[str]] | None = None
+        self._trace_cache: NormalizedTrace | None = None
         #: True iff the most recent find_matches() could not compile to faithful Cypher
         #: (unbounded/over-cap gap) and ran the pure-Python matcher instead. Lets the CLI
         #: tell the user the accelerator deferred — the results are identical either way.
         self.fell_back_to_python = False
+
+    # --- lifecycle ---
+
+    def close(self) -> None:
+        """Release the underlying connection and database. Idempotent.
+
+        The store holds a live LadybugDB connection; a caller creating many stores (one per
+        trace in a directory sweep) must close each one or the process accumulates open
+        databases. Using the store after close raises ``RuntimeError``.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._steps_cache = None
+        self._causes_cache = None
+        self._trace_cache = None
+        try:
+            self._conn.close()
+        finally:
+            # The database must be released even if the connection close raises.
+            self._db.close()
+
+    def __enter__(self) -> "LadybugStore":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("LadybugStore is closed")
 
     # --- construction ---
 
@@ -113,11 +151,17 @@ class LadybugStore:
         InMemoryStore.from_trace) so a corrupt artifact can't enter the DB."""
         validate_normalized(nt)
         store = cls(path=path)
-        store.init_schema()
-        store._trace = nt.trace
-        store._insert_trace(nt.trace)
-        store.upsert_nodes(nt.steps)
-        store.upsert_edges(nt.edges)
+        try:
+            store.init_schema()
+            store._trace = nt.trace
+            store._insert_trace(nt.trace)
+            store.upsert_nodes(nt.steps)
+            store.upsert_edges(nt.edges)
+        except BaseException:
+            # Don't leak a live DB/connection behind a failed constructor — the caller
+            # never receives the store, so it could never close it.
+            store.close()
+            raise
         return store
 
     @classmethod
@@ -137,16 +181,50 @@ class LadybugStore:
             self._conn.execute(ddl)
 
     def upsert_nodes(self, steps: list[Step]) -> None:
-        # One parameterized statement per step is sufficient at MVP trace volumes
-        # is fine at MVP volumes (a trace is hundreds of steps, not millions).
-        placeholders = ", ".join(f"{f}: ${f}" for f in _STEP_FIELDS)
-        stmt = f"CREATE (:Step {{{placeholders}}})"
-        for s in steps:
-            self._conn.execute(stmt, _step_params(s))
+        """Insert a batch of steps in one UNWIND statement.
+
+        The batch is **atomic**: if any row fails (e.g. a duplicate ``step_id`` primary
+        key), LadybugDB rolls the whole statement back and no rows land. This is a
+        deliberate contract change from the earlier per-row loop, which left the
+        already-inserted prefix behind on failure — all-or-nothing is the behavior a
+        rebuildable accelerator cache actually wants (a half-loaded trace is never
+        queryable as if complete). Same contract for :meth:`upsert_edges`.
+        """
+        self._check_open()
+        if not steps:
+            return
+        # One UNWIND per batch instead of one statement per step — bulk load is a single
+        # round-trip through the query engine.
+        placeholders = ", ".join(f"{f}: r.{f}" for f in _STEP_FIELDS)
+        self._conn.execute(
+            f"UNWIND $rows AS r CREATE (:Step {{{placeholders}}})",
+            {"rows": [_step_params(s) for s in steps]},
+        )
+        self._steps_cache = None
+        self._trace_cache = None
 
     def upsert_edges(self, edges: list[Edge]) -> None:
+        self._check_open()
+        if not edges:
+            return
+        # One UNWIND per edge type (the relationship label and target table differ per
+        # type), preserving each type's insertion order within its batch. The per-type
+        # statements run inside one transaction so a mixed batch keeps the same
+        # all-or-nothing contract as upsert_nodes — a failure on a later type must not
+        # leave the earlier types committed.
+        by_type: dict[EdgeType, list[Edge]] = {}
         for e in edges:
-            self._insert_edge(e)
+            by_type.setdefault(e.type, []).append(e)
+        self._conn.execute("BEGIN TRANSACTION")
+        try:
+            for edge_type, batch in by_type.items():
+                self._insert_edge_batch(edge_type, batch)
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
+        self._causes_cache = None
+        self._trace_cache = None
 
     def ancestors(self, step_id: str) -> list[Step]:
         """Raw CAUSED_BY ancestors of ``step_id``, nearest-cause first.
@@ -157,30 +235,11 @@ class LadybugStore:
         steps). We deliberately do NOT use a variable-length match here: a whole-graph pull
         avoids backend-specific path bounds and guarantees complete RCA at any depth.
         """
-        if not self._step_exists(step_id):
-            raise KeyError(f"unknown step {step_id!r}")
-
-        # Whole-graph single-hop adjacency (effect -> cause); the Python BFS below restricts
-        # it to what's reachable from ``step_id``. Same load-then-traverse pattern as
-        # trace()/find_matches, and reproduces InMemoryStore.ancestors exactly at any depth.
-        rows = _collect(
-            self._conn.execute(
-                "MATCH (effect:Step)-[:CAUSED_BY]->(cause:Step) "
-                "RETURN effect.step_id, cause.step_id"
-            )
-        )
-        adjacency: dict[str, list[str]] = {}
-        for effect_id, cause_id in rows:
-            adjacency.setdefault(effect_id, []).append(cause_id)
-        # Match the InMemoryStore's per-node child order: it inherits CAUSED_BY edge
-        # insertion order, which after :func:`normalize` canonicalization is
-        # ``(effect.seq, cause.seq, src, dst)``. Cypher gives us no row-order guarantee,
-        # so reproduce that sort here.
+        self._check_open()
         steps_by_id = {s.step_id: s for s in self._load_all_steps()}
-        for effect_id, causes in adjacency.items():
-            causes.sort(
-                key=lambda cid: (steps_by_id[cid].seq, cid)
-            )
+        if step_id not in steps_by_id:
+            raise KeyError(f"unknown step {step_id!r}")
+        adjacency = self._cause_adjacency(steps_by_id)
 
         out: list[Step] = []
         seen: set[str] = {step_id}
@@ -190,7 +249,9 @@ class LadybugStore:
             if cur in seen:
                 continue
             seen.add(cur)
-            out.append(steps_by_id[cur])
+            # Copy: the Step model is not frozen and these instances live in the shared
+            # per-store cache — a caller mutating a result must not corrupt later reads.
+            out.append(steps_by_id[cur].model_copy(deep=True))
             queue.extend(adjacency.get(cur, []))
         return out
 
@@ -207,8 +268,15 @@ class LadybugStore:
         live in the DB are still useful for ad-hoc Cypher against the derived layer; they
         just aren't load-bearing for artifact round-trip.
         """
+        self._check_open()
         if self._trace is None:
             raise RuntimeError("store has no trace loaded")
+        if self._trace_cache is not None:
+            # Deep copy: the model is not frozen, so handing out the cached instance
+            # would let one caller's mutation corrupt every later read (and the
+            # pure-Python fallback matcher). A copy is still far cheaper than the
+            # whole-graph dump + re-normalize it replaces.
+            return self._trace_cache.model_copy(deep=True)
         raw_steps = [
             s.model_copy(update={"projection_lossy": False}) for s in self._load_all_steps()
         ]
@@ -227,7 +295,10 @@ class LadybugStore:
             )
             for src, dst, origin in caused_by_pairs
         ]
-        return normalize(RawTrace(trace=self._trace, steps=raw_steps, causal_edges=raw_edges))
+        self._trace_cache = normalize(
+            RawTrace(trace=self._trace, steps=raw_steps, causal_edges=raw_edges)
+        )
+        return self._trace_cache.model_copy(deep=True)
 
     # --- pattern matching (the reason LadybugDB earns its weight) ---
 
@@ -250,6 +321,7 @@ class LadybugStore:
         :meth:`ancestors` already uses for the same cap. The accelerator degrades to *slower*,
         never to *wrong*; ``fell_back_to_python`` records that it happened.
         """
+        self._check_open()
         self.fell_back_to_python = False
         if not pattern.steps:
             # Match the pure-Python convention so callers can be backend-agnostic; the
@@ -272,40 +344,71 @@ class LadybugStore:
         stmt = f"CREATE (:Trace {{{placeholders}}})"
         self._conn.execute(stmt, _trace_params(t))
 
-    def _insert_edge(self, e: Edge) -> None:
+    def _insert_edge_batch(self, edge_type: EdgeType, edges: list[Edge]) -> None:
         # BELONGS_TO targets a Trace node; the causal/tree edges stay Step→Step.
-        target_label = "Trace" if e.type is EdgeType.BELONGS_TO else "Step"
+        target_label = "Trace" if edge_type is EdgeType.BELONGS_TO else "Step"
         relationship = (
-            f"[:{e.type.value} {{origin: $origin}}]"
-            if e.type is EdgeType.CAUSED_BY
-            else f"[:{e.type.value}]"
+            f"[:{edge_type.value} {{origin: r.origin}}]"
+            if edge_type is EdgeType.CAUSED_BY
+            else f"[:{edge_type.value}]"
         )
         stmt = (
+            "UNWIND $rows AS r "
             f"MATCH (src:Step), (dst:{target_label}) "
-            f"WHERE src.step_id = $src AND dst.{'trace_id' if target_label == 'Trace' else 'step_id'} = $dst "
-            f"CREATE (src)-{relationship}->(dst)"
+            f"WHERE src.step_id = r.src AND dst.{'trace_id' if target_label == 'Trace' else 'step_id'} = r.dst "
+            f"CREATE (src)-{relationship}->(dst) "
+            "RETURN count(*)"
         )
-        params = {"src": e.src, "dst": e.dst}
-        if e.type is EdgeType.CAUSED_BY:
-            params["origin"] = e.origin.value if e.origin else None
-        self._conn.execute(stmt, params)
-
-    def _step_exists(self, step_id: str) -> bool:
-        rows = _collect(
-            self._conn.execute(
-                "MATCH (s:Step) WHERE s.step_id = $sid RETURN s.step_id",
-                {"sid": step_id},
+        rows: list[dict[str, Any]] = []
+        for e in edges:
+            row: dict[str, Any] = {"src": e.src, "dst": e.dst}
+            if edge_type is EdgeType.CAUSED_BY:
+                row["origin"] = e.origin.value if e.origin else None
+            rows.append(row)
+        result = _collect(self._conn.execute(stmt, {"rows": rows}))
+        created = result[0][0] if result else 0
+        if created != len(rows):
+            # UNWIND+MATCH silently skips a row whose endpoint doesn't exist; that would
+            # break the batch's all-or-nothing contract, so surface it as an error — the
+            # surrounding transaction in upsert_edges rolls the whole batch back.
+            raise ValueError(
+                f"{len(rows) - created} of {len(rows)} {edge_type.value} edge(s) "
+                "reference unknown endpoints"
             )
-        )
-        return bool(rows)
+
+    def _cause_adjacency(self, steps_by_id: dict[str, Step]) -> dict[str, list[str]]:
+        """Whole-graph single-hop CAUSED_BY adjacency (effect -> cause), cached per store.
+
+        Same load-then-traverse pattern as trace()/find_matches, reproducing
+        InMemoryStore.ancestors exactly at any depth. Per-node cause order matches the
+        InMemoryStore's CAUSED_BY insertion order, which after :func:`normalize`
+        canonicalization is ``(effect.seq, cause.seq, src, dst)`` — Cypher gives no
+        row-order guarantee, so we re-sort here.
+        """
+        if self._causes_cache is None:
+            rows = _collect(
+                self._conn.execute(
+                    "MATCH (effect:Step)-[:CAUSED_BY]->(cause:Step) "
+                    "RETURN effect.step_id, cause.step_id"
+                )
+            )
+            adjacency: dict[str, list[str]] = {}
+            for effect_id, cause_id in rows:
+                adjacency.setdefault(effect_id, []).append(cause_id)
+            for causes in adjacency.values():
+                causes.sort(key=lambda cid: (steps_by_id[cid].seq, cid))
+            self._causes_cache = adjacency
+        return self._causes_cache
 
     def _load_all_steps(self) -> list[Step]:
-        rows = _collect(
-            self._conn.execute(
-                "MATCH (s:Step) RETURN " + ", ".join(f"s.{f}" for f in _STEP_FIELDS)
+        if self._steps_cache is None:
+            rows = _collect(
+                self._conn.execute(
+                    "MATCH (s:Step) RETURN " + ", ".join(f"s.{f}" for f in _STEP_FIELDS)
+                )
             )
-        )
-        return [_step_from_row(r) for r in rows]
+            self._steps_cache = [_step_from_row(r) for r in rows]
+        return self._steps_cache
 
 
 # --- helpers (module-level so they're easy to unit-test if needed) ---

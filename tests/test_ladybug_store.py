@@ -493,3 +493,173 @@ def test_cli_query_ladybug_bounded_marquee_runs_native_no_fallback_note(tmp_path
     assert res.exit_code == 0, res.output
     assert "1 match(es)" in res.output
     assert "not Cypher-compilable" not in res.output
+
+
+# --- lifecycle: the store owns a live DB connection and must release it ---
+
+
+def test_close_is_idempotent_and_blocks_further_use() -> None:
+    store = LadybugStore.from_trace(_erroring_tool_trace("L"))
+    assert store.trace().trace.trace_id == "L"
+    store.close()
+    store.close()  # idempotent
+    with pytest.raises(RuntimeError, match="closed"):
+        store.trace()
+    with pytest.raises(RuntimeError, match="closed"):
+        store.find_matches(PRESETS["error"])
+    with pytest.raises(RuntimeError, match="closed"):
+        store.ancestors("L0")
+
+
+def test_context_manager_closes_on_exit() -> None:
+    with LadybugStore.from_trace(_erroring_tool_trace("M")) as store:
+        assert store.find_matches(PRESETS["tool-failure"]) == [["M2"]]
+    with pytest.raises(RuntimeError, match="closed"):
+        store.trace()
+
+
+def test_repeated_queries_reuse_cached_reads() -> None:
+    # ancestors/find_matches on an immutable loaded trace must not re-dump the graph per
+    # call: results must match fresh ones AND the repeat calls must not issue the
+    # whole-graph pull statements again (counted via an execute spy).
+    store = LadybugStore.from_trace(_erroring_tool_trace("N"))
+    try:
+        first = store.ancestors("N3")
+        matches = store.find_matches(PRESETS["error"])
+
+        class _SpyConn:
+            def __init__(self, real):
+                self._real = real
+                self.dump_queries: list[str] = []
+
+            def execute(self, query, *args, **kwargs):
+                if isinstance(query, str) and (
+                    "MATCH (s:Step) RETURN" in query
+                    or "CAUSED_BY]->(cause:Step)" in query
+                ):
+                    self.dump_queries.append(query)
+                return self._real.execute(query, *args, **kwargs)
+
+            def close(self):
+                self._real.close()
+
+        spy = _SpyConn(store._conn)
+        store._conn = spy
+        assert store.ancestors("N3") == first
+        assert store.find_matches(PRESETS["error"]) == matches
+        assert spy.dump_queries == [], (
+            "repeat queries re-dumped the graph instead of using caches"
+        )
+    finally:
+        store.close()
+
+
+def test_upsert_nodes_batch_is_atomic_on_duplicate_key() -> None:
+    # Documented contract of the UNWIND batch (deliberate change from the old per-row
+    # loop, which left an inserted prefix behind): a failing batch lands NO rows.
+    nt = _erroring_tool_trace("P")
+    store = LadybugStore()
+    store.init_schema()
+    try:
+        dup = [nt.steps[0], nt.steps[1], nt.steps[0]]  # duplicate primary key
+        with pytest.raises(Exception):
+            store.upsert_nodes(dup)
+        assert store._load_all_steps() == []
+    finally:
+        store.close()
+
+
+def test_upsert_edges_mixed_batch_is_atomic_on_failure() -> None:
+    # A mixed-type edge batch runs in one transaction: when the CAUSED_BY batch fails,
+    # the BELONGS_TO batch executed earlier in the same call must be rolled back — no
+    # partially loaded accelerator. The failure is forced by smuggling a non-enum
+    # ``origin`` past the frozen model, which raises while binding the batch params.
+    nt = _erroring_tool_trace("Q")
+    store = LadybugStore()
+    store.init_schema()
+    store._trace = nt.trace
+    store._insert_trace(nt.trace)
+    store.upsert_nodes(nt.steps)
+    try:
+        good_belongs = [e for e in nt.edges if e.type is EdgeType.BELONGS_TO]
+        bad_caused = Edge(type=EdgeType.CAUSED_BY, src="Q1", dst="Q0")
+
+        class _BadOrigin:
+            pass
+
+        object.__setattr__(bad_caused, "origin", _BadOrigin())  # frozen model bypass
+        with pytest.raises(Exception):
+            store.upsert_edges([*good_belongs, bad_caused])
+        res = store._conn.execute("MATCH ()-[e:BELONGS_TO]->() RETURN count(e)")
+        assert res.get_next() == [0], "earlier edge types leaked past a failed batch"
+    finally:
+        store.close()
+
+
+def test_upsert_edges_rejects_dangling_endpoint_and_rolls_back() -> None:
+    # UNWIND+MATCH silently skips rows with missing endpoints; the store must detect the
+    # short count, raise, and roll back the valid rows of the same batch.
+    nt = _erroring_tool_trace("R")
+    store = LadybugStore()
+    store.init_schema()
+    store._trace = nt.trace
+    store._insert_trace(nt.trace)
+    store.upsert_nodes(nt.steps)
+    try:
+        valid = Edge(type=EdgeType.CAUSED_BY, src="R1", dst="R0")
+        dangling = Edge(type=EdgeType.CAUSED_BY, src="R2", dst="NOPE")
+        with pytest.raises(ValueError, match="unknown endpoints"):
+            store.upsert_edges([valid, dangling])
+        res = store._conn.execute("MATCH ()-[e:CAUSED_BY]->() RETURN count(e)")
+        assert res.get_next() == [0], "valid row of a failed batch was committed"
+    finally:
+        store.close()
+
+
+def test_repeated_unbounded_fallback_reuses_cached_trace() -> None:
+    # The uncompilable-pattern fallback goes through trace(); a repeat query must reuse
+    # the cached reconstruction instead of re-issuing the whole-graph raw-edge dump.
+    store = LadybugStore.from_trace(_retry_trace("NC"))
+    pattern = PRESETS["tool-repeat-failure-heuristic"]
+    try:
+        first = store.find_matches(pattern)
+        assert store.fell_back_to_python is True
+
+        class _SpyConn:
+            def __init__(self, real):
+                self._real = real
+                self.dump_queries: list[str] = []
+
+            def execute(self, query, *args, **kwargs):
+                if isinstance(query, str) and (
+                    "MATCH (s:Step) RETURN" in query
+                    or "RETURN a.step_id, b.step_id" in query
+                ):
+                    self.dump_queries.append(query)
+                return self._real.execute(query, *args, **kwargs)
+
+            def close(self):
+                self._real.close()
+
+        spy = _SpyConn(store._conn)
+        store._conn = spy
+        assert store.find_matches(pattern) == first
+        assert spy.dump_queries == [], "fallback re-dumped the graph instead of using the trace cache"
+    finally:
+        store.close()
+
+
+def test_public_reads_are_isolated_from_cache_mutation() -> None:
+    # Step/NormalizedTrace are not frozen models; public methods must hand out copies so
+    # a caller's mutation can never corrupt the store's caches or later fallbacks.
+    store = LadybugStore.from_trace(_erroring_tool_trace("S"))
+    try:
+        t1 = store.trace()
+        t1.steps.clear()
+        assert len(store.trace().steps) == 4, "mutating trace() result corrupted the cache"
+
+        chain = store.ancestors("S3")
+        chain[0].name = "tampered"
+        assert store.ancestors("S3")[0].name != "tampered"
+    finally:
+        store.close()

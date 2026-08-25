@@ -134,14 +134,15 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
     unmatched subtrees as present-only-in-A / present-only-in-B. Iterative throughout, so it
     handles the deep-linear traces LangGraph produces without overflowing the stack.
     """
-    if is_isomorphic(a, b, label):
-        return TreeDiff(identical=True)
-
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a, ca), _roots(b, cb)
     canA = _subtree_canons(sa, ca, ra, label)
     canB = _subtree_canons(sb, cb, rb, label)
+    # Same comparison as is_isomorphic(), reusing the canons computed above.
+    if tuple(sorted(canA[r] for r in ra)) == tuple(sorted(canB[r] for r in rb)):
+        return TreeDiff(identical=True)
+
     changes: list[str] = []
 
     def align(a_ids: list[str], b_ids: list[str]) -> tuple[list[str], list[str]]:

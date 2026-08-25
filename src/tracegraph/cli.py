@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -52,6 +53,27 @@ phoenix_app = typer.Typer(
 app.add_typer(phoenix_app, name="phoenix")
 console = Console()
 err_console = Console(stderr=True)  # diagnostics (warnings) — keep them off result stdout
+
+#: Per-file ceiling for artifact loads. An artifact is a body-free trace (hundreds of
+#: steps, a few MB at most); anything this large is not one, and parsing it would pin
+#: multiples of its size in memory. Override with TRACEGRAPH_MAX_ARTIFACT_BYTES
+#: (0 disables the check) if real artifacts ever approach it.
+_DEFAULT_MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
+
+
+def _max_artifact_bytes() -> int:
+    raw = os.environ.get("TRACEGRAPH_MAX_ARTIFACT_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_ARTIFACT_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        raise typer.BadParameter(
+            f"TRACEGRAPH_MAX_ARTIFACT_BYTES must be an integer, got {raw!r}"
+        ) from None
+    if value < 0:
+        raise typer.BadParameter("TRACEGRAPH_MAX_ARTIFACT_BYTES must be >= 0")
+    return value
 
 _PX_MIN_VERSION = (1, 0, 4)
 _PX_SCAN_LIMIT = 20
@@ -102,9 +124,30 @@ def _load_reason(exc: Exception) -> str:
     return msg.splitlines()[0] if msg else exc.__class__.__name__
 
 
+def _read_artifact_bytes(path: Path) -> bytes:
+    """Read a whole artifact file, enforcing the byte ceiling on the actual read.
+
+    A bounded read from one open descriptor — not a ``stat()`` pre-check — so a file
+    that grows (or lies about its size, e.g. a FIFO) between check and read can never
+    pull more than the limit into memory. This is the single file-load boundary every
+    CLI path goes through.
+    """
+    limit = _max_artifact_bytes()
+    with open(path, "rb") as handle:
+        if not limit:
+            return handle.read()
+        data = handle.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError(
+                f"artifact exceeds the {limit}-byte limit "
+                "(set TRACEGRAPH_MAX_ARTIFACT_BYTES to raise it, 0 to disable)"
+            )
+        return data
+
+
 def _load_validated(path: Path) -> NormalizedTrace:
     """Load an artifact and validate both edge layers. Propagates the underlying load error."""
-    nt = artifact.load(path)
+    nt = artifact.loads(_read_artifact_bytes(path).decode("utf-8"))
     validate_normalized(nt)
     return nt
 
@@ -112,7 +155,7 @@ def _load_validated(path: Path) -> NormalizedTrace:
 def _read_source(source: str) -> str:
     if source == "-":
         return typer.get_text_stream("stdin").read()
-    return Path(source).read_text(encoding="utf-8")
+    return _read_artifact_bytes(Path(source)).decode("utf-8")
 
 
 def _load_analysis_source(source: str, trace_id: str | None = None) -> NormalizedTrace:
@@ -121,7 +164,7 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
         text = _read_source(source)
         payload = json.loads(text)
         if isinstance(payload, dict) and "schema_version" in payload:
-            nt = artifact.loads(text)
+            nt = artifact.from_obj(payload)
         else:
             from tracegraph.adapters import PhoenixExportAdapter
 
@@ -402,14 +445,12 @@ class _LoadedArtifact:
 
 def _load_artifact_evidence(path: Path) -> _LoadedArtifact:
     """Load and validate the exact bytes whose digest will identify review evidence."""
-    raw = path.read_bytes()
+    raw = _read_artifact_bytes(path)
+    digest = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     nt = artifact.loads(raw.decode("utf-8"))
+    del raw  # only the digest and the parsed trace are retained per file
     validate_normalized(nt)
-    return _LoadedArtifact(
-        path=path,
-        trace=nt,
-        digest=f"sha256:{hashlib.sha256(raw).hexdigest()}",
-    )
+    return _LoadedArtifact(path=path, trace=nt, digest=digest)
 
 
 def _load(path: Path) -> NormalizedTrace:
@@ -527,7 +568,10 @@ def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
     # try so we only translate *load* failures, not backend-selection ones.
     cls = _store_cls(backend)
     try:
-        return cls.load_artifact(path)
+        # Bounded read through the common boundary rather than cls.load_artifact(path),
+        # which would re-open the file without the size ceiling.
+        nt = artifact.loads(_read_artifact_bytes(path).decode("utf-8"))
+        return cls.from_trace(nt)
     except _LOAD_ERRORS as exc:
         raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
 
@@ -536,25 +580,55 @@ def _store_from_trace(nt: NormalizedTrace, backend: QueryBackend) -> Any:
     return _store_cls(backend).from_trace(nt)
 
 
+def _close_store(store: Any) -> None:
+    """Release a backend store's resources (no-op for backends without close())."""
+    close = getattr(store, "close", None)
+    if close is not None:
+        close()
+
+
+def _close_stores(stores: dict[str, Any]) -> None:
+    """Close every store, even when one close raises; re-raise the first failure."""
+    first: BaseException | None = None
+    for store in stores.values():
+        try:
+            _close_store(store)
+        except BaseException as exc:  # noqa: BLE001 - must keep closing the rest
+            if first is None:
+                first = exc
+    stores.clear()
+    if first is not None:
+        raise first
+
+
 def _search_with_backend(
     traces: list[NormalizedTrace],
     pattern,
     backend: QueryBackend,
-) -> tuple[list[Match], dict[str, Any]]:
+) -> list[Match]:
+    """Match a pattern across traces.
+
+    Never returns a live store: each backend store is opened, queried, and closed
+    within this call (including on exceptions), so a directory sweep holds at most
+    one open backend DB at a time. A caller that needs stores afterwards (``query
+    --explain``) rebuilds them lazily for just the traces it renders."""
     if backend is QueryBackend.MEMORY:
-        return pattern_search(traces, pattern), {}
+        return pattern_search(traces, pattern)
 
     matches: list[Match] = []
-    stores: dict[str, Any] = {}
     fell_back = False
     for nt in traces:
         store = _store_from_trace(nt, backend)
-        stores[nt.trace.trace_id] = store
-        steps = nt.steps_by_id()
-        for path in store.find_matches(pattern):
-            labels = [steps[i].name or steps[i].kind.value for i in path]
-            matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
-        fell_back = fell_back or getattr(store, "fell_back_to_python", False)
+        try:
+            steps = nt.steps_by_id()
+            for path in store.find_matches(pattern):
+                labels = [steps[i].name or steps[i].kind.value for i in path]
+                matches.append(
+                    Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels)
+                )
+            fell_back = fell_back or getattr(store, "fell_back_to_python", False)
+        finally:
+            _close_store(store)
     if fell_back:
         # Honesty signal (off result stdout): the ladybug accelerator couldn't compile this
         # pattern under LadybugDB's 30-hop cap and ran the pure-Python matcher instead. Results
@@ -563,7 +637,7 @@ def _search_with_backend(
             "[dim]⚠ pattern not Cypher-compilable (unbounded gap); ran the pure-Python "
             "matcher over the raw causal graph — results are identical to --backend ladybug's.[/]"
         )
-    return matches, stores
+    return matches
 
 
 def _label(step) -> str:
@@ -634,15 +708,21 @@ def ingest_otlp(
     """Ingest one trace from an OpenInference/OTLP span export into a portable artifact."""
     from tracegraph.adapters import OTLPSpanAdapter
 
-    adapter = OTLPSpanAdapter.from_file(file)
-    if trace is None:
-        ids = adapter.discover()
-        if len(ids) != 1:
-            raise typer.BadParameter(
-                f"file holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
-            )
-        trace = ids[0]
-    nt = normalize(adapter.ingest(trace))
+    try:
+        # Bounded read through the common size-limited boundary (from_file would
+        # read_text the whole file with no ceiling). KeyError joins the usual load
+        # errors: the adapter raises it for an unknown/missing trace id.
+        adapter = OTLPSpanAdapter.from_json(_read_artifact_bytes(file).decode("utf-8"))
+        if trace is None:
+            ids = adapter.discover()
+            if len(ids) != 1:
+                raise typer.BadParameter(
+                    f"file holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
+                )
+            trace = ids[0]
+        nt = normalize(adapter.ingest(trace))
+    except (*_LOAD_ERRORS, KeyError) as exc:
+        raise typer.BadParameter(f"cannot ingest OTLP export {file}: {_load_reason(exc)}") from exc
     target = out or Path(f"{trace}.json")
     artifact.save_atomic(nt, target)
     console.print(f"[green]ingested {len(nt.steps)} spans[/] → {target}")
@@ -800,7 +880,9 @@ def validate(
     for path in files:
         try:
             nt = _load(path)
-        except Exception as exc:
+        except typer.BadParameter as exc:
+            # _load already narrowed to load-shaped failures (_LOAD_ERRORS); anything else
+            # is a real tracegraph bug and must propagate, not print as "INVALID".
             failures += 1
             console.print(f"[bold red]INVALID[/] {path}: {exc}")
             continue
@@ -827,20 +909,23 @@ def explain(
 ) -> None:
     """Trace a step's raw causal chain back toward its root cause."""
     store = _store_from_artifact(artifact_path, backend)
-    steps = store.trace().steps_by_id()
-    # An exact full-id match always wins — even when that id is also a *suffix* of a longer
-    # namespaced id (e.g. "abc" vs "ns:abc"). Only fall back to suffix matching when the
-    # input isn't itself a full step id, so a valid id is never rejected as "ambiguous".
-    if step_id in steps:
-        chosen = step_id
-    else:
-        suffix = [sid for sid in steps if sid.endswith(step_id)]
-        if len(suffix) != 1:
-            raise typer.BadParameter(
-                f"{step_id!r} matched {len(suffix)} steps; use a unique id or suffix."
-            )
-        chosen = suffix[0]
-    result = explain_chain(store, chosen)
+    try:
+        steps = store.trace().steps_by_id()
+        # An exact full-id match always wins — even when that id is also a *suffix* of a longer
+        # namespaced id (e.g. "abc" vs "ns:abc"). Only fall back to suffix matching when the
+        # input isn't itself a full step id, so a valid id is never rejected as "ambiguous".
+        if step_id in steps:
+            chosen = step_id
+        else:
+            suffix = [sid for sid in steps if sid.endswith(step_id)]
+            if len(suffix) != 1:
+                raise typer.BadParameter(
+                    f"{step_id!r} matched {len(suffix)} steps; use a unique id or suffix."
+                )
+            chosen = suffix[0]
+        result = explain_chain(store, chosen, steps=steps)
+    finally:
+        _close_store(store)
     target = result.target
     console.print(f"[bold]{target.name or target.kind.value}[/] (step {target.seq}) "
                   f"[{target.status.value}] {target.error_msg or ''}")
@@ -926,58 +1011,69 @@ def query(
     if limit is not None and limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
     traces = _load_many(artifacts)
-    matches, stores = _search_with_backend(traces, pattern, backend)
-    total = len(matches)
-    truncated = limit is not None and total > limit
-    if truncated:
-        matches = matches[:limit]
-    # escape() the pattern str (its [gap …] markers would be eaten as Rich markup otherwise).
-    console.print(
-        f"[bold]{pattern.pattern_id}@v{pattern.pattern_version}[/]: {escape(str(pattern))}  "
-        f"[dim](over {len(traces)} trace(s))[/]\n"
-    )
-    if not matches:
-        console.print("[dim]no matches[/]")
-        raise typer.Exit(1)
+    matches = _search_with_backend(traces, pattern, backend)
+    # --explain stores are built lazily below, AFTER --limit truncation, so a 10-of-500
+    # cap opens at most 10 backend DBs regardless of how many traces matched.
+    stores: dict[str, Any] = {}
+    try:
+        total = len(matches)
+        truncated = limit is not None and total > limit
+        if truncated:
+            matches = matches[:limit]
+        # escape() the pattern str (its [gap …] markers would be eaten as Rich markup otherwise).
+        console.print(
+            f"[bold]{pattern.pattern_id}@v{pattern.pattern_version}[/]: {escape(str(pattern))}  "
+            f"[dim](over {len(traces)} trace(s))[/]\n"
+        )
+        if not matches:
+            console.print("[dim]no matches[/]")
+            raise typer.Exit(1)
 
-    # Lazily build stores only for the traces that actually appear in the (possibly
-    # truncated) match set — --explain over a 10-of-500 cap shouldn't pay 500 store loads.
-    traces_by_id = {nt.trace.trace_id: nt for nt in traces}
-    for m in matches:
-        console.print(f"[green]{m.trace_id}[/]: " + " → ".join(m.labels))
-        if explain:
-            store = stores.get(m.trace_id)
-            if store is None:
-                store = _store_from_trace(traces_by_id[m.trace_id], backend)
-                stores[m.trace_id] = store
-            # The effect (last step in the matched path) is what we trace back from —
-            # the rest of the match is by construction part of its causal chain, but
-            # explain() surfaces every cause including ones the pattern didn't constrain.
-            result = explain_chain(store, m.step_ids[-1])
-            if not result.chain:
-                console.print("    [dim]← (no causes — matched effect is a root step)[/]")
-            for s in result.chain:
-                flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
-                # Fallback label matches `tracegraph explain` (s.name or s.source.value)
-                # so the two renderings agree for nameless LangGraph checkpoints.
-                console.print(f"    ← {s.name or s.source.value} (step {s.seq}){flag}")
-            # Causal-honesty signal: when the matched effect (or anything in the chain)
-            # has more than one real cause, the single-parent tree projection dropped
-            # at least one. `tracegraph explain` surfaces this same warning — `query
-            # --explain` must too, or a fan-in effect's lossiness becomes invisible
-            # (target lossiness doesn't show up in the per-step ⚠ flags above, since
-            # we only flag chain ancestors there).
-            if result.is_lossy:
-                console.print(
-                    "    [yellow]⚠ some steps in this match had multiple real causes — "
-                    "trust this raw chain, not the tree.[/]"
-                )
+        # Lazily build stores only for the traces that actually appear in the (possibly
+        # truncated) match set — --explain over a 10-of-500 cap shouldn't pay 500 store loads.
+        traces_by_id = {nt.trace.trace_id: nt for nt in traces}
+        steps_maps: dict[str, dict] = {}
+        for m in matches:
+            console.print(f"[green]{m.trace_id}[/]: " + " → ".join(m.labels))
+            if explain:
+                store = stores.get(m.trace_id)
+                if store is None:
+                    store = _store_from_trace(traces_by_id[m.trace_id], backend)
+                    stores[m.trace_id] = store
+                steps_map = steps_maps.get(m.trace_id)
+                if steps_map is None:
+                    steps_map = traces_by_id[m.trace_id].steps_by_id()
+                    steps_maps[m.trace_id] = steps_map
+                # The effect (last step in the matched path) is what we trace back from —
+                # the rest of the match is by construction part of its causal chain, but
+                # explain() surfaces every cause including ones the pattern didn't constrain.
+                result = explain_chain(store, m.step_ids[-1], steps=steps_map)
+                if not result.chain:
+                    console.print("    [dim]← (no causes — matched effect is a root step)[/]")
+                for s in result.chain:
+                    flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
+                    # Fallback label matches `tracegraph explain` (s.name or s.source.value)
+                    # so the two renderings agree for nameless LangGraph checkpoints.
+                    console.print(f"    ← {s.name or s.source.value} (step {s.seq}){flag}")
+                # Causal-honesty signal: when the matched effect (or anything in the chain)
+                # has more than one real cause, the single-parent tree projection dropped
+                # at least one. `tracegraph explain` surfaces this same warning — `query
+                # --explain` must too, or a fan-in effect's lossiness becomes invisible
+                # (target lossiness doesn't show up in the per-step ⚠ flags above, since
+                # we only flag chain ancestors there).
+                if result.is_lossy:
+                    console.print(
+                        "    [yellow]⚠ some steps in this match had multiple real causes — "
+                        "trust this raw chain, not the tree.[/]"
+                    )
 
-    n_traces = len({m.trace_id for m in matches})
-    suffix = f" — truncated from {total}" if truncated else ""
-    console.print(
-        f"\n[dim]{len(matches)} match(es) across {n_traces} trace(s){suffix}[/]"
-    )
+        n_traces = len({m.trace_id for m in matches})
+        suffix = f" — truncated from {total}" if truncated else ""
+        console.print(
+            f"\n[dim]{len(matches)} match(es) across {n_traces} trace(s){suffix}[/]"
+        )
+    finally:
+        _close_stores(stores)
 
 
 @app.command(name="export-review-candidates")
@@ -1003,7 +1099,7 @@ def export_review_candidates(
 
     loaded = _load_many_evidence(artifacts, exclude=out)
     traces = [item.trace for item in loaded]
-    matches, _ = _search_with_backend(traces, pattern, backend)
+    matches = _search_with_backend(traces, pattern, backend)
     traces_by_id = {item.trace.trace.trace_id: item.trace for item in loaded}
     digests_by_id = {item.trace.trace.trace_id: item.digest for item in loaded}
     try:

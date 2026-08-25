@@ -119,9 +119,16 @@ def validate_normalized(nt: NormalizedTrace) -> None:
         )
 
 
-def _parents_of(step_id: str, caused_by: list[Edge]) -> list[str]:
-    """Raw causes of ``step_id`` (CAUSED_BY points effect → cause)."""
-    return [e.dst for e in caused_by if e.src == step_id]
+def _parents_by_step(caused_by: list[Edge]) -> dict[str, list[str]]:
+    """Raw causes per effect step (CAUSED_BY points effect → cause), built in one pass.
+
+    Preserves the order of ``caused_by``, so feeding it the canonically sorted edge
+    list yields each step's parents in canonical order.
+    """
+    parents: dict[str, list[str]] = {}
+    for e in caused_by:
+        parents.setdefault(e.src, []).append(e.dst)
+    return parents
 
 
 def _primary_parent(parent_ids: list[str], steps: dict[str, Step]) -> str:
@@ -167,9 +174,10 @@ def normalize(raw: RawTrace) -> NormalizedTrace:
     )
 
     edges: list[Edge] = list(caused_by)  # carry the raw layer through unchanged
+    parents_by_step = _parents_by_step(caused_by)
     new_steps: list[Step] = []
     for step in steps_canonical:
-        parents = _parents_of(step.step_id, caused_by)
+        parents = parents_by_step.get(step.step_id, [])
         # Flag lossiness on a copy so we never mutate the caller's objects.
         step = step.model_copy(update={"projection_lossy": len(parents) > 1})
         new_steps.append(step)
@@ -205,12 +213,17 @@ def validate_tree(nt: NormalizedTrace) -> None:
             raise ValueError(f"step {e.src!r} has more than one TREE_PARENT (not a forest)")
         parent_of[e.src] = e.dst
 
-    # Cycle check: walking parents from any node must terminate at a root.
+    # Cycle check: walking parents from any node must terminate at a root. Nodes on an
+    # already-proven-acyclic path are skipped, keeping the whole check O(n) overall.
+    proven: set[str] = set()
     for start in ids:
-        seen: set[str] = set()
+        path: list[str] = []
+        on_path: set[str] = set()
         cur: str | None = start
-        while cur is not None:
-            if cur in seen:
+        while cur is not None and cur not in proven:
+            if cur in on_path:
                 raise ValueError(f"cycle in TREE_PARENT layer involving step {cur!r}")
-            seen.add(cur)
+            path.append(cur)
+            on_path.add(cur)
             cur = parent_of.get(cur)
+        proven.update(path)
