@@ -97,8 +97,16 @@ class LadybugStore:
 
     def __init__(self, *, path: str | Path | None = None) -> None:
         # ":memory:" is Ladybug's in-process sentinel; matches InMemoryStore's no-files default.
-        self._db = ladybug.Database(":memory:" if path is None else str(path))
-        self._conn = ladybug.Connection(self._db)
+        db = ladybug.Database(":memory:" if path is None else str(path))
+        try:
+            conn = ladybug.Connection(db)
+        except BaseException:
+            # A failed connection leaves no store for anyone to close — release the
+            # database here or it stays open for the process lifetime.
+            db.close()
+            raise
+        self._db = db
+        self._conn = conn
         self._closed = False
         self._trace: Trace | None = None
         # Read caches over the DB contents, invalidated by the corresponding upsert. The

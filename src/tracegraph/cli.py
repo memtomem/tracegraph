@@ -73,6 +73,12 @@ def _max_artifact_bytes() -> int:
         ) from None
     if value < 0:
         raise typer.BadParameter("TRACEGRAPH_MAX_ARTIFACT_BYTES must be >= 0")
+    if value > 2**63 - 2:
+        # Sanity bound: nothing on disk approaches this, and byte counts beyond it stop
+        # being meaningful sizes. The chunked reader never passes the limit to read().
+        raise typer.BadParameter(
+            f"TRACEGRAPH_MAX_ARTIFACT_BYTES is too large (maximum {2**63 - 2})"
+        )
     return value
 
 _PX_MIN_VERSION = (1, 0, 4)
@@ -124,25 +130,41 @@ def _load_reason(exc: Exception) -> str:
     return msg.splitlines()[0] if msg else exc.__class__.__name__
 
 
-def _read_artifact_bytes(path: Path) -> bytes:
-    """Read a whole artifact file, enforcing the byte ceiling on the actual read.
+#: Chunk size for bounded artifact reads. Fixed-size chunks with a cumulative cap —
+#: never ``read(limit + 1)``, which pre-allocates the whole buffer and fails outright
+#: (MemoryError/OverflowError) for a large configured limit even on a tiny file.
+_READ_CHUNK_BYTES = 8 * 1024 * 1024
 
-    A bounded read from one open descriptor — not a ``stat()`` pre-check — so a file
-    that grows (or lies about its size, e.g. a FIFO) between check and read can never
-    pull more than the limit into memory. This is the single file-load boundary every
-    CLI path goes through.
+
+def _read_artifact_bytes(path: Path) -> bytearray:
+    """Read a whole artifact file, enforcing the byte ceiling on the actual reads.
+
+    Bounded chunked reads from one open descriptor — not a ``stat()`` pre-check — so a
+    file that grows (or lies about its size, e.g. a FIFO) between check and read can
+    never pull more than ``limit + 1`` bytes into memory: each read requests at most
+    the remaining allowance, and one byte past the limit is enough to reject. The
+    result accumulates into a single ``bytearray`` (no final full-size join copy).
+    This is the single file-load boundary every CLI path goes through.
     """
     limit = _max_artifact_bytes()
+    buf = bytearray()
     with open(path, "rb") as handle:
-        if not limit:
-            return handle.read()
-        data = handle.read(limit + 1)
-        if len(data) > limit:
-            raise ValueError(
-                f"artifact exceeds the {limit}-byte limit "
-                "(set TRACEGRAPH_MAX_ARTIFACT_BYTES to raise it, 0 to disable)"
+        while True:
+            want = (
+                min(_READ_CHUNK_BYTES, limit + 1 - len(buf))
+                if limit
+                else _READ_CHUNK_BYTES
             )
-        return data
+            chunk = handle.read(want)
+            if not chunk:
+                break
+            buf += chunk
+            if limit and len(buf) > limit:
+                raise ValueError(
+                    f"artifact exceeds the {limit}-byte limit "
+                    "(set TRACEGRAPH_MAX_ARTIFACT_BYTES to raise it, 0 to disable)"
+                )
+    return buf
 
 
 def _load_validated(path: Path) -> NormalizedTrace:
@@ -875,6 +897,10 @@ def validate(
     artifacts: list[Path] = typer.Argument(..., help="Artifact JSON files and/or directories."),
 ) -> None:
     """Validate artifacts against the canonical schema and causal-graph contract."""
+    # Resolve the size-limit configuration ONCE, before the per-file loop: a bad
+    # TRACEGRAPH_MAX_ARTIFACT_BYTES is a configuration error and must abort the command,
+    # not be reported as "INVALID" against every (perfectly valid) file.
+    _max_artifact_bytes()
     files = _artifact_files(artifacts)
     failures = 0
     for path in files:

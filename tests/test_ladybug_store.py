@@ -663,3 +663,27 @@ def test_public_reads_are_isolated_from_cache_mutation() -> None:
         assert store.ancestors("S3")[0].name != "tampered"
     finally:
         store.close()
+
+
+def test_constructor_closes_database_when_connection_fails(monkeypatch) -> None:
+    # If Connection() raises, no store object exists for anyone to close — the
+    # constructor itself must release the Database it already allocated.
+    closed = []
+    real_database = ladybug.Database
+
+    class _SpyDatabase:
+        def __init__(self, *args, **kwargs):
+            self._real = real_database(*args, **kwargs)
+
+        def close(self):
+            closed.append(True)
+            self._real.close()
+
+    def _boom(db):
+        raise RuntimeError("connection construction failed")
+
+    monkeypatch.setattr(ladybug, "Database", _SpyDatabase)
+    monkeypatch.setattr(ladybug, "Connection", _boom)
+    with pytest.raises(RuntimeError, match="connection construction failed"):
+        LadybugStore()
+    assert closed == [True], "Database leaked when Connection() raised"

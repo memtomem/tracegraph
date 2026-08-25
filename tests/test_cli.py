@@ -1155,3 +1155,70 @@ def test_ingest_otlp_malformed_links_are_clean_errors(tmp_path):
         res = runner.invoke(app, ["ingest-otlp", "--file", str(p)])
         assert res.exit_code != 0, links
         assert "cannot ingest OTLP export" in res.output.replace("\n", ""), links
+
+
+def test_size_limit_config_errors_are_not_per_file_invalids(tmp_path, monkeypatch):
+    # A bad TRACEGRAPH_MAX_ARTIFACT_BYTES is a configuration error: validate must abort
+    # cleanly, never report valid files as INVALID; a value beyond the documented sanity
+    # bound is rejected the same way.
+    p = tmp_path / "a.json"
+    _write_linear_trace(p, "CFG", ("plan", StepKind.CHAIN, StepStatus.OK))
+
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", "-1")
+    res = runner.invoke(app, ["validate", str(p)])
+    assert res.exit_code != 0
+    assert "INVALID" not in res.output
+    assert "must be >= 0" in res.output.replace("\n", "")
+
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(2**63))
+    res = runner.invoke(app, ["query", "error", str(p)])
+    assert res.exit_code != 0
+    assert "too large" in res.output.replace("\n", "")
+
+
+def test_size_limit_accepted_boundary_reads_files_fine(tmp_path, monkeypatch):
+    # The maximum accepted limit must still READ normal files — chunked reads never
+    # pre-allocate the configured limit (read(limit+1) would MemoryError here).
+    p = tmp_path / "a.json"
+    _write_linear_trace(p, "BND", ("plan", StepKind.CHAIN, StepStatus.OK))
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(2**63 - 2))
+    res = runner.invoke(app, ["validate", str(p)])
+    assert res.exit_code == 0, res.output
+    assert "1 artifact(s) valid" in res.output
+
+
+def test_bounded_reader_requests_at_most_remaining_allowance(tmp_path, monkeypatch):
+    # With a limit set, every read() must request exactly the REMAINING allowance
+    # (+1 rejection byte), even across short reads — a tiny limit must not allocate a
+    # full 8MiB chunk, and a short read must shrink the next request, never repeat it.
+    # The spy returns at most 3 bytes per call to force the partial-read path.
+    p = tmp_path / "big.json"
+    p.write_bytes(b"x" * 1024)
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", "10")
+    requested: list[int] = []
+    real_open = builtins.open
+
+    class _SpyFile:
+        def __init__(self, handle):
+            self._h = handle
+
+        def read(self, n=-1):
+            requested.append(n)
+            return self._h.read(min(n, 3) if n >= 0 else 3)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._h.close()
+
+    def spy_open(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        return _SpyFile(handle) if "b" in mode and str(file) == str(p) else handle
+
+    monkeypatch.setattr(cli_mod, "open", spy_open, raising=False)
+    with pytest.raises(ValueError, match="byte limit"):
+        cli_mod._read_artifact_bytes(p)
+    # 3-byte short reads against a 10-byte limit: allowance shrinks 11 -> 8 -> 5 -> 2,
+    # then the 2-byte read tips the total to 11 and the limit rejects.
+    assert requested == [11, 8, 5, 2], requested
