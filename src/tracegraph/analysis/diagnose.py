@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from tracegraph import artifact
 from tracegraph.analysis.ahu import diff as tree_diff
-from tracegraph.analysis.patterns import PRESETS, find_matches
+from tracegraph.analysis.patterns import PRESETS, build_index, find_matches
 from tracegraph.model import CausalFidelity, EdgeType, NormalizedTrace, Step, StepStatus
 
 REPORT_SCHEMA_VERSION = 2
@@ -154,29 +154,51 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
     steps = nt.steps_by_id()
     errors = {step.step_id for step in nt.steps if step.status is StepStatus.ERROR}
     adjacency = _cause_adjacency(nt)
-    primary_ids = [sid for sid in errors if not (_ancestors(sid, adjacency) & errors)]
-    primary_ids.sort(key=lambda sid: (steps[sid].seq, sid))
+    # Primary vs propagated in ONE pass: an error is propagated iff any proper causal
+    # ancestor also errored. cause.seq < effect.seq (validate_raw guarantees it), so
+    # walking steps in ascending seq computes each node's flag after all its causes' —
+    # O(V+E) total instead of a full ancestor BFS per error.
+    has_error_ancestor: dict[str, bool] = {}
+    for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
+        has_error_ancestor[step.step_id] = any(
+            cause in errors or has_error_ancestor[cause]
+            for cause in adjacency.get(step.step_id, [])
+        )
+    primary_ids = sorted(
+        (sid for sid in errors if not has_error_ancestor[sid]),
+        key=lambda sid: (steps[sid].seq, sid),
+    )
     propagated_ids = sorted(errors - set(primary_ids), key=lambda sid: (steps[sid].seq, sid))
 
-    edge_by_pair = {
-        (edge.src, edge.dst): edge for edge in nt.edges_of(EdgeType.CAUSED_BY)
-    }
+    # Edges indexed by effect: each finding then touches only its own nodes' edges
+    # (output-proportional) instead of re-scanning the whole edge list per finding.
+    edges_by_effect: dict[str, list] = {}
+    for edge in nt.edges_of(EdgeType.CAUSED_BY):
+        edges_by_effect.setdefault(edge.src, []).append(edge)
+
     findings: list[FailureFinding] = []
     for step_id in primary_ids:
+        # Full ancestor sets are materialized only for primary failures (the findings
+        # need them); propagated errors never pay a BFS.
         ancestor_ids = _ancestors(step_id, adjacency)
         ordered = sorted(ancestor_ids, key=lambda sid: (steps[sid].seq, sid))
         relevant = ancestor_ids | {step_id}
+        selected = [
+            edge
+            for sid in relevant
+            for edge in edges_by_effect.get(sid, [])
+            if edge.dst in relevant
+        ]
+        selected.sort(
+            key=lambda edge: (steps[edge.src].seq, steps[edge.dst].seq, (edge.src, edge.dst))
+        )
         edges = [
             DiagnosticEdge(
                 effect=edge.src,
                 cause=edge.dst,
                 origin=edge.origin.value if edge.origin else None,
             )
-            for pair, edge in sorted(
-                edge_by_pair.items(),
-                key=lambda item: (steps[item[0][0]].seq, steps[item[0][1]].seq, item[0]),
-            )
-            if pair[0] in relevant and pair[1] in relevant
+            for edge in selected
         ]
         findings.append(
             FailureFinding(
@@ -189,12 +211,13 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
 
 
 def _patterns(nt: NormalizedTrace) -> list[PatternFinding]:
-    steps = nt.steps_by_id()
+    index = build_index(nt)
+    steps = index[0]
     seen: set[tuple[str, ...]] = set()
     findings: list[PatternFinding] = []
     for name in _AUTO_PRESETS:
         pattern = PRESETS[name]
-        for match in find_matches(nt, pattern):
+        for match in find_matches(nt, pattern, index=index):
             key = tuple(match)
             if key in seen:
                 continue
@@ -293,6 +316,16 @@ def _logical_keys(nt: NormalizedTrace) -> dict[str, Step]:
     for ids in children.values():
         ids.sort(key=lambda sid: (steps[sid].seq, sid))
 
+    # Occurrence index among same-(kind, name) siblings, in the sorted sibling order —
+    # precomputed with running counters instead of a per-step sibling rescan.
+    occurrence_of: dict[str, int] = {}
+    for ids in children.values():
+        counts: dict[tuple[object, object], int] = {}
+        for sid in ids:
+            key = (steps[sid].kind, steps[sid].name)
+            occurrence_of[sid] = counts.get(key, 0)
+            counts[key] = occurrence_of[sid] + 1
+
     result: dict[str, Step] = {}
     queue: deque[tuple[str, str]] = deque()
     for root in children.get(None, []):
@@ -300,10 +333,7 @@ def _logical_keys(nt: NormalizedTrace) -> dict[str, Step]:
     while queue:
         step_id, prefix = queue.popleft()
         step = steps[step_id]
-        siblings = children.get(parent.get(step_id), [])
-        same = [sid for sid in siblings if (steps[sid].kind, steps[sid].name) == (step.kind, step.name)]
-        occurrence = same.index(step_id)
-        label = f"{step.kind.value}:{step.name or '-'}#{occurrence}"
+        label = f"{step.kind.value}:{step.name or '-'}#{occurrence_of[step_id]}"
         key = f"{prefix}/{label}" if prefix else label
         result[key] = step
         for child in children.get(step_id, []):
@@ -315,7 +345,13 @@ def _delta(after: float | int | None, before: float | int | None) -> float | int
     return after - before if after is not None and before is not None else None
 
 
-def _comparison(current: NormalizedTrace, baseline: NormalizedTrace) -> ComparisonSummary:
+def _comparison(
+    current: NormalizedTrace,
+    baseline: NormalizedTrace,
+    *,
+    current_patterns: list[PatternFinding],
+    current_metrics: MetricSummary,
+) -> ComparisonSummary:
     structural = tree_diff(baseline, current)
     before, after = _logical_keys(baseline), _logical_keys(current)
     changes: list[BehaviorChange] = []
@@ -334,14 +370,14 @@ def _comparison(current: NormalizedTrace, baseline: NormalizedTrace) -> Comparis
             )
 
     before_patterns = _patterns(baseline)
-    after_patterns = _patterns(current)
+    after_patterns = current_patterns
     pattern_ids = set(_AUTO_PRESETS)
     deltas = {
         name: sum(item.pattern_id == name for item in after_patterns)
         - sum(item.pattern_id == name for item in before_patterns)
         for name in sorted(pattern_ids)
     }
-    bm, cm = _metrics(baseline), _metrics(current)
+    bm, cm = _metrics(baseline), current_metrics
     cost_delta: str | None = None
     if (
         bm.total_cost is not None
@@ -372,6 +408,8 @@ def _digest(nt: NormalizedTrace) -> str:
 
 def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> AnalysisReport:
     primary, propagated = _failures(nt)
+    patterns = _patterns(nt)
+    metrics = _metrics(nt)
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
@@ -388,12 +426,16 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         error_count=sum(step.status is StepStatus.ERROR for step in nt.steps),
         primary_failures=primary,
         propagated_failures=propagated,
-        patterns=_patterns(nt),
-        metrics=_metrics(nt),
+        patterns=patterns,
+        metrics=metrics,
         decision_evidence=[
             DecisionEvidenceFinding(**item.model_dump()) for item in nt.trace.decision_evidence
         ],
-        comparison=_comparison(nt, baseline) if baseline else None,
+        comparison=(
+            _comparison(nt, baseline, current_patterns=patterns, current_metrics=metrics)
+            if baseline
+            else None
+        ),
         warnings=warnings,
     )
 
@@ -405,8 +447,9 @@ def dumps(report: AnalysisReport) -> str:
 def save_atomic(report: AnalysisReport, path: str | Path) -> None:
     target = Path(path)
     text = dumps(report)
-    # Round-trip the public model before replacing an existing report.
-    AnalysisReport.model_validate(json.loads(text))
+    # Round-trip the public model before replacing an existing report (validated on the
+    # parsed shape directly — no need to re-parse the JSON we just produced).
+    AnalysisReport.model_validate(report.model_dump(mode="json"))
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_name: str | None = None
     try:

@@ -48,6 +48,16 @@ def loads(text: str) -> NormalizedTrace:
         # over-nested stray as bad input — otherwise it escapes the CLI's (OSError, ValueError)
         # handler and crashes the whole command with a raw traceback.
         raise ValueError("JSON nesting too deep") from exc
+    return from_obj(payload)
+
+
+def from_obj(payload: object) -> NormalizedTrace:
+    """Validate an already-parsed artifact payload (the envelope ``loads`` would parse).
+
+    Exists so a caller that already holds the parsed JSON (e.g. the CLI, which sniffs
+    ``schema_version`` first) doesn't re-parse the whole document. Raises only ``ValueError``
+    for malformed input, same contract as :func:`loads`.
+    """
     # The artifact envelope is a JSON object. A top-level array/string/number/null is valid
     # JSON but not an artifact (e.g. a stray data export) — reject it as a clean ValueError
     # rather than letting ``payload.get`` raise an opaque AttributeError that callers can't
@@ -85,7 +95,10 @@ def save_atomic(nt: NormalizedTrace, path: str | Path) -> None:
     """Validate and atomically replace an artifact without leaving partial output."""
     target = Path(path)
     text = dumps(nt)
-    loads(text)  # writer-side contract check before touching the destination
+    # Writer-side contract check before touching the destination: the payload we just
+    # serialized must round-trip through the model. Validates the parsed shape directly —
+    # no need to re-parse the JSON string we produced ourselves.
+    NormalizedTrace.model_validate(nt.model_dump(mode="json"))
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_name: str | None = None
     try:

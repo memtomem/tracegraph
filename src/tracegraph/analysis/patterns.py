@@ -177,6 +177,16 @@ def _children(nt: NormalizedTrace) -> dict[str, list[str]]:
     return out
 
 
+#: Precomputed per-trace lookup tables — ``(steps_by_id, children)`` — shared across the
+#: matcher functions so a caller running several patterns over one trace (e.g. the diagnose
+#: preset sweep) builds them once instead of once per pattern.
+TraceIndex = tuple[dict[str, Step], dict[str, list[str]]]
+
+
+def build_index(nt: NormalizedTrace) -> TraceIndex:
+    return nt.steps_by_id(), _children(nt)
+
+
 def _validate_backrefs(preds: tuple[StepPredicate, ...]) -> None:
     """A ``same_name_as`` must reference a *strictly earlier* predicate.
 
@@ -192,7 +202,9 @@ def _validate_backrefs(preds: tuple[StepPredicate, ...]) -> None:
             )
 
 
-def find_matches(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
+def find_matches(
+    nt: NormalizedTrace, pattern: PathPattern, *, index: TraceIndex | None = None
+) -> list[list[str]]:
     """All causal paths whose steps satisfy the predicates in order.
 
     Strict-adjacency predicates advance to a direct causal child; a predicate with a ``gap``
@@ -216,6 +228,8 @@ def find_matches(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
     if not pattern.steps:
         return []
     _validate_backrefs(pattern.steps)
+    if index is None:
+        index = build_index(nt)
     preds = pattern.steps
     # Fast path for a two-step unbounded shape. A gap on p0 is deliberately
     # ignored by the PathPattern contract because no predicate precedes it, so it must not disable
@@ -226,8 +240,8 @@ def find_matches(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
         and preds[1].gap is not None
         and preds[1].gap[1] is None
     ):
-        return _match_two_step_unbounded(nt, preds[0], preds[1])
-    return _find_matches_forward(nt, pattern)
+        return _match_two_step_unbounded(index, preds[0], preds[1])
+    return _find_matches_forward(index, pattern)
 
 
 def _name_ok(pred: StepPredicate, step: Step, bound: dict[int, str | None]) -> bool:
@@ -242,15 +256,14 @@ def _name_ok(pred: StepPredicate, step: Step, bound: dict[int, str | None]) -> b
     return ref is not None and step.name is not None and step.name == ref
 
 
-def _find_matches_forward(nt: NormalizedTrace, pattern: PathPattern) -> list[list[str]]:
+def _find_matches_forward(index: TraceIndex, pattern: PathPattern) -> list[list[str]]:
     """The general matcher: walk every predicate forward over the causal graph.
 
     This is the semantic reference for :func:`find_matches` — every other path must reproduce it
     exactly. Linear for strict/bounded patterns; only an *unbounded* gap (which the dispatcher
     routes elsewhere for the common 2-step shape) can make it quadratic.
     """
-    steps = nt.steps_by_id()
-    children = _children(nt)
+    steps, children = index
     preds = pattern.steps
     results: list[list[str]] = []
     seen: set[tuple[str, ...]] = set()
@@ -301,7 +314,7 @@ def _find_matches_forward(nt: NormalizedTrace, pattern: PathPattern) -> list[lis
 
 
 def _match_two_step_unbounded(
-    nt: NormalizedTrace, p0: StepPredicate, p1: StepPredicate
+    index: TraceIndex, p0: StepPredicate, p1: StepPredicate
 ) -> list[list[str]]:
     """Endpoint-anchored matcher for ``[p0, p1-with-unbounded-gap]`` (the marquee shape).
 
@@ -315,8 +328,7 @@ def _match_two_step_unbounded(
     ``p0`` match would be ``O(n²)`` on a deep-linear trace; this avoids re-traversing the shared
     downstream suffix.) Produces exactly what :func:`_find_matches_forward` would.
     """
-    steps = nt.steps_by_id()
-    children = _children(nt)  # cause -> [effect, ...]
+    steps, children = index  # children: cause -> [effect, ...]
     parents: dict[str, list[str]] = {}  # effect -> [cause, ...]
     for cause, effects in children.items():
         for eff in effects:
@@ -363,8 +375,9 @@ def search(traces: list[NormalizedTrace], pattern: PathPattern) -> list[Match]:
     """Run a pattern over many traces; return every match with readable step labels."""
     matches: list[Match] = []
     for nt in traces:
-        steps = nt.steps_by_id()
-        for path in find_matches(nt, pattern):
+        index = build_index(nt)
+        steps = index[0]
+        for path in find_matches(nt, pattern, index=index):
             labels = [steps[i].name or steps[i].kind.value for i in path]
             matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
     return matches

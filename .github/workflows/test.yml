@@ -90,8 +90,10 @@ jobs:
 
       # `--no-sync` so pytest runs against exactly what `uv sync --locked` put
       # in the venv (no re-resolve possible mid-job).
+      # Wall-clock perf guards run in their own job (see `perf` below) so shared-runner
+      # load can't fail a correctness job.
       - name: pytest
-        run: uv run --no-sync pytest -v
+        run: uv run --no-sync pytest -v -m "not perf"
 
   cypher:
     name: with [cypher] extra (LadybugDB)
@@ -111,4 +113,27 @@ jobs:
         run: uv sync --locked --extra cypher
 
       - name: pytest (cypher tests included)
-        run: uv run --no-sync --extra cypher pytest -v
+        run: uv run --no-sync --extra cypher pytest -v -m "not perf"
+
+  perf:
+    # Wall-clock regression guards, isolated so transient runner load never fails the
+    # correctness jobs above. Bounds carry 10-25x headroom; a quadratic regression
+    # overshoots them by orders of magnitude.
+    name: perf regression guards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install (no optional extras)
+        run: uv sync --locked
+
+      - name: pytest (perf only)
+        run: uv run --no-sync pytest -v -m perf

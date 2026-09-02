@@ -138,9 +138,32 @@ def _attributes(span: dict) -> dict[str, Any]:
 
 
 def _iter_spans(document: dict) -> Iterator[dict]:
-    for rs in _first(document, "resourceSpans", "resource_spans", default=[]) or []:
-        for ss in _first(rs, "scopeSpans", "scope_spans", default=[]) or []:
-            yield from ss.get("spans") or []
+    # Malformed nesting raises a clean ValueError rather than an AttributeError deep in
+    # a caller — the CLI's load boundary only translates OSError/ValueError/KeyError.
+    for rs in _span_array(document, "resourceSpans", "resource_spans"):
+        if not isinstance(rs, dict):
+            raise ValueError("OTLP resourceSpans entries must be objects")
+        for ss in _span_array(rs, "scopeSpans", "scope_spans"):
+            if not isinstance(ss, dict):
+                raise ValueError("OTLP scopeSpans entries must be objects")
+            for span in _span_array(ss, "spans"):
+                if not isinstance(span, dict):
+                    raise ValueError("OTLP spans entries must be objects")
+                yield span
+
+
+def _span_array(container: dict, *keys: str) -> list:
+    """Fetch a spans-shaped array field, treating only missing/None as empty.
+
+    Any other non-array value (including falsey ones like ``{}`` or ``0``) is malformed
+    input and raises — an ``or []`` would silently swallow it as "no spans".
+    """
+    value = _first(container, *keys, default=None)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"OTLP {keys[0]} must be an array")
+    return value
 
 
 def _exception_message(span: dict) -> str | None:
@@ -282,6 +305,7 @@ class OTLPSpanAdapter:
             CausalFidelity.DECLARED_DAG if links_as_causes else CausalFidelity.PARENT_ONLY
         )
         self._links_preserved = links_as_causes if links_preserved is None else links_preserved
+        self._spans_by_trace: dict[str, list[dict]] | None = None
 
     @classmethod
     def from_json(cls, text: str, **kwargs: Any) -> "OTLPSpanAdapter":
@@ -295,8 +319,10 @@ class OTLPSpanAdapter:
             raise ValueError("OTLP input must contain one or more JSON trace objects")
         merged: dict[str, Any] = {"resourceSpans": []}
         for document in documents:
+            # _span_array validates the container BEFORE merging, so e.g.
+            # {"resourceSpans": 1} is a clean ValueError, not a TypeError from extend().
             merged["resourceSpans"].extend(
-                _first(document, "resourceSpans", "resource_spans", default=[]) or []
+                _span_array(document, "resourceSpans", "resource_spans")
             )
         return cls(merged, **kwargs)
 
@@ -308,12 +334,7 @@ class OTLPSpanAdapter:
 
     def discover(self) -> list[str]:
         """Distinct ``traceId``s present in the document, in first-seen order."""
-        seen: list[str] = []
-        for span in _iter_spans(self._doc):
-            tid = _first(span, "traceId", "trace_id")
-            if tid is not None and tid not in seen:
-                seen.append(tid)
-        return seen
+        return list(self._grouped())
 
     def ingest(self, trace_id: str) -> RawTrace:
         by_id = self._spans_of(trace_id)
@@ -462,11 +483,25 @@ class OTLPSpanAdapter:
         except (TypeError, ValueError):
             return 0
 
+    def _grouped(self) -> dict[str, list[dict]]:
+        """Spans grouped by ``traceId`` in first-seen order, built once per adapter.
+
+        Grouping only — per-trace validation (missing/duplicate spanId) stays in
+        :meth:`_spans_of` so a malformed trace fails when *it* is ingested, not when a
+        sibling trace in the same document is.
+        """
+        if self._spans_by_trace is None:
+            grouped: dict[str, list[dict]] = {}
+            for span in _iter_spans(self._doc):
+                tid = _first(span, "traceId", "trace_id")
+                if tid is not None:
+                    grouped.setdefault(tid, []).append(span)
+            self._spans_by_trace = grouped
+        return self._spans_by_trace
+
     def _spans_of(self, trace_id: str) -> dict[str, dict]:
         by_id: dict[str, dict] = {}
-        for span in _iter_spans(self._doc):
-            if _first(span, "traceId", "trace_id") != trace_id:
-                continue
+        for span in self._grouped().get(trace_id, []):
             sid = _first(span, "spanId", "span_id")
             if sid is None:
                 raise ValueError(f"trace {trace_id!r} has a span with no spanId")
@@ -493,17 +528,22 @@ class OTLPSpanAdapter:
 
     @staticmethod
     def _depths(parent_span: dict[str, str | None]) -> dict[str, int]:
+        # Walk each span's parent chain only until a span with a known depth, then unwind —
+        # every span's depth is computed exactly once (O(n) overall, not O(n·depth)).
         depth: dict[str, int] = {}
         for sid in parent_span:
-            seen: set[str] = set()
-            d, cur = 0, parent_span[sid]
-            while cur is not None:
-                if cur in seen:
+            chain: list[str] = []
+            on_chain: set[str] = set()
+            cur: str | None = sid
+            while cur is not None and cur not in depth:
+                if cur in on_chain:
                     raise ValueError(f"cycle in parentSpanId chain at span {cur!r}")
-                seen.add(cur)
-                d += 1
+                chain.append(cur)
+                on_chain.add(cur)
                 cur = parent_span[cur]
-            depth[sid] = d
+            base = 0 if cur is None else depth[cur] + 1
+            for offset, node in enumerate(reversed(chain)):
+                depth[node] = base + offset
         return depth
 
     def _causes(
@@ -540,11 +580,13 @@ class OTLPSpanAdapter:
                 add(sid, parent, parent_origin)
             if self._links_as_causes:
                 own_trace = _first(by_id[sid], "traceId", "trace_id")
-                for link in _first(by_id[sid], "links", default=[]) or []:
+                for link in _span_array(by_id[sid], "links"):
                     # A link is a declared cause only if it explicitly names THIS trace and an
                     # in-trace span. A missing/foreign traceId is NOT silently treated as local
                     # (that would fabricate causality). Declared links are trusted regardless of
                     # timestamp — topo ordering sequences them and a real cycle raises.
+                    if not isinstance(link, dict):
+                        raise ValueError("OTLP links entries must be objects")
                     if _first(link, "traceId", "trace_id") != own_trace:
                         continue
                     lsid = _first(link, "spanId", "span_id")

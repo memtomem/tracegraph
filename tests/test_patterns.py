@@ -350,7 +350,7 @@ def test_fast_path_equals_forward_reference_on_random_dags(seed):
     # guard that the optimization never diverges from the definition.
     import random
 
-    from tracegraph.analysis.patterns import _find_matches_forward
+    from tracegraph.analysis.patterns import _find_matches_forward, build_index
 
     rng = random.Random(seed)
     n = rng.randint(2, 14)
@@ -375,7 +375,7 @@ def test_fast_path_equals_forward_reference_on_random_dags(seed):
         )
     )
     # find_matches() dispatches to the fast path; compare against the forward reference directly.
-    assert find_matches(nt, pattern) == _find_matches_forward(nt, pattern)
+    assert find_matches(nt, pattern) == _find_matches_forward(build_index(nt), pattern)
 
 
 def test_str_renders_gap_and_back_reference_readably():

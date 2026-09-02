@@ -121,6 +121,9 @@ def dumps(report: ReviewCandidateReport) -> str:
 def save_atomic(report: ReviewCandidateReport, path: str | Path) -> None:
     """Atomically replace ``path`` without leaving a partial report on failure."""
     target = Path(path)
+    # Same contract as artifact.save_atomic / diagnose.save_atomic: create the parent
+    # directory so `--out newdir/report.json` works instead of failing inside mkstemp.
+    target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
