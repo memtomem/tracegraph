@@ -32,7 +32,7 @@ class InMemoryStore:
         validate_normalized(nt)
         store = cls()
         store.init_schema()
-        store._trace = nt.trace
+        store._trace = nt.trace.model_copy(deep=True)
         store.upsert_nodes(nt.steps)
         store.upsert_edges(nt.edges)
         return store
@@ -53,10 +53,10 @@ class InMemoryStore:
 
     def upsert_nodes(self, steps: list[Step]) -> None:
         for s in steps:
-            self._steps[s.step_id] = s
+            self._steps[s.step_id] = s.model_copy(deep=True)
 
     def upsert_edges(self, edges: list[Edge]) -> None:
-        self._edges.extend(edges)
+        self._edges.extend(e.model_copy(deep=True) for e in edges)
         for e in edges:
             if e.type is EdgeType.CAUSED_BY:
                 self._caused_by.setdefault(e.src, []).append(e.dst)
@@ -77,7 +77,7 @@ class InMemoryStore:
                 # A CAUSED_BY edge pointing at an unknown step means a corrupted raw
                 # graph. explain/RCA must surface that, not silently drop the cause.
                 raise KeyError(f"CAUSED_BY edge points to unknown step {cur!r}")
-            out.append(self._steps[cur])
+            out.append(self._steps[cur].model_copy(deep=True))
             queue.extend(self._caused_by.get(cur, []))
         return out
 
@@ -91,4 +91,4 @@ class InMemoryStore:
             trace=self._trace,
             steps=list(self._steps.values()),
             edges=list(self._edges),
-        )
+        ).model_copy(deep=True)

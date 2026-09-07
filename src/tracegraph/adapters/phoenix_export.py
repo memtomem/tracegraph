@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import datetime
 from pathlib import Path
 import re
 from typing import Any
 
-from tracegraph.adapters.otlp_spans import OTLPSpanAdapter
+from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _span_array
+from tracegraph.input_validation import loads, object_field
 from tracegraph.model import CausalFidelity, RawTrace
 
 _SAFE_ATTRIBUTES = {
@@ -72,15 +72,8 @@ def _safe_evaluation_text(value: Any) -> str | None:
 
 
 def _attrs(span: dict[str, Any]) -> dict[str, Any]:
-    raw = span.get("attributes") or {}
-    if isinstance(raw, list):
-        raw = {
-            item.get("key"): item.get("value")
-            for item in raw
-            if isinstance(item, dict) and item.get("key") is not None
-        }
-    if not isinstance(raw, dict):
-        raw = {}
+    from tracegraph.adapters.otlp_spans import _attributes
+    raw = _attributes(span)
     safe = {key: raw[key] for key in _SAFE_ATTRIBUTES if key in raw}
     kind = _first(span, "span_kind", "spanKind") or raw.get("openinference.span.kind")
     if kind is not None:
@@ -151,7 +144,7 @@ class PhoenixExportAdapter:
 
     @classmethod
     def from_json(cls, text: str) -> "PhoenixExportAdapter":
-        return cls(json.loads(text))
+        return cls(loads(text))
 
     @classmethod
     def from_file(cls, path: str | Path) -> "PhoenixExportAdapter":
@@ -180,11 +173,15 @@ class PhoenixExportAdapter:
     @staticmethod
     def _trace_id(trace: dict[str, Any]) -> str:
         declared = _first(trace, "traceId", "trace_id")
-        span_ids = {
-            _first(span.get("context") or {}, "trace_id", "traceId")
-            for span in trace.get("spans") or []
-            if isinstance(span, dict)
-        }
+        span_ids = set()
+        for span in trace["spans"]:
+            if not isinstance(span, dict):
+                raise ValueError("spans[] must be an object")
+            context = object_field(span.get("context"), "spans[].context")
+            sid = _first(context, "trace_id", "traceId")
+            if sid is not None and not isinstance(sid, str):
+                raise ValueError("spans[].context.trace_id must be a string")
+            span_ids.add(sid)
         span_ids.discard(None)
         if declared is None and len(span_ids) == 1:
             declared = next(iter(span_ids))
@@ -198,9 +195,7 @@ class PhoenixExportAdapter:
     def _span(trace_id: str, span: Any) -> dict[str, Any]:
         if not isinstance(span, dict):
             raise ValueError(f"Phoenix trace {trace_id!r} contains a non-object span")
-        context = span.get("context") or {}
-        if not isinstance(context, dict):
-            context = {}
+        context = object_field(span.get("context"), "spans[].context")
         span_id = _first(context, "span_id", "spanId") or _first(span, "id", "span_id", "spanId")
         if not isinstance(span_id, str) or not span_id:
             raise ValueError(f"Phoenix trace {trace_id!r} contains a span with no id")
@@ -218,6 +213,6 @@ class PhoenixExportAdapter:
                 "message": _first(span, "status_message", "statusMessage"),
             },
             "attributes": _attrs(span),
-            "events": span.get("events") or [],
+            "events": _span_array(span, "events"),
             "_tracegraph_evaluations": _evaluations(span),
         }

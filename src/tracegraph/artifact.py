@@ -9,6 +9,8 @@ always rebuildable from it. Parquet is a future option; JSON keeps Phase 0 borin
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import os
 from pathlib import Path
 import tempfile
@@ -91,7 +93,7 @@ def save(nt: NormalizedTrace, path: str | Path) -> None:
     Path(path).write_text(dumps(nt), encoding="utf-8")
 
 
-def save_atomic(nt: NormalizedTrace, path: str | Path) -> None:
+def save_atomic(nt: NormalizedTrace, path: str | Path, *, replace: bool = True) -> None:
     """Validate and atomically replace an artifact without leaving partial output."""
     target = Path(path)
     text = dumps(nt)
@@ -109,7 +111,10 @@ def save_atomic(nt: NormalizedTrace, path: str | Path) -> None:
             handle.flush()
             os.fsync(handle.fileno())
             temp_name = handle.name
-        os.replace(temp_name, target)
+        if replace:
+            os.replace(temp_name, target)
+        else:
+            os.link(temp_name, target)
     finally:
         if temp_name is not None:
             Path(temp_name).unlink(missing_ok=True)
@@ -117,3 +122,13 @@ def save_atomic(nt: NormalizedTrace, path: str | Path) -> None:
 
 def load(path: str | Path) -> NormalizedTrace:
     return loads(Path(path).read_text(encoding="utf-8"))
+
+
+def default_path(identifier: str) -> Path:
+    """Opaque source identifiers never become directories or reserved filenames."""
+    reserved = {"CON", "PRN", "AUX", "NUL"} | {f"{p}{i}" for p in ("COM", "LPT") for i in range(1, 10)}
+    if (re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", identifier)
+            and identifier.split(".")[0].upper() not in reserved
+            and not identifier.endswith(".")):
+        return Path(identifier + ".json")
+    return Path("trace-" + hashlib.sha256(identifier.encode()).hexdigest() + ".json")

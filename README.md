@@ -150,22 +150,18 @@ $ tracegraph query tool-failure A.json B.json
 A: call_tool
 1 match(es) across 1 trace(s)
 
-$ tracegraph query tool-retry-failure A.json
-A: search → search
+$ tracegraph query tool-retry-failure retry.json
+retry: search → retry:search → search
 1 match(es) across 1 trace(s)
 ```
 
-The marquee pattern — *"tool X → retry → tool X → failure"* — is a real query, not just a
-tagline. It needs three things a flat predicate list can't express, all added to
-`PathPattern` without touching the frozen model: a **back-reference** (`same_name_as`, "the
-*same* tool X both times"), a **variable-length gap** (`gap=(lo, hi)`, "→ retry →" = some
-intervening steps), and **de-duplication** of fan-in paths. The gap is *unbounded* by default,
-because real traces are deep and a retry can be many super-steps later — so the pure-Python
-matcher (the system of record) catches it at any distance. LadybugDB's Cypher backend hard-caps
-variable-length hops at 30, so rather than silently truncate, `compile_to_cypher` refuses an
-unbounded gap (`UncompilablePattern`) and `LadybugStore` transparently falls back to the
-pure-Python matcher — *the accelerator degrades to slower, never to wrong*. The bounded
-`tool-retry-failure-near` variant stays within the cap and runs as native Cypher.
+The official `tool-retry-failure@v2` matches three consecutive causal steps:
+`TOOL X → CHAIN retry:* → TOOL X (ERROR)`. The producer must supply the explicit
+retry marker and the endpoint must name the same tool. This strict pattern is review-exportable.
+`tool-repeat-failure-heuristic` uses an unbounded gap and
+`tool-retry-failure-near` a bounded gap (up to 30); both are query-only heuristics.
+The generic matcher still supports gaps and back-references. Unbounded or oversized
+Cypher patterns fall back to the Python matcher without truncating results.
 
 Every shipped preset has a stable `pattern_id` and positive integer `pattern_version`, shown
 as `pattern-id@vN` by `presets` and `query`. Increment the version when match semantics or
@@ -190,9 +186,9 @@ SYNCMILL_BOARD__ENABLED=true syncmill board import-review-candidates candidates.
 ```
 
 The importer creates deterministic, human-required `review` items. It does not run agents,
-invoke Toolgraph, or reinterpret strict enforcement policy. Live SyncMill traces still lack
-qualified MCP tool-call spans, so the cross-repo contract test uses the producer-derived
-normalized retry fixture; live run-to-board telemetry remains separate work.
+invoke Toolgraph, or reinterpret strict enforcement policy. Controlled SyncMill E2E covers qualified tool spans, explicit retry causality, Phoenix
+streaming, and review intake. Fixture tests remain separate evidence; general deployment
+coverage and production acceptance are not established by the controlled workflow.
 
 Toolgraph G3 can independently review the same report with `review-candidates list/annotate`.
 Like SyncMill, it derives the same UUIDv5 from the exact candidate tuple for correlation,
@@ -211,7 +207,7 @@ result, blast radius, preflight result, or graph state.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests Collector JSON/JSONL spans into the same causal model — the source that exercises full link-preserving raw/derived causality.
 - **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
 - **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
-- **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, Toolgraph G3 artifact annotation, and the pinned live single-failure review path are complete. Explicit retry causality and SyncMill-to-Phoenix streaming remain follow-ups.
+- **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, Toolgraph G3 artifact annotation, and the pinned live single-failure review path are complete. Explicit retry causality and SyncMill-to-Phoenix streaming are covered by the controlled E2E workflow; broader operational coverage remains separate.
 - **SyncMill contract completion:** route/pipeline/compete/council/decompose plus cancellation fixtures, stable span naming, body-free artifact digests, fail-open exporter reference behavior, operational failure presets, and non-causal Toolgraph preflight evidence are covered by executable tests.
 
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
@@ -232,3 +228,34 @@ core; `explain` and `query` can opt into it with `--backend ladybug`. Its tests 
 `@pytest.mark.cypher` and skip cleanly without the extra. The tested LadybugDB compatibility
 range is declared in `pyproject.toml`; its embedded cache format is not load-bearing because
 the portable JSON artifact remains authoritative and can rebuild the cache.
+
+## Analysis and output guarantees
+
+Implicit ingest filenames keep short portable identifiers as `<id>.json`; other IDs use
+`trace-<sha256>.json`. Existing default outputs cause exit 2; use `--out` to explicitly
+replace a file. Outputs cannot alias an input or another output. Completed artifacts
+are published atomically. SQLite ingest uses a read-only connection and a private backup
+with a 30-second deadline, preserving source data, schema, and journal mode. Live WAL
+readers can still participate in SQLite's WAL/shared-memory coordination.
+
+`safe-v1` reports retain identifier-shaped display names and replace other display text
+with deterministic SHA-256 aliases. Trace/step identifiers remain; this is not anonymization.
+Raw artifact names and bytes are not rewritten for report privacy or matching. Logical
+comparison keys are JSON-encoded typed paths; consumers should treat them as opaque strings.
+Containment and unknown edges preserve all error investigation candidates, deeper first.
+Explicit causal ancestry supplies context, not proof that an exception propagated.
+Explicit OTLP OK takes precedence over handled exception events on new ingestion; old
+artifacts are not reinterpreted.
+
+LangGraph observes the configured error state channel; native pending-write exceptions
+are not yet ingested. Missing observed errors do not prove success. Link preservation
+means valid in-trace links only. Structural diff compares the derived tree and discloses
+lossy step counts. Metrics sum available span observations: partial coverage and producer
+aggregation can undercount or double count. File input has a size limit, but stdin/Phoenix
+subprocess output and query materialization are not streaming memory guarantees.
+
+Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;
+Ladybug's existing insertion semantics are unchanged. Use `is_isomorphic` or `diff` for
+deep-tree equality; `canonical()` preserves nested tuples, whose external Python equality
+can still reach the interpreter recursion limit. CI currently covers Python 3.12/Linux;
+other supported Python versions and platforms require separate validation.

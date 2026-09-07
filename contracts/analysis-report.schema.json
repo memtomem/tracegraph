@@ -43,7 +43,7 @@
       "type": "array",
       "items": {"$ref": "#/$defs/decisionEvidence"}
     },
-    "comparison": {"type": ["object", "null"]},
+    "comparison": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/comparison"}]},
     "warnings": {"type": "array", "items": {"type": "string"}},
     "privacy_profile": {"const": "safe-v1"}
   },
@@ -133,6 +133,92 @@
         "total_cost": {"type": ["string", "null"]},
         "cost_currency": {"type": ["string", "null"]},
         "evaluations": {"type": "array", "items": {"$ref": "#/$defs/evaluation"}}
+      }
+    },
+    "behaviorChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_step_key",
+        "name",
+        "before",
+        "after"
+      ],
+      "properties": {
+        "logical_step_key": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "before": {
+          "enum": [
+            "ok",
+            "error",
+            "unset",
+            null
+          ]
+        },
+        "after": {
+          "enum": [
+            "ok",
+            "error",
+            "unset",
+            null
+          ]
+        }
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseline_digest",
+        "topology_identical",
+        "topology_changes",
+        "behavior_changes",
+        "pattern_count_deltas",
+        "metric_deltas"
+      ],
+      "properties": {
+        "baseline_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "topology_identical": {
+          "type": "boolean"
+        },
+        "topology_changes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "behavior_changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/behaviorChange"
+          }
+        },
+        "pattern_count_deltas": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          }
+        },
+        "metric_deltas": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "number",
+              "string",
+              "null"
+            ]
+          }
+        }
       }
     }
   }

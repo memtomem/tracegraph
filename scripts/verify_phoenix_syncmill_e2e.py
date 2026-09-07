@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import hashlib
 import os
 import subprocess
 import sys
@@ -15,6 +17,39 @@ from pathlib import Path
 
 class E2EFailure(RuntimeError):
     pass
+
+
+def _verify_analysis(path: Path, trace_id: str, *, baseline: bool, baseline_digest: str | None = None) -> None:
+    from jsonschema import Draft202012Validator
+
+    report = json.loads(path.read_text(encoding="utf-8"))
+    schema = json.loads((Path(__file__).resolve().parents[1] / "contracts/analysis-report.schema.json").read_text())
+    if list(Draft202012Validator(schema).iter_errors(report)):
+        raise E2EFailure("analysis report failed its public schema")
+    if report["trace_id"] != trace_id or report["privacy_profile"] != "safe-v1":
+        raise E2EFailure("analysis selected an unexpected trace or privacy profile")
+    retries = [p for p in report["patterns"] if p["pattern_id"] == "tool-retry-failure" and p["pattern_version"] == 2]
+    candidates = {f["step"]["step_id"] for f in report["primary_failures"]}
+    candidates.update(s["step_id"] for s in report["propagated_failures"])
+    if not report["primary_failures"]:
+        raise E2EFailure("analysis lost all primary investigation candidates")
+    display = [report["source_kind"], report["metrics"]["cost_currency"]]
+    for finding in report["primary_failures"]:
+        display.extend(s["name"] for s in [finding["step"], *finding["causal_steps"]])
+    display.extend(s["name"] for s in report["propagated_failures"])
+    display.extend(label for p in report["patterns"] for label in p["labels"])
+    display.extend(value for item in report["metrics"]["evaluations"] for value in (item["name"], item["label"]))
+    if any(value is not None and not re.fullmatch(r"[A-Za-z0-9_.:/#@-]{1,200}", value) for value in display):
+        raise E2EFailure("analysis report contains unfiltered display text")
+    if not retries or not any(len(p["step_ids"]) == 3 and p["step_ids"][-1] in candidates for p in retries):
+        raise E2EFailure("analysis lost the retry path or failing tool candidate")
+    comparison = report["comparison"]
+    if baseline and (comparison is None or not any(c["after"] == "error" for c in comparison["behavior_changes"])):
+        raise E2EFailure("analysis lost baseline behavior regression")
+    if baseline_digest is not None and (comparison is None or comparison["baseline_digest"] != baseline_digest):
+        raise E2EFailure("analysis compared an unexpected baseline")
+    if not baseline and comparison is not None:
+        raise E2EFailure("analysis unexpectedly included a baseline")
 
 
 def _run(
@@ -94,7 +129,7 @@ def _canary(
     return payload
 
 
-def _poll_px_trace(trace_id: str, project: str, timeout: float = 60) -> None:
+def _poll_px_trace(trace_id: str, project: str, timeout: float = 60) -> dict:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = _run(
@@ -108,11 +143,12 @@ def _poll_px_trace(trace_id: str, project: str, timeout: float = 60) -> None:
                 "--format",
                 "raw",
                 "--no-progress",
+                "--include-annotations",
             ],
             expected=(0, 1),
         )
         if result.returncode == 0:
-            return
+            return json.loads(result.stdout)
         time.sleep(2)
     raise E2EFailure(f"Phoenix did not expose trace {trace_id} before the deadline")
 
@@ -180,7 +216,12 @@ def main() -> int:
         args.endpoint,
         args.project,
     )
-    _poll_px_trace(baseline["trace_id"], args.project)
+    baseline_export = _poll_px_trace(baseline["trace_id"], args.project)
+    from tracegraph import artifact
+    from tracegraph.adapters import PhoenixExportAdapter
+    from tracegraph.normalize import normalize
+    baseline_nt = normalize(PhoenixExportAdapter(baseline_export).ingest(baseline["trace_id"]))
+    baseline_digest = "sha256:" + hashlib.sha256(artifact.dumps(baseline_nt).encode()).hexdigest()
     _poll_px_trace(retry["trace_id"], args.project)
 
     doctor = _tracegraph("phoenix", "doctor", "--project", args.project)
@@ -201,6 +242,8 @@ def main() -> int:
     if "tool-retry-failure@v2" not in auto.stdout:
         raise E2EFailure("Phoenix diagnosis did not preserve explicit retry causality")
 
+    _verify_analysis(auto_report, retry["trace_id"], baseline=False)
+
     phoenix_artifact = evidence / "phoenix-retry-normalized.json"
     explicit_report = evidence / "phoenix-baseline-analysis.json"
     explicit = _tracegraph(
@@ -218,6 +261,8 @@ def main() -> int:
     )
     if "tool-retry-failure@v2" not in explicit.stdout or "Compared with baseline" not in explicit.stdout:
         raise E2EFailure("explicit Phoenix diagnosis did not include retry v2 and baseline comparison")
+
+    _verify_analysis(explicit_report, retry["trace_id"], baseline=True, baseline_digest=baseline_digest)
 
     baseline_artifact = evidence / "baseline-local.json"
     retry_artifact = evidence / "retry-local.json"

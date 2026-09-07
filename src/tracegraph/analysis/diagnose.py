@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field
 from tracegraph import artifact
 from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, build_index, find_matches
-from tracegraph.model import CausalFidelity, EdgeType, NormalizedTrace, Step, StepStatus
+from tracegraph.model import CausalFidelity, EdgeOrigin, EdgeType, NormalizedTrace, Step, StepStatus
 
 REPORT_SCHEMA_VERSION = 2
 _AUTO_PRESETS = (
@@ -118,6 +119,16 @@ class AnalysisReport(BaseModel):
     privacy_profile: str = "safe-v1"
 
 
+def _safe(value: str | None) -> str | None:
+    if value is None or re.fullmatch(r"[A-Za-z0-9_.:/#@-]{1,200}", value):
+        return value
+    return "redacted:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _display_name(step: Step) -> str:
+    return _safe(step.name or step.kind.value)
+
+
 def _shown(step: Step) -> DiagnosticStep:
     return DiagnosticStep(
         step_id=step.step_id,
@@ -154,19 +165,26 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
     steps = nt.steps_by_id()
     errors = {step.step_id for step in nt.steps if step.status is StepStatus.ERROR}
     adjacency = _cause_adjacency(nt)
-    # Primary vs propagated in ONE pass: an error is propagated iff any proper causal
-    # ancestor also errored. cause.seq < effect.seq (validate_raw guarantees it), so
+    explicit = {}
+    depth = {}
+    for edge in nt.edges_of(EdgeType.CAUSED_BY):
+        if edge.origin in {EdgeOrigin.CHECKPOINT_PARENT, EdgeOrigin.GRAPH_PARENT, EdgeOrigin.SPAN_LINK}:
+            explicit.setdefault(edge.src, []).append(edge.dst)
+    for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
+        depth[step.step_id] = 1 + max((depth[c] for c in adjacency.get(step.step_id, [])), default=-1)
+    # Candidate vs context in one pass: only explicit-origin paths establish
+    # error ancestry. Containment or legacy/unknown paths cannot suppress candidates. cause.seq < effect.seq (validate_raw guarantees it), so
     # walking steps in ascending seq computes each node's flag after all its causes' —
     # O(V+E) total instead of a full ancestor BFS per error.
     has_error_ancestor: dict[str, bool] = {}
     for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
         has_error_ancestor[step.step_id] = any(
             cause in errors or has_error_ancestor[cause]
-            for cause in adjacency.get(step.step_id, [])
+            for cause in explicit.get(step.step_id, [])
         )
     primary_ids = sorted(
         (sid for sid in errors if not has_error_ancestor[sid]),
-        key=lambda sid: (steps[sid].seq, sid),
+        key=lambda sid: (-depth[sid], steps[sid].seq, sid),
     )
     propagated_ids = sorted(errors - set(primary_ids), key=lambda sid: (steps[sid].seq, sid))
 
@@ -307,7 +325,7 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
     )
 
 
-def _logical_keys(nt: NormalizedTrace) -> dict[str, Step]:
+def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, Step]:
     steps = nt.steps_by_id()
     parent = {edge.src: edge.dst for edge in nt.edges_of(EdgeType.TREE_PARENT)}
     children: dict[str | None, list[str]] = {}
@@ -326,15 +344,17 @@ def _logical_keys(nt: NormalizedTrace) -> dict[str, Step]:
             occurrence_of[sid] = counts.get(key, 0)
             counts[key] = occurrence_of[sid] + 1
 
-    result: dict[str, Step] = {}
-    queue: deque[tuple[str, str]] = deque()
+    if table is None:
+        table = {}
+    result: dict[int, Step] = {}
+    queue = deque()
     for root in children.get(None, []):
-        queue.append((root, ""))
+        queue.append((root, None))
     while queue:
         step_id, prefix = queue.popleft()
         step = steps[step_id]
-        label = f"{step.kind.value}:{step.name or '-'}#{occurrence_of[step_id]}"
-        key = f"{prefix}/{label}" if prefix else label
+        signature = (prefix, step.kind.value, step.name, occurrence_of[step_id])
+        key = table.setdefault(signature, len(table))
         result[key] = step
         for child in children.get(step_id, []):
             queue.append((child, key))
@@ -352,8 +372,19 @@ def _comparison(
     current_patterns: list[PatternFinding],
     current_metrics: MetricSummary,
 ) -> ComparisonSummary:
-    structural = tree_diff(baseline, current)
-    before, after = _logical_keys(baseline), _logical_keys(current)
+    structural = tree_diff(baseline, current, display_label=_display_name)
+    table = {}
+    before, after = _logical_keys(baseline, table), _logical_keys(current, table)
+    signatures = {number: signature for signature, number in table.items()}
+
+    def display_key(key):
+        segments = []
+        while key is not None:
+            key, kind, name, occurrence = signatures[key]
+            safe = _safe(name)
+            tagged = ["redacted" if safe != name else "literal", safe]
+            segments.append([kind, tagged, occurrence])
+        return json.dumps(list(reversed(segments)), ensure_ascii=True, separators=(",", ":"))
     changes: list[BehaviorChange] = []
     for key in sorted(set(before) | set(after)):
         old, new = before.get(key), after.get(key)
@@ -362,7 +393,7 @@ def _comparison(
         if old_status != new_status:
             changes.append(
                 BehaviorChange(
-                    logical_step_key=key,
+                    logical_step_key=display_key(key),
                     name=(new or old).name if (new or old) else None,
                     before=old_status,
                     after=new_status,
@@ -415,7 +446,23 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         warnings.append(
             "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
         )
-    return AnalysisReport(
+    for label, trace in (("current", nt), ("baseline", baseline)):
+        if trace is None:
+            continue
+        if label == "baseline" and trace.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
+            warnings.append("baseline: Phoenix export preserves parent relationships only; additional fan-in causes may be missing.")
+        lossy = sum(step.projection_lossy for step in trace.steps)
+        if lossy:
+            warnings.append(f"{label}: derived tree drops causes at {lossy} step(s); topology comparison covers TREE_PARENT only.")
+        if trace.trace.source_kind == "langgraph":
+            warnings.append(f"{label}: LangGraph errors reflect the configured state channel only; no observed error does not prove execution success.")
+        if trace.trace.links_preserved:
+            warnings.append(f"{label}: link preservation covers valid in-trace links only; foreign or unresolved links are omitted.")
+    if primary or propagated:
+        warnings.append("Failure candidates are investigation leads. Containment/unknown edges do not prove propagation; explicit causal ancestry is context, not proof of exception propagation.")
+    if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):
+        warnings.append("Metrics sum observed span values; coverage may be partial and producer aggregates may double count.")
+    report = AnalysisReport(
         artifact_digest=_digest(nt),
         trace_id=nt.trace.trace_id,
         source_kind=nt.trace.source_kind,
@@ -438,6 +485,35 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         ),
         warnings=warnings,
     )
+    redacted = False
+    def clean(value):
+        nonlocal redacted
+        safe = _safe(value)
+        redacted |= safe != value
+        return safe
+
+    report.source_kind = clean(report.source_kind)
+    report.metrics.cost_currency = clean(report.metrics.cost_currency)
+    for finding in report.primary_failures:
+        for step in [finding.step, *finding.causal_steps]:
+            step.name = clean(step.name)
+    for step in report.propagated_failures:
+        step.name = clean(step.name)
+    for finding in report.patterns:
+        finding.labels = [clean(name) for name in finding.labels]
+    for item in report.metrics.evaluations:
+        item.name, item.label = clean(item.name), clean(item.label)
+    if report.comparison:
+        for change in report.comparison.behavior_changes:
+            change.name = clean(change.name)
+    # Also disclose redaction confined to baseline topology descriptions or logical keys.
+    for trace in (nt, baseline):
+        if trace:
+            for step in trace.steps:
+                clean(step.name)
+    if redacted:
+        report.warnings.append("Display text was replaced with deterministic redacted aliases; safe-v1 retains structural identifiers and is not anonymization.")
+    return report
 
 
 def dumps(report: AnalysisReport) -> str:

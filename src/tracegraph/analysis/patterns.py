@@ -611,8 +611,8 @@ PRESETS: dict[str, PathPattern] = {
                 gap=(2, MAX_GAP),
             ),
         ),
-        f"the same tool retried within {MAX_GAP} causal hops and failing "
-        "(Cypher-acceleratable form of tool-retry-failure)",
+        f"the same tool repeats within {MAX_GAP} causal hops and fails "
+        "(query-only heuristic; no explicit retry evidence)",
         pattern_id="tool-retry-failure-near",
         pattern_version=1,
         review_eligible=False,

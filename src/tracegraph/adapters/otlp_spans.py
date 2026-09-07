@@ -54,6 +54,8 @@ from pathlib import Path
 import re
 from typing import Any, Iterator
 
+from tracegraph.input_validation import loads, object_field
+
 from tracegraph.model import (
     CausalFidelity,
     DecisionEvidence,
@@ -126,12 +128,20 @@ def _attr_value(v: Any) -> Any:
 
 
 def _attributes(span: dict) -> dict[str, Any]:
-    raw = span.get("attributes") or []
+    raw = span.get("attributes")
+    if raw is None:
+        raw = []
     if isinstance(raw, dict):
         return dict(raw)
+    if not isinstance(raw, list):
+        raise ValueError("attributes must be an object or array")
     out: dict[str, Any] = {}
     for a in raw:
+        if not isinstance(a, dict):
+            raise ValueError("attributes[] must be an object")
         key = a.get("key")
+        if key is not None and not isinstance(key, str):
+            raise ValueError("attributes[].key must be a string")
         if key is not None:
             out[key] = _attr_value(a.get("value"))
     return out
@@ -167,11 +177,11 @@ def _span_array(container: dict, *keys: str) -> list:
 
 
 def _exception_message(span: dict) -> str | None:
-    for ev in span.get("events") or []:
+    for ev in _span_array(span, "events"):
+        if not isinstance(ev, dict):
+            raise ValueError("events[] must be an object")
+        attrs = _attributes(ev)
         if ev.get("name") == "exception":
-            attrs = {
-                a.get("key"): _attr_value(a.get("value")) for a in ev.get("attributes") or []
-            }
             msg = attrs.get("exception.message") or attrs.get("exception.type")
             if msg:
                 return str(msg)
@@ -179,14 +189,18 @@ def _exception_message(span: dict) -> str | None:
 
 
 def _status(span: dict) -> tuple[StepStatus, str | None]:
-    st = span.get("status") or {}
+    st = object_field(span.get("status"), "status")
     code = st.get("code")
     exception = _exception_message(span)
-    if code in _ERROR_CODES or exception is not None:
+    if code in (1, "STATUS_CODE_OK", "OK"):
+        return StepStatus.OK, None
+    if code in (2, "STATUS_CODE_ERROR", "ERROR"):
         return StepStatus.ERROR, st.get("message") or exception or "error"
-    if code in (0, "STATUS_CODE_UNSET", "UNSET", None):
-        return StepStatus.UNSET, None
-    return StepStatus.OK, None
+    if code not in (0, "STATUS_CODE_UNSET", "UNSET", None):
+        raise ValueError("status.code must be OK, ERROR, or UNSET")
+    if exception is not None:
+        return StepStatus.ERROR, exception
+    return StepStatus.UNSET, None
 
 
 def _iso_ts(start_nano: Any) -> str | None:
@@ -310,11 +324,11 @@ class OTLPSpanAdapter:
     @classmethod
     def from_json(cls, text: str, **kwargs: Any) -> "OTLPSpanAdapter":
         try:
-            payload = json.loads(text)
+            payload = loads(text)
             documents = payload if isinstance(payload, list) else [payload]
         except json.JSONDecodeError:
             # The Collector file exporter writes one top-level TracesData object per line.
-            documents = [json.loads(line) for line in text.splitlines() if line.strip()]
+            documents = [loads(line) for line in text.splitlines() if line.strip()]
         if not documents or not all(isinstance(item, dict) for item in documents):
             raise ValueError("OTLP input must contain one or more JSON trace objects")
         merged: dict[str, Any] = {"resourceSpans": []}
@@ -587,7 +601,11 @@ class OTLPSpanAdapter:
                     # timestamp — topo ordering sequences them and a real cycle raises.
                     if not isinstance(link, dict):
                         raise ValueError("OTLP links entries must be objects")
-                    if _first(link, "traceId", "trace_id") != own_trace:
+                    link_trace = _first(link, "traceId", "trace_id")
+                    lsid = _first(link, "spanId", "span_id")
+                    if any(value is not None and not isinstance(value, str) for value in (link_trace, lsid)):
+                        raise ValueError("links[].traceId and spanId must be strings")
+                    if link_trace != own_trace:
                         continue
                     lsid = _first(link, "spanId", "span_id")
                     if lsid in by_id:

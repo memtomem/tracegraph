@@ -24,7 +24,7 @@ from rich.markup import escape
 from rich.tree import Tree
 
 from tracegraph import artifact
-from tracegraph.adapters import LangGraphCheckpointAdapter
+from tracegraph.input_validation import loads as load_json
 from tracegraph.analysis import PRESETS
 from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
@@ -184,7 +184,7 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
     """Strictly identify a tracegraph artifact or Phoenix CLI trace export."""
     try:
         text = _read_source(source)
-        payload = json.loads(text)
+        payload = load_json(text)
         if isinstance(payload, dict) and "schema_version" in payload:
             nt = artifact.from_obj(payload)
         else:
@@ -248,8 +248,8 @@ def _px_version() -> str:
 def _px_json(command: list[str], *, action: str) -> Any:
     text = _px_run(command, action=action)
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
+        return load_json(text)
+    except ValueError as exc:
         raise _PxError(f"{action} returned invalid JSON") from exc
 
 
@@ -350,7 +350,7 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
         f"{report.step_count} steps · {report.error_count} error"
     )
 
-    console.print("\n[bold]What failed[/]")
+    console.print("\n[bold]What failed — candidates to investigate[/]")
     if not report.primary_failures:
         console.print("  [green]No error step found.[/]")
     for finding in report.primary_failures[:limit]:
@@ -366,7 +366,7 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
             )
     remaining = len(report.primary_failures) - limit
     if remaining > 0:
-        console.print(f"  [dim]… {remaining} more primary failure(s) in JSON report[/]")
+        console.print(f"  [dim]… {remaining} more failure candidate(s) in JSON report[/]")
     if report.propagated_failures:
         names = ", ".join(escape(item.name or item.kind) for item in report.propagated_failures)
         console.print(f"  [dim]propagated/context errors: {names}[/]")
@@ -711,13 +711,15 @@ def ingest(
     error_channel: str = typer.Option("error", help="State channel that signals a step error."),
 ) -> None:
     """Ingest a LangGraph thread's checkpoint history into a portable artifact."""
-    from langgraph.checkpoint.sqlite import SqliteSaver
+    from tracegraph.sqlite_snapshot import ingest_snapshot
 
-    target = out or Path(f"{thread}.json")
-    with SqliteSaver.from_conn_string(str(sqlite)) as saver:
-        raw = LangGraphCheckpointAdapter(saver, error_channel=error_channel).ingest(thread)
-    nt = normalize(raw)
-    artifact.save_atomic(nt, target)
+    target = out or artifact.default_path(thread)
+    _distinct_paths([sqlite], [target])
+    try:
+        nt = normalize(ingest_snapshot(sqlite, thread, error_channel=error_channel))
+        _save_ingested(nt, target, explicit=out is not None)
+    except (OSError, ValueError, KeyError) as exc:
+        raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc
     console.print(f"[green]ingested {len(nt.steps)} steps[/] → {target}")
 
 
@@ -745,8 +747,9 @@ def ingest_otlp(
         nt = normalize(adapter.ingest(trace))
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest OTLP export {file}: {_load_reason(exc)}") from exc
-    target = out or Path(f"{trace}.json")
-    artifact.save_atomic(nt, target)
+    target = out or artifact.default_path(trace)
+    _distinct_paths([file], [target])
+    _save_ingested(nt, target, explicit=out is not None)
     console.print(f"[green]ingested {len(nt.steps)} spans[/] → {target}")
 
 
@@ -760,8 +763,9 @@ def ingest_phoenix(
     nt = _load_analysis_source(file, trace)
     if nt.trace.source_kind != "phoenix_cli":
         raise typer.BadParameter("--file must contain a Phoenix CLI trace export")
-    target = out or Path(f"{nt.trace.trace_id}.json")
-    artifact.save_atomic(nt, target)
+    target = out or artifact.default_path(nt.trace.trace_id)
+    _distinct_paths([Path(file)] if file != "-" else [], [target])
+    _save_ingested(nt, target, explicit=out is not None)
     console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {target}")
 
 
@@ -772,11 +776,12 @@ def analyze_command(
     baseline: str = typer.Option(None, "--baseline", help="Explicit artifact/Phoenix baseline."),
     baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace baseline."),
     json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
-    limit: int = typer.Option(3, "--limit", "-l", help="Primary failures rendered in the terminal."),
+    limit: int = typer.Option(3, "--limit", "-l", help="Failure candidates to investigate rendered in the terminal."),
 ) -> None:
     """Automatically diagnose failures, retries, telemetry, and an optional baseline."""
     if limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
+    _distinct_paths([Path(p) for p in (source, baseline) if p and p != "-"], [json_out] if json_out else [])
     nt = _load_analysis_source(source, trace)
     baseline_nt = _load_analysis_source(baseline, baseline_trace) if baseline else None
     report = build_analysis(nt, baseline=baseline_nt)
@@ -795,11 +800,12 @@ def phoenix_diagnose(
     baseline: str = typer.Option(None, "--baseline", help="Explicit Phoenix baseline trace id."),
     save_artifact: Path = typer.Option(None, "--save-artifact", help="Save the body-free artifact."),
     json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
-    limit: int = typer.Option(3, "--limit", "-l", help="Primary failures rendered in the terminal."),
+    limit: int = typer.Option(3, "--limit", "-l", help="Failure candidates to investigate rendered in the terminal."),
 ) -> None:
     """Diagnose an explicit trace or automatically select a recent failure."""
     if limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
+    _distinct_paths([], [p for p in (save_artifact, json_out) if p is not None])
     try:
         _px_version()
         if trace_id:
@@ -978,6 +984,7 @@ def diff(
     Exits 0 when isomorphic, 1 when not (so CI can gate on structural regressions).
     """
     nt_a, nt_b = _load(a), _load(b)
+    console.print(f"[dim]Derived TREE_PARENT comparison; lossy steps: A={sum(s.projection_lossy for s in nt_a.steps)}, B={sum(s.projection_lossy for s in nt_b.steps)}[/]")
     label = structure_only if structure else None
     result = tree_diff(nt_a, nt_b, label) if label else tree_diff(nt_a, nt_b)
     if result.identical:
@@ -1141,6 +1148,26 @@ def export_review_candidates(
 
 def main() -> None:
     app()
+
+
+def _distinct_paths(inputs: list[Path], outputs: list[Path]) -> None:
+    seen = list(inputs)
+    for output in outputs:
+        for previous in seen:
+            if output.resolve() == previous.resolve() or (
+                output.exists() and previous.exists() and output.samefile(previous)
+            ):
+                raise typer.BadParameter("output must not overwrite an input or another output")
+        seen.append(output)
+
+
+def _save_ingested(nt: NormalizedTrace, target: Path, *, explicit: bool) -> None:
+    try:
+        artifact.save_atomic(nt, target, replace=explicit)
+    except FileExistsError as exc:
+        raise typer.BadParameter("default output exists; pass --out to explicitly replace a file") from exc
+    except OSError as exc:
+        raise typer.BadParameter(f"cannot save artifact: {_load_reason(exc)}") from exc
 
 
 if __name__ == "__main__":

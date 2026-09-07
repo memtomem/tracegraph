@@ -10,11 +10,12 @@ order of magnitude, which is exactly what they're meant to catch.
 from __future__ import annotations
 
 import time
+from statistics import median
 
 import pytest
 
 from tracegraph.analysis.diagnose import analyze
-from tracegraph.model import Edge, EdgeType, RawTrace, Step, StepKind, StepStatus, Trace
+from tracegraph.model import Edge, EdgeOrigin, EdgeType, RawTrace, Step, StepKind, StepStatus, Trace
 from tracegraph.normalize import normalize, validate_normalized
 
 pytestmark = pytest.mark.perf
@@ -37,7 +38,7 @@ def _deep_linear(n: int, *, error_every: int | None = None) -> RawTrace:
         for i in range(n)
     ]
     edges = [
-        Edge(type=EdgeType.CAUSED_BY, src=f"s{i}", dst=f"s{i - 1}") for i in range(1, n)
+        Edge(type=EdgeType.CAUSED_BY, src=f"s{i}", dst=f"s{i - 1}", origin=EdgeOrigin.CHECKPOINT_PARENT) for i in range(1, n)
     ]
     return RawTrace(
         trace=Trace(trace_id="t", source_kind="x"), steps=steps, causal_edges=edges
@@ -95,3 +96,21 @@ def test_analyze_with_baseline_handles_wide_fanout():
     elapsed = time.perf_counter() - start
     assert report.comparison is not None and report.comparison.topology_identical
     assert elapsed < 2.0, f"analyze+baseline took {elapsed:.2f}s on a 4000-child fan-out"
+
+
+def test_deep_diff_scaling():
+    from tracegraph.analysis.ahu import diff
+    timings = []
+    for n in (4000, 8000, 16000):
+        a = normalize(_deep_linear(n))
+        raw = _deep_linear(n)
+        raw.steps[-1].name = "changed"
+        b = normalize(raw)
+        samples = []
+        for _ in range(3):
+            start = time.perf_counter()
+            assert not diff(a, b).identical
+            samples.append(time.perf_counter() - start)
+        timings.append(median(samples))
+    for before, after in zip(timings, timings[1:]):
+        assert after <= 3.5 * before + 0.05, timings

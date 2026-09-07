@@ -49,13 +49,13 @@ def _trace(trace_id: str, tool_status: StepStatus):
             type=EdgeType.CAUSED_BY,
             src=f"{trace_id}-1",
             dst=f"{trace_id}-0",
-            origin=EdgeOrigin.SPAN_PARENT_FALLBACK,
+            origin=EdgeOrigin.GRAPH_PARENT,
         ),
         Edge(
             type=EdgeType.CAUSED_BY,
             src=f"{trace_id}-2",
             dst=f"{trace_id}-1",
-            origin=EdgeOrigin.SPAN_PARENT_FALLBACK,
+            origin=EdgeOrigin.GRAPH_PARENT,
         ),
     ]
     return normalize(

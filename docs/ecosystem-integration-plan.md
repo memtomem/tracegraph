@@ -1,8 +1,8 @@
 # toolgraph, tracegraph, syncmill 연계 계획
 
 **상태:** tracegraph 범위 0~5단계와 고정 SHA 기반 live single-failure P4 검증 완료
-(2026-07-14). SyncMill의 Phoenix streaming exporter와 명시적 retry causality는 정본
-저장소의 후속 책임이다.
+(2026-07-14). 이후 통제된 SyncMill → Phoenix E2E에 streaming exporter와 명시적
+retry causality 검증이 추가됐다. 일반 배포 환경의 운영 수용은 별도 검증 대상이다.
 **작성일:** 2026-07-11
 **정본:** [전체 계획](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/integration-plan.md) · [구현 설계](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/implementation-design.md) · [smoke runbook](https://github.com/memtomem/syncmill/blob/main/docs/ecosystem/smoke-runbook.md)
 
@@ -154,8 +154,9 @@ SyncMill과 마찬가지로 exact candidate tuple에서 같은 UUIDv5를 계산�
 사용하고, exact report-byte digest에 묶인 별도 sidecar에서
 `open`/`accepted`/`dismissed`를 기록한다. Annotation은 SyncMill board, manifest,
 selector, blast radius, preflight 또는 graph state를 바꾸지 않는다. 고정 SHA 기반 live
-qualified-tool single-failure 운영 검토는 완료됐고, 명시적 retry causality와 SyncMill의
-Phoenix streaming exporter는 별도 후속 작업이다.
+qualified-tool single-failure 운영 검토와 통제된 명시적 retry → Phoenix streaming
+E2E가 구현되어 있다. Fixture 검사, 통제된 서버 E2E, 일반 운영 지원은 구분한다.
+실행 범위는 [Phoenix E2E](phoenix-syncmill-e2e.md)를 참고한다.
 
 ## 검증 기준
 

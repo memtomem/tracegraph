@@ -2,12 +2,15 @@
 
 Two runs are compared as rooted trees. Isomorphism uses the Aho–Hopcroft–Ullman (AHU)
 canonical form — each node's canonical value is its label plus the *sorted* canonical values
-of its children — which is exact and linear-time on a forest (the whole reason we project the
+of its children — which is exact on a forest (the whole reason we project the
 multi-parent causal graph down to a single-parent tree for diffing).
 
-Canonical values are **nested tuples**, not strings: ``(label, (child_canon, ...))``. Tuples
-are hashable and compared structurally, so — unlike string concatenation — a label containing
+The public canonical values remain **nested tuples**, not strings: ``(label, (child_canon, ...))``. Tuples
+preserve structure, so — unlike string concatenation — a label containing
 ``(``, ``)`` or ``,`` can never forge a false match.
+
+Diff and equality intern (label, sorted child IDs) in a table shared by both trees,
+avoiding recursive tuple hashing/comparison. Sorting adds O(d log d) per sibling set.
 
 Per the layer contract this reads ``TREE_PARENT`` only. ``CAUSED_BY`` (the raw layer) is for
 ``explain``/RCA, never for structural diff.
@@ -22,6 +25,7 @@ correspondence between two genuinely unrelated siblings.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cmp_to_key
 from typing import Callable
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step
@@ -55,6 +59,38 @@ def _roots(nt: NormalizedTrace, children: dict[str, list[str]]) -> list[str]:
     return [s.step_id for s in nt.steps if s.step_id not in has_parent]
 
 
+def _compare(left: Canon, right: Canon) -> int:
+    # Tuple-compatible lexical order without Python's recursive tuple comparison.
+    stack = [(left, right)]
+    while stack:
+        a, b = stack.pop()
+        if a is b:
+            continue
+        if isinstance(a, str):
+            if a != b:
+                return -1 if a < b else 1
+            continue
+        common = min(len(a), len(b))
+        if len(a) != len(b):
+            stack.append(("" if len(a) < len(b) else "x", "x" if len(a) < len(b) else ""))
+        stack.extend((a[i], b[i]) for i in range(common - 1, -1, -1))
+    return 0
+
+
+def _intern(steps, children, roots, label, table):
+    result = {}
+    stack = [(root, False) for root in roots]
+    while stack:
+        node, ready = stack.pop()
+        if ready:
+            signature = (label(steps[node]), tuple(sorted(result[c] for c in children.get(node, []))))
+            result[node] = table.setdefault(signature, len(table))
+        else:
+            stack.append((node, True))
+            stack.extend((child, False) for child in children.get(node, []))
+    return result
+
+
 def _subtree_canons(
     steps: dict[str, Step], children: dict[str, list[str]], roots: list[str], label: LabelFn
 ) -> dict[str, Canon]:
@@ -70,7 +106,7 @@ def _subtree_canons(
         while stack:
             nid, ready = stack.pop()
             if ready:
-                kids = tuple(sorted(canon[c] for c in children.get(nid, [])))
+                kids = tuple(sorted((canon[c] for c in children.get(nid, [])), key=cmp_to_key(_compare)))
                 canon[nid] = (label(steps[nid]), kids)
             else:
                 stack.append((nid, True))
@@ -80,40 +116,42 @@ def _subtree_canons(
 
 
 def _render(canon: Canon) -> str:
-    """Human-readable rendering of a canonical subtree (display only).
-
-    Iterative post-order — a deep subtree (e.g. a whole present-only-in-A chain) would
-    overflow a recursive render. Memoizes by the canon value itself: equal subtrees render
-    identically, so sharing one cache across the forest is safe.
-    """
-    rendered: dict[Canon, str] = {}
-    stack: list[tuple[Canon, bool]] = [(canon, False)]
+    """Render a public canonical tuple iteratively, with output-linear string assembly."""
+    parts = []
+    stack = [canon]
     while stack:
-        node, ready = stack.pop()
-        node_label, kids = node
-        if ready or not kids:
-            shown = node_label or "·"
-            rendered[node] = (
-                shown if not kids else f"{shown}({', '.join(rendered[k] for k in kids)})"
-            )
-        else:
-            stack.append((node, True))
-            for k in kids:
-                stack.append((k, False))
-    return rendered[canon]
+        item = stack.pop()
+        if isinstance(item, str):
+            parts.append(item)
+            continue
+        name, kids = item
+        parts.append(name or "·")
+        if kids:
+            parts.append("(")
+            stack.append(")")
+            for i in range(len(kids) - 1, -1, -1):
+                stack.append(kids[i])
+                if i:
+                    stack.append(", ")
+    return "".join(parts)
 
 
 def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
-    """The forest's canonical value: sorted tuple of its roots' canonical values."""
+    """Sorted nested root tuples; use is_isomorphic for recursion-safe deep equality."""
     children = _children(nt)
     steps = nt.steps_by_id()
     roots = _roots(nt, children)
     canon = _subtree_canons(steps, children, roots, label)
-    return tuple(sorted(canon[r] for r in roots))
+    return tuple(sorted((canon[r] for r in roots), key=cmp_to_key(_compare)))
 
 
 def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label) -> bool:
-    return canonical(a, label) == canonical(b, label)
+    table = {}
+    ca, cb = _children(a), _children(b)
+    ra, rb = _roots(a, ca), _roots(b, cb)
+    aa = _intern(a.steps_by_id(), ca, ra, label, table)
+    bb = _intern(b.steps_by_id(), cb, rb, label, table)
+    return sorted(aa[r] for r in ra) == sorted(bb[r] for r in rb)
 
 
 @dataclass
@@ -125,7 +163,7 @@ class TreeDiff:
         return not self.identical
 
 
-def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label) -> TreeDiff:
+def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label, *, display_label: LabelFn | None = None) -> TreeDiff:
     """Compare two runs structurally. ``identical`` is exact; ``changes`` is a heuristic localization.
 
     Aligns children by canonical subtree (so identical subtrees match regardless of order),
@@ -137,8 +175,36 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a, ca), _roots(b, cb)
-    canA = _subtree_canons(sa, ca, ra, label)
-    canB = _subtree_canons(sb, cb, rb, label)
+    table = {}
+    canA = _intern(sa, ca, ra, label, table)
+    canB = _intern(sb, cb, rb, label, table)
+    show = display_label or label
+
+    def render(node, steps, children):
+        parts = []
+        stack = [(node, False)]
+        while stack:
+            item, literal = stack.pop()
+            if literal:
+                parts.append(item)
+                continue
+            parts.append(show(steps[item]) or "·")
+            kids = children.get(item, [])
+            if kids:
+                parts.append("(")
+                stack.append((")", True))
+                for i in range(len(kids) - 1, -1, -1):
+                    stack.append((kids[i], False))
+                    if i:
+                        stack.append((", ", True))
+        return "".join(parts)
+
+    def path_text(path):
+        parts = []
+        while path is not None:
+            path, name = path
+            parts.append(name)
+        return " > ".join(reversed(parts))
     # Same comparison as is_isomorphic(), reusing the canons computed above.
     if tuple(sorted(canA[r] for r in ra)) == tuple(sorted(canB[r] for r in rb)):
         return TreeDiff(identical=True)
@@ -147,7 +213,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
 
     def align(a_ids: list[str], b_ids: list[str]) -> tuple[list[str], list[str]]:
         """Pop A/B ids whose canonical subtrees match; return the leftovers on each side."""
-        bucket: dict[Canon, list[str]] = {}
+        bucket: dict[int, list[str]] = {}
         for k in b_ids:
             bucket.setdefault(canB[k], []).append(k)
         a_only: list[str] = []
@@ -190,7 +256,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
                 ka = key_a(k)
                 pool = index.get(ka) if ka is not None else None
                 if pool:
-                    bk = pool.pop(0)
+                    bk = pool.pop()
                     used_b.add(bk)
                     pairs.append((k, bk))
                 else:
@@ -199,7 +265,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
             b_left = [k for k in b_left if k not in used_b]
 
         def child_canons(
-            canon_map: dict[str, Canon], child_map: dict[str, list[str]], k: str
+            canon_map: dict[str, int], child_map: dict[str, list[str]], k: str
         ) -> object:
             kids = child_map.get(k, [])
             return tuple(sorted(canon_map[c] for c in kids)) if kids else None
@@ -212,31 +278,31 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label)
         return pairs, a_left, b_left
 
     def localize(
-        a_ids: list[str], b_ids: list[str], here: tuple[str, ...], root_level: bool
+        a_ids: list[str], b_ids: list[str], here, root_level: bool
     ) -> list[tuple[str, str]]:
         """Report unpairable leftovers as add/remove; return the genuine pairs to descend."""
         pairs, a_left, b_left = pair_leftovers(a_ids, b_ids)
-        prefix = " > ".join(here)
+        prefix = path_text(here) if a_left or b_left else ""
         tail = "root subtree" if root_level else "subtree"
         for k in a_left:
             scope = "only in A" if root_level else f"only in A under {prefix}"
-            changes.append(f"{scope}: {tail} {_render(canA[k])}")
+            changes.append(f"{scope}: {tail} {render(k, sa, ca)}")
         for k in b_left:
             scope = "only in B" if root_level else f"only in B under {prefix}"
-            changes.append(f"{scope}: {tail} {_render(canB[k])}")
+            changes.append(f"{scope}: {tail} {render(k, sb, cb)}")
         return pairs
 
     # Iterative worklist: a recursive descent would overflow on a deep-linear divergence.
-    worklist: list[tuple[str, str, tuple[str, ...]]] = [
-        (an, bn, ()) for an, bn in localize(*align(ra, rb), here=(), root_level=True)
+    worklist = [
+        (an, bn, None) for an, bn in localize(*align(ra, rb), here=None, root_level=True)
     ]
     while worklist:
         an, bn, path = worklist.pop()
         la, lb = label(sa[an]), label(sb[bn])
         if la != lb:
-            changes.append(f"diverges at {' > '.join(path) or '(root)'}: A={la!r} B={lb!r}")
+            changes.append(f"diverges at {path_text(path) or '(root)'}: A={show(sa[an])!r} B={show(sb[bn])!r}")
             continue
-        here = path + (la,)
+        here = (path, show(sa[an]))
         a_only, b_only = align(ca.get(an, []), cb.get(bn, []))
         worklist.extend(
             (ca_id, cb_id, here) for ca_id, cb_id in localize(a_only, b_only, here, False)
