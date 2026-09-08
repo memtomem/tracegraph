@@ -65,10 +65,12 @@ Linux/macOS에서 저장소 루트의 Bash로 실행한다. `uv`와 Python 3.12�
 set -euo pipefail
 WHEEL_EXTRA=core
 WHEEL_ROOT=$(mktemp -d)
-EXTRA_ARGS=()
-if [ "$WHEEL_EXTRA" = cypher ]; then EXTRA_ARGS=(--extra cypher); fi
 uv build --out-dir "$WHEEL_ROOT/dist"
-uv export --locked --no-dev --no-emit-project "${EXTRA_ARGS[@]}" --output-file "$WHEEL_ROOT/requirements.txt"
+if [ "$WHEEL_EXTRA" = cypher ]; then
+  uv export --locked --no-dev --no-emit-project --extra cypher --output-file "$WHEEL_ROOT/requirements.txt"
+else
+  uv export --locked --no-dev --no-emit-project --output-file "$WHEEL_ROOT/requirements.txt"
+fi
 uv venv --python 3.12 "$WHEEL_ROOT/venv"
 uv pip sync --python "$WHEEL_ROOT/venv/bin/python" --require-hashes "$WHEEL_ROOT/requirements.txt"
 uv pip install --python "$WHEEL_ROOT/venv/bin/python" --no-deps "$WHEEL_ROOT"/dist/*.whl
@@ -77,6 +79,24 @@ uv pip check --python "$WHEEL_ROOT/venv/bin/python"
 ```
 
 ## 다음 작업과 계약 경계
+
+### 2026-09-08 리뷰 후속 수정
+
+`7ba259b` 리뷰에서 발견된 두 항목을 해당 커밋 위 작업 트리에서 수정했다.
+
+- Wheel verifier는 `diff` 차이/`query` 미매치의 exit 1 외에도 각각 `NOT IDENTICAL`/
+  `no matches` 출력 줄을 확인한다. stdout/stderr의 traceback은 실패로 처리하며,
+  출력 계약 없이 nonzero를 성공으로 지정하는 것도 거부한다.
+- 재실행 명령과 CI에서 빈 Bash 배열을 제거하고 core/Cypher export를 분기했다.
+  macOS 기본 Bash 3.2의 `set -u` 아래에서도 빈 배열 확장 오류가 발생하지 않는다.
+- 실제 child process의 정상·빈 출력·잘못된 출력·traceback·잘못된 exit를 검사하는
+  신규 회귀 **13개 통과**, 기존 리뷰 회귀와 함께 **69개 통과**.
+- 수정된 verifier로 기존 독립 core/Cypher wheel 환경의 smoke **모두 통과**.
+  제품 소스와 패키지 의존성은 이 후속 수정에서도 바꾸지 않았다.
+- Bash 3.2에서 문서/CI 각각 core/Cypher의 **4개 shell 경로 통과**.
+  이 검사는 uv stub으로 export 인자와 shell 동작을 검증했으며 새 설치 실행 증거는 아니다.
+
+### 기능 개선 백로그
 
 | 우선순위 | 후속 범위 | 설계·수용 기준 |
 | --- | --- | --- |

@@ -44,10 +44,12 @@ jobs:
           set -euo pipefail
           WHEEL_ROOT=$(mktemp -d "$RUNNER_TEMP/tracegraph-wheel.XXXXXX")
           echo "WHEEL_ROOT=$WHEEL_ROOT" >> "$GITHUB_ENV"
-          EXTRA_ARGS=()
-          if [ "$WHEEL_EXTRA" = cypher ]; then EXTRA_ARGS=(--extra cypher); fi
           uv build --out-dir "$WHEEL_ROOT/dist"
-          uv export --locked --no-dev --no-emit-project "${EXTRA_ARGS[@]}" --output-file "$WHEEL_ROOT/requirements.txt"
+          if [ "$WHEEL_EXTRA" = cypher ]; then
+            uv export --locked --no-dev --no-emit-project --extra cypher --output-file "$WHEEL_ROOT/requirements.txt"
+          else
+            uv export --locked --no-dev --no-emit-project --output-file "$WHEEL_ROOT/requirements.txt"
+          fi
           uv venv --python 3.12 "$WHEEL_ROOT/venv"
           uv pip sync --python "$WHEEL_ROOT/venv/bin/python" --require-hashes "$WHEEL_ROOT/requirements.txt"
           uv pip install --python "$WHEEL_ROOT/venv/bin/python" --no-deps "$WHEEL_ROOT"/dist/*.whl

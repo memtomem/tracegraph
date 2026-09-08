@@ -27,6 +27,23 @@ def require(condition: bool, message: str) -> None:
         raise SmokeFailure(message)
 
 
+def checked_output(
+    result: subprocess.CompletedProcess[str], *, expected: int = 0,
+    expected_line: str | None = None,
+) -> str:
+    require(expected == 0 or expected_line is not None,
+            "nonzero success requires an expected output line")
+    require(result.returncode == expected,
+            f"{result.args[0]} exited {result.returncode}, expected {expected}: "
+            f"{result.stderr[-2000:]}")
+    require("Traceback" not in result.stdout and "Traceback" not in result.stderr,
+            "command produced a traceback")
+    if expected_line is not None:
+        require(expected_line in {line.strip() for line in result.stdout.splitlines()},
+                f"command did not report {expected_line!r}")
+    return result.stdout
+
+
 def verify(extra: str) -> dict:
     repo = Path(__file__).resolve().parents[1]
     env = {key: value for key, value in os.environ.items()
@@ -37,13 +54,10 @@ def verify(extra: str) -> dict:
         work = Path(directory).resolve()
         require(not work.is_relative_to(repo), "smoke directory must be outside checkout")
 
-        def run(command: list[str], expected: int = 0) -> str:
+        def run(command: list[str], expected: int = 0, expected_line: str | None = None) -> str:
             result = subprocess.run(command, cwd=work, env=env, capture_output=True,
                                     text=True, timeout=60, check=False)
-            require(result.returncode == expected,
-                    f"{command[0]} exited {result.returncode}, expected {expected}: "
-                    f"{result.stderr[-2000:]}")
-            return result.stdout
+            return checked_output(result, expected=expected, expected_line=expected_line)
 
         installed = json.loads(run([sys.executable, "-I", "-c", """
 import importlib.util, json, sysconfig
@@ -62,8 +76,8 @@ print(json.dumps({
         require(installed["ladybug"] == (extra == "cypher"), "optional dependency gate failed")
         executable = Path(installed["scripts"]) / ("tracegraph.exe" if os.name == "nt" else "tracegraph")
 
-        def cli(*args: str, expected: int = 0) -> str:
-            return run([str(executable), *args], expected)
+        def cli(*args: str, expected: int = 0, expected_line: str | None = None) -> str:
+            return run([str(executable), *args], expected, expected_line)
 
         cli("--help")
         # The v1 fixture must retain its exact bytes: candidate identity hashes the
@@ -97,7 +111,7 @@ print(json.dumps({
             cli("ingest-otlp", "--file", f"{name}.otlp.json", "--out", f"{name}.json")
         cli("validate", "baseline.json", "failure.json")
         cli("diff", "failure.json", "failure.json")
-        cli("diff", "baseline.json", "failure.json", expected=1)
+        cli("diff", "baseline.json", "failure.json", expected=1, expected_line="NOT IDENTICAL")
         cli("analyze", "failure.json", "--baseline", "baseline.json", "--json-out", "analysis.json")
         report_text = (work / "analysis.json").read_text(encoding="utf-8")
         report = json.loads(report_text)
@@ -119,7 +133,7 @@ print(json.dumps({
         require("PRIVATE BODY" not in report_text, "raw error leaked into report")
         memory_matches = cli("query", "tool-retry-failure", "--explain", "failure.json")
         require("failure:" in memory_matches, "query lost the matching trace")
-        cli("query", "tool-retry-failure", "baseline.json", expected=1)
+        cli("query", "tool-retry-failure", "baseline.json", expected=1, expected_line="no matches")
         if extra == "cypher":
             require(cli("query", "tool-retry-failure", "--backend", "ladybug", "--explain", "failure.json")
                     == memory_matches, "backend match order or explanation differs")
