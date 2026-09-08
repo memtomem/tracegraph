@@ -15,6 +15,8 @@ It is **not** a checkpointer — a graph-backed `BaseCheckpointSaver` already ex
 tracegraph is the read-path *analysis* layer. See [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md)
 for the full rationale and competitive landscape. Korean readers can start with
 [`docs/USAGE_KO.md`](docs/USAGE_KO.md).
+Current delivery evidence, known limitations, and next work are maintained in
+[`docs/HANDOFF.md`](docs/HANDOFF.md).
 
 ## Design commitment: causality is never faked
 
@@ -222,6 +224,12 @@ uv sync                    # core only
 uv sync --extra cypher     # include the optional LadybugDB backend
 uv run pytest              # headless
 ```
+
+CI also builds the wheel and installs it with locked runtime dependencies in fresh
+core and Cypher environments. `scripts/verify_wheel.py` exercises the installed CLI
+outside the checkout, checks candidate golden bytes and baseline diagnosis, and verifies
+the optional-backend boundary and parity. See the [handoff runbook](docs/HANDOFF.md)
+for local reproduction and the distinction between local checks and remote/server evidence.
 
 The optional Cypher accelerator (`tracegraph[cypher]`, LadybugDB) is **not** required for the
 core; `explain` and `query` can opt into it with `--backend ladybug`. Its tests are marked

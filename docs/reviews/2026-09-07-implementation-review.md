@@ -1,5 +1,9 @@
 # Tracegraph 현재 구현 종합 리뷰
 
+> 이 문서는 기준 SHA의 원검토 및 당시 개선 기록이다. F-01~10은 11절에서 해결됐다.
+> 2026-09-08 CI import 문제와 후속 wheel 검증, 현재 전달 상태는
+> [HANDOFF](../HANDOFF.md)에 기록한다. 아래의 과거 재현·미실행 상태를 현재 상태로 재사용하지 않는다.
+
 - 검토일: 2026-09-07 (Asia/Seoul)
 - 기준: `e1a4d44aad5dcd5da736d75f48974173241422e6`, 로컬 브랜치 `tracegraph-mvp`
 - 범위: 전체 제품 코드 20개 Python 모듈, 관련 테스트·fixture, CLI, 공개 JSON 계약, 예제, 문서, 빌드 설정, 두 GitHub Actions workflow

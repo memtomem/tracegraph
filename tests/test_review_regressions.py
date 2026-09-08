@@ -1,6 +1,7 @@
 """Reproductions for the September implementation review, F01–F09."""
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import sqlite3
@@ -117,7 +118,7 @@ def test_sqlite_failed_ingestion_preserves_source(tmp_path, wal):
 
 def test_readonly_live_wal_checkpoint_snapshot(tmp_path):
     from langgraph.checkpoint.sqlite import SqliteSaver
-    from examples.tiny_agent import run
+    from tiny_agent import run
     path = tmp_path / "db.sqlite"
     with SqliteSaver.from_conn_string(str(path)) as saver:
         run(saver, "thread", "hello")
@@ -264,7 +265,12 @@ def test_comparison_schema_rejects_malformed_members():
 
 
 def test_e2e_report_assertions_reject_wrong_trace_baseline_and_body(tmp_path):
-    from scripts.verify_phoenix_syncmill_e2e import _verify_analysis, E2EFailure
+    script = Path(__file__).resolve().parents[1] / "scripts" / "verify_phoenix_syncmill_e2e.py"
+    spec = importlib.util.spec_from_file_location("phoenix_e2e_verifier", script)
+    assert spec is not None and spec.loader is not None
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    _verify_analysis, E2EFailure = verifier._verify_analysis, verifier.E2EFailure
     from tracegraph.model import StepKind
     nt = trace(("tool", "retry:tool", "tool"))
     nt.steps[0].kind = nt.steps[2].kind = StepKind.TOOL
