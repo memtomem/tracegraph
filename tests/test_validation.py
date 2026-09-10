@@ -254,3 +254,60 @@ def test_normalize_derives_trace_status_from_steps():
     nt = normalize(raw)
     assert nt.trace.status is StepStatus.ERROR
     validate_normalized(nt)  # the derived status passes its own consistency check
+
+
+def test_from_obj_never_leaks_type_error_on_unserializable_payload():
+    """from_obj documents "raises only ValueError"; the v1 migration leaked TypeError.
+
+    The migration deep-copied through a JSON round-trip, which raises TypeError on any value
+    json cannot serialize. TypeError is neither OSError nor ValueError, so it escaped every
+    load-boundary handler and crashed the command with a raw traceback. from_obj takes an
+    *already-parsed* payload, so a caller can legitimately hand it in-memory objects.
+    """
+    def v1(trace_body):
+        return {"schema_version": 1, "trace": trace_body}
+
+    # A value json can't serialize, in a field the model ignores: the payload is otherwise
+    # a valid trace, so it must load — previously it raised TypeError during migration.
+    loaded = artifact.from_obj(
+        v1({
+            "trace": {"trace_id": "t", "source_kind": "x"},
+            "steps": [],
+            "edges": [],
+            "junk": {1, 2},
+        })
+    )
+    assert loaded.trace.trace_id == "t"
+
+    # The same unserializable value in a field the model *does* read is bad input, and must
+    # surface as ValueError rather than TypeError.
+    with pytest.raises(ValueError):
+        artifact.from_obj(
+            v1({"trace": {"trace_id": "t", "source_kind": "x"}, "steps": {1, 2}, "edges": []})
+        )
+
+
+def test_tree_cycle_error_names_the_lowest_seq_step_deterministically():
+    """The message used to name a hash-order member of the cycle, so it varied per run."""
+    steps = [
+        Step(step_id="a", trace_id="t", seq=0),
+        Step(step_id="b", trace_id="t", seq=1),
+        Step(step_id="c", trace_id="t", seq=2),
+    ]
+    nt = normalize(
+        RawTrace(
+            trace=Trace(trace_id="t", source_kind="x"),
+            steps=steps,
+            causal_edges=[
+                Edge(type=EdgeType.CAUSED_BY, src="b", dst="a"),
+                Edge(type=EdgeType.CAUSED_BY, src="c", dst="a"),
+            ],
+        )
+    )
+    nt.edges = [e for e in nt.edges if e.type is not EdgeType.TREE_PARENT] + [
+        Edge(type=EdgeType.TREE_PARENT, src="b", dst="c"),
+        Edge(type=EdgeType.TREE_PARENT, src="c", dst="b"),
+    ]
+    with pytest.raises(ValueError) as excinfo:
+        validate_tree(nt)
+    assert "'b'" in str(excinfo.value), str(excinfo.value)

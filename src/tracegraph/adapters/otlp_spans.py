@@ -208,7 +208,15 @@ def _iso_ts(start_nano: Any) -> str | None:
         nanos = int(start_nano)
     except (TypeError, ValueError):
         return None
-    return datetime.fromtimestamp(nanos / 1e9, tz=timezone.utc).isoformat()
+    # Exact integer arithmetic instead of nanos / 1e9. datetime resolves microseconds, so
+    # this rounds nanoseconds to the nearest one — the same value the float path produces at
+    # present-day epochs, where float64's error (~0.12us) stays well inside half a microsecond.
+    # That margin is a property of the current epoch, not of the code: past ~year 2400 a
+    # float64 second count can no longer round-trip microseconds, and the timestamp would
+    # start landing on a neighbouring microsecond. Integer math has no such horizon.
+    seconds, microseconds = divmod((nanos + 500) // 1000, 1_000_000)
+    moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return moment.replace(microsecond=microseconds).isoformat()
 
 
 def _int_attr(attrs: dict[str, Any], *names: str) -> int | None:
@@ -508,8 +516,18 @@ class OTLPSpanAdapter:
             grouped: dict[str, list[dict]] = {}
             for span in _iter_spans(self._doc):
                 tid = _first(span, "traceId", "trace_id")
-                if tid is not None:
-                    grouped.setdefault(tid, []).append(span)
+                if tid is None:
+                    # Skipping it would drop the span from every trace with no error, and
+                    # its children would then fail with a misleading "parent not in trace"
+                    # message pointing at the wrong span. A missing spanId already raises;
+                    # a missing traceId is the same class of corrupt export.
+                    sid = _first(span, "spanId", "span_id")
+                    raise ValueError(
+                        f"span {sid!r} has no traceId; the export is partial or corrupt"
+                        if sid is not None
+                        else "a span has neither traceId nor spanId; the export is corrupt"
+                    )
+                grouped.setdefault(tid, []).append(span)
             self._spans_by_trace = grouped
         return self._spans_by_trace
 

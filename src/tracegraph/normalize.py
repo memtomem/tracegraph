@@ -72,6 +72,23 @@ def validate_raw(raw: RawTrace) -> None:
     _check_caused_by(raw.steps_by_id(), raw.causal_edges)
 
 
+def validate_structure(nt: NormalizedTrace) -> None:
+    """Assert a :class:`NormalizedTrace` is structurally sound, raising ``ValueError``.
+
+    The subset of :func:`validate_normalized` that every *reader* depends on: unique step ids,
+    a well-formed raw ``CAUSED_BY`` layer (known endpoints, cause precedes effect) and a
+    ``TREE_PARENT`` forest. Analyses index steps by id and rely on ``seq`` ordering to walk
+    causes in one pass, so on a malformed trace they would otherwise fail with a raw
+    ``KeyError`` — neither ``OSError`` nor ``ValueError``, and therefore straight past every
+    load-boundary handler. This is the cheap check a library entry point can afford; it
+    deliberately does *not* re-derive the artifact, so a caller holding a consistent but
+    non-canonical trace (an appended step, say) can still analyze it.
+    """
+    _check_steps(nt.trace.trace_id, nt.steps)
+    _check_caused_by(nt.steps_by_id(), nt.edges_of(EdgeType.CAUSED_BY))
+    validate_tree(nt)
+
+
 def validate_normalized(nt: NormalizedTrace) -> None:
     """Validate a :class:`NormalizedTrace` end to end: raw layer **and** that the whole
     artifact is *exactly* what :func:`normalize` would produce from its raw layer.
@@ -84,9 +101,7 @@ def validate_normalized(nt: NormalizedTrace) -> None:
     on the next save. Rejecting here keeps every loader (InMemoryStore, LadybugStore, future
     caches) honest about "the JSON is what normalize() produces, full stop."
     """
-    _check_steps(nt.trace.trace_id, nt.steps)
-    _check_caused_by(nt.steps_by_id(), nt.edges_of(EdgeType.CAUSED_BY))
-    validate_tree(nt)
+    validate_structure(nt)
 
     # The trace header is part of the system of record: a stored status that disagrees with
     # the steps would let a "clean" artifact hide a failed run. normalize() derives it, so an
@@ -205,6 +220,7 @@ def validate_tree(nt: NormalizedTrace) -> None:
     references an unknown step, or following parents reveals a cycle.
     """
     ids = {s.step_id for s in nt.steps}
+    seq_of = {s.step_id: s.seq for s in nt.steps}
     parent_of: dict[str, str] = {}
     for e in nt.edges_of(EdgeType.TREE_PARENT):
         if e.src not in ids or e.dst not in ids:
@@ -216,7 +232,10 @@ def validate_tree(nt: NormalizedTrace) -> None:
     # Cycle check: walking parents from any node must terminate at a root. Nodes on an
     # already-proven-acyclic path are skipped, keeping the whole check O(n) overall.
     proven: set[str] = set()
-    for start in ids:
+    # Iterate steps in canonical (seq, step_id) order, not set order: which member of a cycle
+    # the error names would otherwise vary with PYTHONHASHSEED, making the message — and any
+    # test or bug report quoting it — irreproducible. The raise/no-raise decision is unaffected.
+    for start in sorted(ids, key=lambda sid: (seq_of[sid], sid)):
         path: list[str] = []
         on_path: set[str] = set()
         cur: str | None = start

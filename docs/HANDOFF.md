@@ -1,5 +1,59 @@
 # Tracegraph handoff
 
+## 현재 전달 상태 — 2026-09-10 (Asia/Seoul)
+
+- 기준 HEAD: `0d5091c`, 브랜치 `tracegraph-mvp`. 전체 코드 리뷰 후 확인된 결함을 수정했다.
+- 이번 범위: 리뷰에서 재현된 correctness 결함(Tier 1), 회귀 테스트, lint gate·패키징 위생.
+- 공개 계약을 바꾸는 항목(Tier 2)은 **수행하지 않았다**. 아래 "남은 결정 필요 항목"을 참조한다.
+
+### 수정한 결함
+
+| 위치 | 결함 |
+| --- | --- |
+| `analysis/diagnose.py` | preset 간 중복 제거가 step tuple만 사용해 `tool-failure`/`error` 발견이 사라지고 `pattern_count_deltas`가 왜곡됐다. 키를 `(pattern_id, match)`로 바꿨다. |
+| `analysis/diagnose.py` | 음수 `wall_duration_ms`, 부분 커버리지, 파싱 불가 `total_cost`를 조용히 흡수했다. 이제 값을 보류하고 `warnings`로 공개한다. |
+| `analysis/diagnose.py` | redaction 경고가 보고서에 도달하지 않은 이름 때문에도 발생했다. 완성된 보고서에 alias가 실제로 있을 때만 공개한다. |
+| `analysis/diagnose.py` | `analyze()`가 검증되지 않은 trace에서 `KeyError`를 냈다. `validate_structure()`로 `ValueError`를 보장한다. |
+| `analysis/ahu.py` | root에서 도달 불가능한 component를 조용히 버려, 서로 다른 trace가 `identical`로 보고됐다. 이제 `ValueError`다. 미사용 `_render`도 삭제했다. |
+| `cli.py` | `explain`/`query`가 대괄호를 포함한 이름에서 `MarkupError`로 죽고, `inspect`는 이름·오류 텍스트를 조용히 삭제했다. 모든 경로를 `escape()`한다. |
+| `cli.py` | `--json-out`/`--save-artifact` 대상이 쓰기 불가일 때 raw traceback을 냈다. 이제 exit 2의 usage error다. |
+| `cli.py` | `inspect` 트리 정렬이 seq 동률에서 hash 순서였다. 정규 `(seq, step_id)` 키로 바꿨다. |
+| `artifact.py` | `from_obj`가 v1 migration의 JSON round-trip 때문에 `TypeError`를 냈다. `copy.deepcopy`로 대체했다. |
+| `adapters/otlp_spans.py` | `traceId` 없는 span을 조용히 버려 자식 span이 잘못된 오류를 냈다. 이제 거부한다. 타임스탬프 변환은 정수 연산으로 바꿨다(현재 epoch에서 출력 동일). |
+| `adapters/langgraph_checkpoint.py` | subgraph entry parent 선택이 `saver.list()` 페이징 순서에 의존했다. chronological 순서로 고정했다. |
+| `store/ladybug.py` | 호출자의 `Trace`를 참조로 보관해 `InMemoryStore`와 갈렸다. deep-copy로 맞췄다. `COMMIT`을 `try` 안으로 옮기고 `QueryResult`를 닫는다. |
+| `normalize.py` | TREE_PARENT cycle 오류 메시지가 hash 순서에 의존했다. 정규 순서로 고정했다. |
+
+### 검증 증거
+
+환경: macOS/arm64, Python 3.12.11.
+
+| 검증 | 명령 | 결과 |
+| --- | --- | --- |
+| 전체 테스트 | `uv run --no-sync pytest -q` | **469 passed** (기존 449 + 신규 20) |
+| 성능 guard | `uv run --no-sync pytest -q -m perf` | **4 passed** |
+| 회귀 테스트 판별력 | 신규 테스트를 수정 전 소스에 실행 | **17 failed** (나머지 3개는 기존 동작의 커버리지 보강) |
+| artifact 바이트 불변 | fixture 13개를 adapter로 재수집해 SHA-256 비교 | **전부 동일**, canonical form도 동일 |
+| 보고서 변화 | 동일 fixture의 analysis report 비교 | 5개에서 이전에 삼켜졌던 `error` finding 1건씩 **추가**, 삭제·경고 변화 없음 |
+| lint | `uvx ruff@0.14.2 check src tests scripts examples` | **All checks passed** |
+| 설치된 wheel | core wheel 환경에서 `scripts/verify_wheel.py --extra core` | **PASS**, `candidate_golden: byte-identical` |
+
+원격 CI와 실제 Phoenix + SyncMill E2E는 이번에도 **미실행**이다. 로컬 통과를 원격 성공으로 표기하지 않는다.
+
+### 남은 결정 필요 항목 (Tier 2 — 공개 계약 변경)
+
+1. **Phoenix 타임스탬프**: naive ISO를 로컬 타임존으로 해석해 `artifact_digest`가 기계마다 달라진다
+   (`TZ=Asia/Seoul`과 UTC CI가 9시간 차이). UTC로 고정하면 digest가 바뀌므로 fixture 재생성이 필요하다.
+   숫자 타임스탬프도 나노초로 가정하며 하한 검증이 없다.
+2. **TREE_PARENT 선택**: 가장 이른 원인을 고르므로 `SPAN_LINK`가 containment parent를 이긴다.
+   `EdgeOrigin` 우선순위를 도입하면 link를 가진 모든 artifact의 derived layer가 바뀐다.
+3. **privacy 기본값**: OTLP `include_error_messages`의 기본값을 `False`로 바꿀지, `--redact-errors`
+   옵션을 추가할지. 이번에는 README의 범위 설명만 정정했다.
+4. **review-candidates 스키마**: candidate 수준이 `additionalProperties: true`라 body 필드가 v1으로 검증된다.
+5. **`phoenix` 종료 코드**: 같은 환경 실패에 `doctor`는 1, `diagnose`는 2를 쓴다.
+6. **LICENSE 부재**: 배포용으로 패키징되어 있으나 라이선스가 없다. 라이선스 선택은 소유자의 결정이다.
+
+
 ## 현재 전달 상태 — 2026-09-08 (Asia/Seoul)
 
 - 기준 HEAD: `d048f400fdd39bb37c9608e45ee5931cba058b46`, 브랜치 `tracegraph-mvp`.

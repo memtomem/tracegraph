@@ -59,6 +59,25 @@ def _roots(nt: NormalizedTrace, children: dict[str, list[str]]) -> list[str]:
     return [s.step_id for s in nt.steps if s.step_id not in has_parent]
 
 
+def _require_full_coverage(covered: dict[str, object], nt: NormalizedTrace, side: str) -> None:
+    """Reject a derived layer whose nodes are not all reachable from a root.
+
+    ``_roots`` treats "has no TREE_PARENT edge" as "is a root", so a cycle in the derived
+    layer (or an edge to a missing step) leaves a whole component with no root and therefore
+    unvisited. Left unchecked, those nodes never enter the canon table and the comparison
+    silently runs on a *subset* of the tree — two traces can then be reported identical while
+    one of them contains an entire component the other lacks. Silent truncation is exactly
+    what this project refuses to do, so this is an error, not a smaller answer.
+    """
+    if len(covered) != len(nt.steps):
+        missing = sorted({s.step_id for s in nt.steps} - set(covered))
+        raise ValueError(
+            f"{side}: {len(missing)} step(s) are unreachable from any TREE_PARENT root "
+            f"(first: {missing[0]!r}); the derived layer is not a forest, so a structural "
+            "comparison would silently ignore them. Run validate_tree() on the artifact."
+        )
+
+
 def _compare(left: Canon, right: Canon) -> int:
     # Tuple-compatible lexical order without Python's recursive tuple comparison.
     stack = [(left, right)]
@@ -115,33 +134,13 @@ def _subtree_canons(
     return canon
 
 
-def _render(canon: Canon) -> str:
-    """Render a public canonical tuple iteratively, with output-linear string assembly."""
-    parts = []
-    stack = [canon]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, str):
-            parts.append(item)
-            continue
-        name, kids = item
-        parts.append(name or "·")
-        if kids:
-            parts.append("(")
-            stack.append(")")
-            for i in range(len(kids) - 1, -1, -1):
-                stack.append(kids[i])
-                if i:
-                    stack.append(", ")
-    return "".join(parts)
-
-
 def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
     """Sorted nested root tuples; use is_isomorphic for recursion-safe deep equality."""
     children = _children(nt)
     steps = nt.steps_by_id()
     roots = _roots(nt, children)
     canon = _subtree_canons(steps, children, roots, label)
+    _require_full_coverage(canon, nt, "trace")
     return tuple(sorted((canon[r] for r in roots), key=cmp_to_key(_compare)))
 
 
@@ -151,6 +150,8 @@ def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = defau
     ra, rb = _roots(a, ca), _roots(b, cb)
     aa = _intern(a.steps_by_id(), ca, ra, label, table)
     bb = _intern(b.steps_by_id(), cb, rb, label, table)
+    _require_full_coverage(aa, a, "A")
+    _require_full_coverage(bb, b, "B")
     return sorted(aa[r] for r in ra) == sorted(bb[r] for r in rb)
 
 
@@ -178,6 +179,8 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
     table = {}
     canA = _intern(sa, ca, ra, label, table)
     canB = _intern(sb, cb, rb, label, table)
+    _require_full_coverage(canA, a, "A")
+    _require_full_coverage(canB, b, "B")
     show = display_label or label
 
     def render(node, steps, children):

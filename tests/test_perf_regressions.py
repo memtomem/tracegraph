@@ -112,5 +112,5 @@ def test_deep_diff_scaling():
             assert not diff(a, b).identical
             samples.append(time.perf_counter() - start)
         timings.append(median(samples))
-    for before, after in zip(timings, timings[1:]):
+    for before, after in zip(timings, timings[1:], strict=False):
         assert after <= 3.5 * before + 0.05, timings

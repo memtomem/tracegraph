@@ -8,6 +8,7 @@ always rebuildable from it. Parquet is a future option; JSON keeps Phase 0 borin
 
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import re
@@ -29,7 +30,13 @@ def dumps(nt: NormalizedTrace) -> str:
 
 def _migrate_v1(trace_payload: dict) -> dict:
     """Add only v2 evidence metadata; never reinterpret legacy causal semantics."""
-    migrated = json.loads(json.dumps(trace_payload))
+    # copy.deepcopy, not a JSON round-trip: from_obj accepts an *already-parsed* payload, which
+    # a caller may have built in memory rather than read from a file. A JSON round-trip raises
+    # TypeError on any value json can't serialize (a set, a datetime), and TypeError is neither
+    # OSError nor ValueError — it would escape every load-boundary handler and crash the
+    # command, breaking from_obj's documented "raises only ValueError" contract. deepcopy
+    # copies anything; the model validation below is what rejects values that aren't valid.
+    migrated = copy.deepcopy(trace_payload)
     header = migrated.get("trace")
     if isinstance(header, dict):
         header.setdefault("causal_fidelity", "legacy_unknown")

@@ -562,7 +562,8 @@ def test_upsert_nodes_batch_is_atomic_on_duplicate_key() -> None:
     store.init_schema()
     try:
         dup = [nt.steps[0], nt.steps[1], nt.steps[0]]  # duplicate primary key
-        with pytest.raises(Exception):
+        # noqa: B017 - the engine's primary-key violation type is not part of its public API
+        with pytest.raises(Exception):  # noqa: B017
             store.upsert_nodes(dup)
         assert store._load_all_steps() == []
     finally:
@@ -588,7 +589,7 @@ def test_upsert_edges_mixed_batch_is_atomic_on_failure() -> None:
             pass
 
         object.__setattr__(bad_caused, "origin", _BadOrigin())  # frozen model bypass
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 - engine-defined parameter-binding error
             store.upsert_edges([*good_belongs, bad_caused])
         res = store._conn.execute("MATCH ()-[e:BELONGS_TO]->() RETURN count(e)")
         assert res.get_next() == [0], "earlier edge types leaked past a failed batch"
@@ -687,3 +688,21 @@ def test_constructor_closes_database_when_connection_fails(monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="connection construction failed"):
         LadybugStore()
     assert closed == [True], "Database leaked when Connection() raised"
+
+
+def test_from_trace_does_not_alias_the_callers_trace_header() -> None:
+    """LadybugStore held the caller's Trace by reference while InMemoryStore deep-copied it.
+
+    A later mutation of the input therefore changed what ``trace()`` returned, while the
+    persisted Trace row still held the original values — the store disagreed with its own
+    database about the same trace, and the two backends disagreed with each other.
+    """
+    nt = _erroring_tool_trace("ALIAS")
+    ladybug_store = LadybugStore.from_trace(nt)
+    memory_store = InMemoryStore.from_trace(nt)
+    try:
+        nt.trace.source_kind = "MUTATED"
+        assert ladybug_store.trace().trace.source_kind == "x"
+        assert memory_store.trace().trace.source_kind == "x"
+    finally:
+        ladybug_store.close()

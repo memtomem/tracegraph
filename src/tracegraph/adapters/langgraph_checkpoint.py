@@ -310,7 +310,15 @@ class LangGraphCheckpointAdapter:
     ) -> dict[str, list[_CheckpointKey]]:
         entry_parent_by_ns: dict[str, _CheckpointKey] = {}
         terminal_step_by_ns: dict[str, str] = {}
-        for step_id, key in key_by_step_id.items():
+        # Chronological order, not saver.list() order. Everything else in this method ranks by
+        # chrono_rank; this loop used raw dict order, so which cross-namespace parent counted
+        # as a subgraph's entry point depended on how the checkpointer happened to page (it
+        # yields newest-first, making it the *last* entry). For a namespace entered once the
+        # result is unchanged; for one re-entered by a loop, the entry is now the first
+        # chronological entry rather than an artifact of paging.
+        for step_id, key in sorted(
+            key_by_step_id.items(), key=lambda item: (chrono_rank[item[0]], item[0])
+        ):
             ns, _ = key
             if ns == _ROOT_NS:
                 continue
