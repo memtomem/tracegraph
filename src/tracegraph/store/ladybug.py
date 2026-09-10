@@ -161,7 +161,11 @@ class LadybugStore:
         store = cls(path=path)
         try:
             store.init_schema()
-            store._trace = nt.trace
+            # Deep-copy the header, matching InMemoryStore.from_trace. Holding the caller's
+            # object by reference let a later mutation of the input change what trace()
+            # returns while the persisted Trace row still held the original values, so the
+            # store and its own database disagreed about the same trace.
+            store._trace = nt.trace.model_copy(deep=True)
             store._insert_trace(nt.trace)
             store.upsert_nodes(nt.steps)
             store.upsert_edges(nt.edges)
@@ -227,10 +231,13 @@ class LadybugStore:
         try:
             for edge_type, batch in by_type.items():
                 self._insert_edge_batch(edge_type, batch)
+            # COMMIT belongs inside the try: a failing COMMIT outside it would leave the
+            # transaction open on this connection, and every later execute() on the store
+            # would silently run inside that dangling transaction.
+            self._conn.execute("COMMIT")
         except BaseException:
             self._conn.execute("ROLLBACK")
             raise
-        self._conn.execute("COMMIT")
         self._causes_cache = None
         self._trace_cache = None
 
@@ -481,8 +488,18 @@ def _step_from_row(row: list[Any]) -> Step:
 
 
 def _collect(result: Any) -> list[list[Any]]:
-    """Drain a Ladybug QueryResult into a plain list of rows."""
+    """Drain a Ladybug QueryResult into a plain list of rows, then release it.
+
+    Every read path funnels through here, so leaving the result objects to the garbage
+    collector accumulated one live handle per query for the lifetime of the store — visible
+    on a directory sweep, where a single store answers many ancestors()/find_matches() calls.
+    """
     rows: list[list[Any]] = []
-    while result.has_next():
-        rows.append(result.get_next())
+    try:
+        while result.has_next():
+            rows.append(result.get_next())
+    finally:
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
     return rows

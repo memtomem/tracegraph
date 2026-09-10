@@ -663,10 +663,14 @@ def _search_with_backend(
 
 
 def _label(step) -> str:
-    base = step.name or step.kind.value
+    # escape() both producer-controlled strings. Span names and error text routinely contain
+    # square brackets ("tool[0]", "[Errno 2] ..."), which Rich reads as markup: it would strip
+    # them from the rendered name, so the operator silently sees a *wrong* name or error
+    # rather than a mangled one. Every other render path in this module already escapes.
+    base = escape(step.name or step.kind.value)
     suffix = "  ⚠ lossy-projection" if step.projection_lossy else ""
     if step.status is StepStatus.ERROR:
-        return f"[bold red]{step.seq}: {base}  ✗ {step.error_msg or 'error'}[/]{suffix}"
+        return f"[bold red]{step.seq}: {base}  ✗ {escape(step.error_msg or 'error')}[/]{suffix}"
     return f"[green]{step.seq}: {base}[/]{suffix}"
 
 
@@ -676,7 +680,12 @@ def _render_tree(nt: NormalizedTrace) -> None:
         children.setdefault(e.dst, []).append(e.src)
     has_parent = {e.src for e in nt.edges_of(EdgeType.TREE_PARENT)}
     steps = nt.steps_by_id()
-    order = sorted(children.keys() | {s.step_id for s in nt.steps}, key=lambda i: steps[i].seq)
+    # (seq, step_id) — the canonical tie-break used everywhere else. Sorting this *set* by
+    # seq alone left equal-seq steps in hash order, so the rendered tree could differ between
+    # runs under PYTHONHASHSEED randomization.
+    order = sorted(
+        children.keys() | {s.step_id for s in nt.steps}, key=lambda i: (steps[i].seq, i)
+    )
 
     def add_subtree(root_node: Tree, rid: str) -> None:
         # Iterative DFS: a recursive walk overflows on deep-linear traces (one super-step
@@ -686,10 +695,14 @@ def _render_tree(nt: NormalizedTrace) -> None:
         while stack:
             rich_parent, nid = stack.pop()
             branch = rich_parent.add(_label(steps[nid]))
-            for child in sorted(children.get(nid, []), key=lambda i: steps[i].seq, reverse=True):
+            for child in sorted(children.get(nid, []), key=lambda i: (steps[i].seq, i), reverse=True):
                 stack.append((branch, child))
 
-    root_tree = Tree(f"[bold]{nt.trace.trace_id}[/] ({nt.trace.source_kind})")
+    # The header is producer-controlled too: a trace id or source kind containing brackets
+    # would raise MarkupError on an otherwise valid artifact, exactly as the step labels did.
+    root_tree = Tree(
+        f"[bold]{escape(nt.trace.trace_id)}[/] ({escape(nt.trace.source_kind)})"
+    )
     for rid in [i for i in order if i not in has_parent]:
         add_subtree(root_tree, rid)
     console.print(root_tree)
@@ -787,7 +800,7 @@ def analyze_command(
     report = build_analysis(nt, baseline=baseline_nt)
     _render_analysis(report, limit=limit)
     if json_out:
-        save_analysis_report(report, json_out)
+        _save_report(report, json_out)
         console.print(f"\n[green]report[/] → {json_out}")
 
 
@@ -828,10 +841,10 @@ def phoenix_diagnose(
     report = build_analysis(nt, baseline=baseline_nt)
     _render_analysis(report, limit=limit)
     if save_artifact:
-        artifact.save_atomic(nt, save_artifact)
+        _save_artifact(nt, save_artifact)
         console.print(f"\n[green]artifact[/] → {save_artifact}")
     if json_out:
-        save_analysis_report(report, json_out)
+        _save_report(report, json_out)
         console.print(f"[green]report[/] → {json_out}")
 
 
@@ -919,7 +932,7 @@ def validate(
             console.print(f"[bold red]INVALID[/] {path}: {exc}")
             continue
         console.print(
-            f"[green]OK[/] {path}  [dim]{nt.trace.trace_id} · {len(nt.steps)} steps[/]"
+            f"[green]OK[/] {escape(str(path))}  [dim]{escape(nt.trace.trace_id)} · {len(nt.steps)} steps[/]"
         )
 
     if failures:
@@ -959,13 +972,14 @@ def explain(
     finally:
         _close_store(store)
     target = result.target
-    console.print(f"[bold]{target.name or target.kind.value}[/] (step {target.seq}) "
-                  f"[{target.status.value}] {target.error_msg or ''}")
+    # Unescaped, a name or error containing "[...]" raises MarkupError and kills the command.
+    console.print(f"[bold]{escape(target.name or target.kind.value)}[/] (step {target.seq}) "
+                  f"\\[{target.status.value}] {escape(target.error_msg or '')}")
     if not result.chain:
         console.print("[dim]no causes (this is a root step)[/]")
     for s in result.chain:
         flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
-        console.print(f"  ← {s.name or s.source.value} (step {s.seq}){flag}")
+        console.print(f"  ← {escape(s.name or s.source.value)} (step {s.seq}){flag}")
     if result.is_lossy:
         console.print(
             "\n[yellow]Some steps had multiple real causes; the single-parent tree view "
@@ -1067,7 +1081,10 @@ def query(
         traces_by_id = {nt.trace.trace_id: nt for nt in traces}
         steps_maps: dict[str, dict] = {}
         for m in matches:
-            console.print(f"[green]{m.trace_id}[/]: " + " → ".join(m.labels))
+            console.print(
+                f"[green]{escape(m.trace_id)}[/]: "
+                + " → ".join(escape(label) for label in m.labels)
+            )
             if explain:
                 store = stores.get(m.trace_id)
                 if store is None:
@@ -1087,7 +1104,7 @@ def query(
                     flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
                     # Fallback label matches `tracegraph explain` (s.name or s.source.value)
                     # so the two renderings agree for nameless LangGraph checkpoints.
-                    console.print(f"    ← {s.name or s.source.value} (step {s.seq}){flag}")
+                    console.print(f"    ← {escape(s.name or s.source.value)} (step {s.seq}){flag}")
                 # Causal-honesty signal: when the matched effect (or anything in the chain)
                 # has more than one real cause, the single-parent tree projection dropped
                 # at least one. `tracegraph explain` surfaces this same warning — `query
@@ -1159,6 +1176,26 @@ def _distinct_paths(inputs: list[Path], outputs: list[Path]) -> None:
             ):
                 raise typer.BadParameter("output must not overwrite an input or another output")
         seen.append(output)
+
+
+def _save_report(report: AnalysisReport, target: Path) -> None:
+    """Write a JSON report, turning an unwritable destination into a clean usage error.
+
+    The analysis has already run and been rendered by the time we get here, so an
+    unwrapped OSError would replace a completed result with a raw traceback.
+    """
+    try:
+        save_analysis_report(report, target)
+    except OSError as exc:
+        raise typer.BadParameter(f"cannot write report: {_load_reason(exc)}") from exc
+
+
+def _save_artifact(nt: NormalizedTrace, target: Path) -> None:
+    """Write an artifact to an explicit destination, with the same clean-error contract."""
+    try:
+        artifact.save_atomic(nt, target)
+    except OSError as exc:
+        raise typer.BadParameter(f"cannot save artifact: {_load_reason(exc)}") from exc
 
 
 def _save_ingested(nt: NormalizedTrace, target: Path, *, explicit: bool) -> None:

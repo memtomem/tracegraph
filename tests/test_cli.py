@@ -1222,3 +1222,118 @@ def test_bounded_reader_requests_at_most_remaining_allowance(tmp_path, monkeypat
     # 3-byte short reads against a 10-byte limit: allowance shrinks 11 -> 8 -> 5 -> 2,
     # then the 2-byte read tips the total to 11 and the limit rejects.
     assert requested == [11, 8, 5, 2], requested
+
+
+MARKUP_NAME = "tool[/]INJECT[bold red]"
+
+
+def _markup_trace(path):
+    """An artifact whose step names and error text contain Rich markup metacharacters.
+
+    Span names come from producer telemetry, so brackets are ordinary content: "tool[0]",
+    "[Errno 2] No such file". Rich parses them as markup tags — unescaped, that either
+    raises MarkupError (killing the command) or silently deletes the bracketed text from
+    what the operator reads.
+    """
+    steps = [
+        Step(step_id="m0", trace_id="M", seq=0, name=MARKUP_NAME, kind=StepKind.CHAIN),
+        Step(
+            step_id="m1",
+            trace_id="M",
+            seq=1,
+            name=MARKUP_NAME,
+            kind=StepKind.TOOL,
+            status=StepStatus.ERROR,
+            error_msg="boom [bold red]detail[/]",
+        ),
+    ]
+    nt = normalize(
+        RawTrace(
+            trace=Trace(trace_id="M", source_kind="x"),
+            steps=steps,
+            causal_edges=[Edge(type=EdgeType.CAUSED_BY, src="m1", dst="m0")],
+        )
+    )
+    artifact.save(nt, path)
+    return path
+
+
+def test_inspect_does_not_swallow_markup_in_names_or_errors(tmp_path):
+    path = _markup_trace(tmp_path / "M.json")
+    res = runner.invoke(app, ["inspect", str(path)])
+    assert res.exit_code == 0, res.output
+    assert MARKUP_NAME in res.output, res.output
+    assert "boom [bold red]detail[/]" in res.output, res.output
+
+
+def test_explain_does_not_crash_on_markup_in_names(tmp_path):
+    path = _markup_trace(tmp_path / "M.json")
+    res = runner.invoke(app, ["explain", str(path), "m1"])
+    assert res.exit_code == 0, res.output
+    assert MARKUP_NAME in res.output, res.output
+
+
+def test_query_does_not_crash_on_markup_in_labels(tmp_path):
+    path = _markup_trace(tmp_path / "M.json")
+    res = runner.invoke(app, ["query", "tool-failure", str(path)])
+    assert res.exit_code == 0, res.output
+    assert MARKUP_NAME in res.output, res.output
+
+
+def test_analyze_reports_an_unwritable_json_out_as_a_usage_error(tmp_path):
+    """The analysis has already run and rendered by then; a traceback would discard it."""
+    path = _markup_trace(tmp_path / "M.json")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        res = runner.invoke(app, ["analyze", str(path), "--json-out", str(locked / "r.json")])
+        assert res.exit_code == 2, res.output
+        assert "cannot write report" in _panel_text(res.output)
+        assert res.exception is None or isinstance(res.exception, SystemExit)
+    finally:
+        locked.chmod(0o755)
+
+
+def test_ingest_refuses_to_overwrite_an_existing_default_output(artifacts, tmp_path, monkeypatch):
+    """README guarantees this; nothing covered it."""
+    a_json, _ = artifacts
+    db = a_json.parent / "trace.db"
+    # A fresh cwd: the fixture already wrote A.json into tmp_path via --out.
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    first = runner.invoke(app, ["ingest", "--sqlite", str(db), "--thread", "A"])
+    assert first.exit_code == 0, first.output
+    again = runner.invoke(app, ["ingest", "--sqlite", str(db), "--thread", "A"])
+    assert again.exit_code == 2, again.output
+    assert "default output exists" in _panel_text(again.output)
+
+
+def test_output_may_not_alias_an_input_artifact(artifacts):
+    """README guarantees outputs cannot alias an input or another output."""
+    a_json, _ = artifacts
+    res = runner.invoke(app, ["analyze", str(a_json), "--json-out", str(a_json)])
+    assert res.exit_code == 2, res.output
+    assert "must not overwrite an input" in _panel_text(res.output)
+
+
+def test_inspect_header_survives_markup_in_trace_id_and_source_kind(tmp_path):
+    """The tree header is producer-controlled too, not just the step labels."""
+    nt = normalize(
+        RawTrace(
+            trace=Trace(trace_id="t[/]x[/]", source_kind="k[bold]z"),
+            steps=[Step(step_id="s0", trace_id="t[/]x[/]", seq=0, name="n")],
+            causal_edges=[],
+        )
+    )
+    path = tmp_path / "hdr.json"
+    artifact.save(nt, path)
+    res = runner.invoke(app, ["inspect", str(path)])
+    assert res.exit_code == 0, res.output
+    assert "t[/]x[/]" in res.output, res.output
+    assert "k[bold]z" in res.output, res.output
+
+    validated = runner.invoke(app, ["validate", str(path)])
+    assert validated.exit_code == 0, validated.output
+    assert "t[/]x[/]" in validated.output, validated.output

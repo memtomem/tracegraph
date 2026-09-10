@@ -24,11 +24,13 @@ correspondence between two genuinely unrelated siblings.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import cmp_to_key
 from typing import Callable
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step
+from tracegraph.normalize import validate_tree
 
 #: How a node is identified for structural comparison. Default = node name, falling back to
 #: kind. Pass ``structure_only`` to compare pure topology (shape) ignoring labels.
@@ -57,6 +59,38 @@ def _children(nt: NormalizedTrace) -> dict[str, list[str]]:
 def _roots(nt: NormalizedTrace, children: dict[str, list[str]]) -> list[str]:
     has_parent = {e.src for e in nt.edges_of(EdgeType.TREE_PARENT)}
     return [s.step_id for s in nt.steps if s.step_id not in has_parent]
+
+
+def _require_forest(nt: NormalizedTrace, side: str) -> None:
+    """Reject a derived layer that is not a forest, *before* walking it.
+
+    ``_roots`` treats "has no TREE_PARENT edge" as "is a root", which makes three malformed
+    shapes dangerous, and only a pre-check catches all of them:
+
+    * a **disconnected** cycle leaves its whole component rootless and therefore unvisited,
+      so the comparison silently ran on a subset — two traces could be reported identical
+      while one held an entire component the other lacked;
+    * a cycle **reachable** from a root (a self-edge, say) is walked forever, so a check
+      placed after traversal never runs at all;
+    * duplicate step ids make any count-based check unreliable.
+
+    ``validate_tree`` already rejects unknown endpoints, multi-parent steps and cycles; a
+    trace that passes it has every node reachable from a root, because following parents is
+    then a terminating walk. Unique ids are checked here since ``validate_tree`` does not.
+    """
+    ids = [step.step_id for step in nt.steps]
+    if len(ids) != len(set(ids)):
+        # One pass, not `ids.count()` per id: rejecting a large malformed trace should not
+        # itself be quadratic.
+        duplicates = sorted(sid for sid, n in Counter(ids).items() if n > 1)
+        raise ValueError(f"{side}: duplicate step_id in trace: {', '.join(duplicates)}")
+    try:
+        validate_tree(nt)
+    except ValueError as exc:
+        raise ValueError(
+            f"{side}: the derived TREE_PARENT layer is not a forest ({exc}), so a structural "
+            "comparison would silently ignore or endlessly revisit part of it."
+        ) from exc
 
 
 def _compare(left: Canon, right: Canon) -> int:
@@ -115,29 +149,9 @@ def _subtree_canons(
     return canon
 
 
-def _render(canon: Canon) -> str:
-    """Render a public canonical tuple iteratively, with output-linear string assembly."""
-    parts = []
-    stack = [canon]
-    while stack:
-        item = stack.pop()
-        if isinstance(item, str):
-            parts.append(item)
-            continue
-        name, kids = item
-        parts.append(name or "·")
-        if kids:
-            parts.append("(")
-            stack.append(")")
-            for i in range(len(kids) - 1, -1, -1):
-                stack.append(kids[i])
-                if i:
-                    stack.append(", ")
-    return "".join(parts)
-
-
 def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
     """Sorted nested root tuples; use is_isomorphic for recursion-safe deep equality."""
+    _require_forest(nt, "trace")
     children = _children(nt)
     steps = nt.steps_by_id()
     roots = _roots(nt, children)
@@ -146,6 +160,8 @@ def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
 
 
 def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label) -> bool:
+    _require_forest(a, "A")
+    _require_forest(b, "B")
     table = {}
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a, ca), _roots(b, cb)
@@ -172,6 +188,8 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
     unmatched subtrees as present-only-in-A / present-only-in-B. Iterative throughout, so it
     handles the deep-linear traces LangGraph produces without overflowing the stack.
     """
+    _require_forest(a, "A")
+    _require_forest(b, "B")
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a, ca), _roots(b, cb)

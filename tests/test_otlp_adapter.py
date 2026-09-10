@@ -349,3 +349,23 @@ def test_collector_jsonl_documents_are_merged():
     adapter = OTLPSpanAdapter.from_json(json.dumps(first) + "\n" + json.dumps(second) + "\n")
     assert adapter.discover() == ["t"]
     assert _caused(adapter.ingest("t")) == {("b", "a")}
+
+
+def test_span_without_trace_id_is_rejected_not_silently_dropped():
+    """A traceId-less span used to vanish; its children then failed with a wrong message."""
+    document = {
+        "resourceSpans": [
+            {
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {"traceId": "t1", "spanId": "root", "name": "agent"},
+                            {"spanId": "orphan", "name": "tool"},
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="no traceId"):
+        OTLPSpanAdapter(document).discover()

@@ -308,25 +308,57 @@ class LangGraphCheckpointAdapter:
         step_id_by_key: dict[_CheckpointKey, str],
         chrono_rank: dict[str, int],
     ) -> dict[str, list[_CheckpointKey]]:
-        entry_parent_by_ns: dict[str, _CheckpointKey] = {}
-        terminal_step_by_ns: dict[str, str] = {}
-        for step_id, key in key_by_step_id.items():
+        # Group each namespace's checkpoints into *invocations*, in chronological order.
+        #
+        # A namespace can be entered more than once (a loop re-running the same subgraph
+        # node). Pairing one entry with one terminal per namespace is then wrong in both
+        # directions: keeping the last entry (which is what raw saver.list() order happened
+        # to give, since it pages newest-first) or the first entry both leave the terminal
+        # belonging to a *different* invocation, and the parent graph's continuation edge for
+        # every other invocation is dropped. So an entry and the terminal it resumes from
+        # must come from the same invocation.
+        #
+        # A step whose parent lies outside the namespace *is* an entry, and so begins a new
+        # invocation; the invocation's terminal is its chronologically last member.
+        members_by_ns: dict[str, list[str]] = {}
+        for step_id, key in sorted(
+            key_by_step_id.items(), key=lambda item: (chrono_rank[item[0]], item[0])
+        ):
             ns, _ = key
-            if ns == _ROOT_NS:
-                continue
-            terminal = terminal_step_by_ns.get(ns)
-            if terminal is None or chrono_rank[terminal] < chrono_rank[step_id]:
-                terminal_step_by_ns[ns] = step_id
-            for parent_key in parent_keys.get(step_id, []):
-                if parent_key[0] != ns:
-                    entry_parent_by_ns.setdefault(ns, parent_key)
+            if ns != _ROOT_NS:
+                members_by_ns.setdefault(ns, []).append(step_id)
 
         exits_by_entry_parent: dict[_CheckpointKey, list[_CheckpointKey]] = {}
-        for ns, entry_parent in entry_parent_by_ns.items():
-            terminal_step = terminal_step_by_ns.get(ns)
-            if terminal_step is None:
-                continue
-            exits_by_entry_parent.setdefault(entry_parent, []).append(key_by_step_id[terminal_step])
+        for ns, member_ids in members_by_ns.items():
+            invocations: list[tuple[_CheckpointKey, list[str]]] = []
+            pending: list[str] = []
+            for step_id in member_ids:
+                # Only a parent *outside and above* this namespace is an entry. A parent in a
+                # descendant namespace is the opposite: the subgraph this namespace launched
+                # handing control back, which continues the invocation already in progress.
+                # Treating that return as a new entry would close the invocation early, and
+                # the parent graph would then resume from a checkpoint before the nested work
+                # instead of after it, dropping that whole execution from the ancestry.
+                entry_parent = next(
+                    (
+                        key
+                        for key in parent_keys.get(step_id, [])
+                        if key[0] != ns and not key[0].startswith(f"{ns}|")
+                    ),
+                    None,
+                )
+                if entry_parent is None:
+                    # Not an entry: it continues the invocation in progress. Anything seen
+                    # before the first entry is held over and joins it.
+                    (invocations[-1][1] if invocations else pending).append(step_id)
+                else:
+                    invocations.append((entry_parent, [*pending, step_id]))
+                    pending = []
+            for entry_parent, members in invocations:
+                terminal = max(members, key=lambda sid: (chrono_rank[sid], sid))
+                exits_by_entry_parent.setdefault(entry_parent, []).append(
+                    key_by_step_id[terminal]
+                )
 
         out: dict[str, list[_CheckpointKey]] = {}
         for step_id, refs in parent_keys.items():

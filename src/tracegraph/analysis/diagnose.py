@@ -18,6 +18,7 @@ from tracegraph import artifact
 from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, build_index, find_matches
 from tracegraph.model import CausalFidelity, EdgeOrigin, EdgeType, NormalizedTrace, Step, StepStatus
+from tracegraph.normalize import validate_structure
 
 REPORT_SCHEMA_VERSION = 2
 _AUTO_PRESETS = (
@@ -117,6 +118,10 @@ class AnalysisReport(BaseModel):
     comparison: ComparisonSummary | None = None
     warnings: list[str] = Field(default_factory=list)
     privacy_profile: str = "safe-v1"
+
+
+#: The exact shape ``_safe`` emits, used to detect aliases that reached the final report.
+_ALIAS = re.compile(r"redacted:[0-9a-f]{64}")
 
 
 def _safe(value: str | None) -> str | None:
@@ -229,14 +234,23 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
 
 
 def _patterns(nt: NormalizedTrace) -> list[PatternFinding]:
+    """Every auto preset's matches, de-duplicated *within* a preset only.
+
+    The key is ``(pattern_id, match)``: two different presets legitimately describe the same
+    steps from different angles (a failing tool step is both ``tool-failure`` and ``error``),
+    and suppressing the later one would silently drop a finding *and* skew
+    ``pattern_count_deltas`` — the delta for a preset would depend on whether an unrelated
+    preset happened to match the same tuple first. A single preset yielding the same match
+    twice is still collapsed.
+    """
     index = build_index(nt)
     steps = index[0]
-    seen: set[tuple[str, ...]] = set()
+    seen: set[tuple[str, tuple[str, ...]]] = set()
     findings: list[PatternFinding] = []
     for name in _AUTO_PRESETS:
         pattern = PRESETS[name]
         for match in find_matches(nt, pattern, index=index):
-            key = tuple(match)
+            key = (name, tuple(match))
             if key in seen:
                 continue
             seen.add(key)
@@ -262,13 +276,74 @@ def _iso(value: str | None) -> datetime | None:
 
 
 def _metrics(nt: NormalizedTrace) -> MetricSummary:
-    starts = [_iso(step.ts) for step in nt.steps]
-    ends = [_iso(step.evidence.end_ts) for step in nt.steps if step.evidence]
-    starts = [value for value in starts if value is not None]
-    ends = [value for value in ends if value is not None]
+    """Metric summary only; see :func:`_metrics_with_notes` for the disclosure notes."""
+    return _metrics_with_notes(nt)[0]
+
+
+def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], bool]:
+    """Summarize observed metrics and report what had to be withheld.
+
+    Every degradation is disclosed rather than absorbed: a wall duration that cannot be
+    trusted becomes ``None`` with a note, and a single unparseable cost withholds the whole
+    total (the same posture the mixed-currency path already takes) instead of silently
+    summing the remainder into an understated figure. "Unavailable", never a wrong number.
+
+    The third element says whether ``wall_duration_ms`` covers every step. A duration built
+    from a subset is a lower bound, which is honest to publish on its own but cannot be
+    subtracted: the unobserved work has unknown length, so a delta computed from it has
+    unknown magnitude *and* unknown sign.
+    """
+    notes: list[str] = []
+    duration_complete = False
+    starts: list[datetime] = []
+    ends: list[datetime] = []
+    reversed_steps = 0
+    for step in nt.steps:
+        start = _iso(step.ts)
+        end = _iso(step.evidence.end_ts) if step.evidence else None
+        if start is not None:
+            starts.append(start)
+        if end is not None:
+            ends.append(end)
+        # A step that ends before it began is internally inconsistent, and the aggregate
+        # envelope hides it: with steps [0s,2s] and [10s,1s] the envelope max(ends)-min(starts)
+        # is a healthy-looking +2s, and the 10s start never appears in the answer at all. Check
+        # each pair on its own, not just the outer bounds.
+        if start is not None and end is not None and end < start:
+            reversed_steps += 1
     wall: float | None = None
     if starts and ends:
         wall = round((max(ends) - min(starts)).total_seconds() * 1000, 6)
+        if reversed_steps:
+            wall = None
+            notes.append(
+                f"wall_duration_ms unavailable: {reversed_steps} step(s) report an end before "
+                "their own start; span timestamps are inconsistent."
+            )
+        elif wall < 0:
+            # An end that precedes every start means the timestamps disagree (clock skew,
+            # a mis-scaled unit, a mislabeled span). A negative duration is not a fact.
+            wall = None
+            notes.append(
+                "wall_duration_ms unavailable: the latest observed end precedes the earliest "
+                "observed start; span timestamps are inconsistent."
+            )
+        else:
+            # Both ends of the span matter. A missing *start* is as distorting as a missing
+            # end: the earliest step may be the one without a usable timestamp, in which case
+            # min(starts) is later than the real beginning and the duration comes out short.
+            total = len(nt.steps)
+            gaps = []
+            if len(starts) < total:
+                gaps.append(f"{len(starts)} of {total} reported a usable start")
+            if len(ends) < total:
+                gaps.append(f"{len(ends)} of {total} reported an end")
+            if gaps:
+                notes.append(
+                    "wall_duration_ms is a lower bound: " + "; ".join(gaps) + "."
+                )
+            else:
+                duration_complete = True
 
     evidence_items = [step.evidence for step in nt.steps if step.evidence]
 
@@ -283,21 +358,33 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
     costs: list[Decimal] = []
     cost_currencies: set[str] = set()
     has_currencyless_cost = False
+    unusable_costs = 0
     for evidence in evidence_items:
         if evidence.total_cost is not None:
             try:
                 parsed = Decimal(evidence.total_cost)
-                if parsed.is_finite() and parsed >= 0:
-                    costs.append(parsed)
-                    if evidence.cost_currency:
-                        cost_currencies.add(evidence.cost_currency)
-                    else:
-                        has_currencyless_cost = True
             except InvalidOperation:
-                pass
+                unusable_costs += 1
+                continue
+            if not (parsed.is_finite() and parsed >= 0):
+                unusable_costs += 1
+                continue
+            costs.append(parsed)
+            if evidence.cost_currency:
+                cost_currencies.add(evidence.cost_currency)
+            else:
+                has_currencyless_cost = True
     ambiguous_cost = len(cost_currencies) > 1 or (
         bool(cost_currencies) and has_currencyless_cost
     )
+    if unusable_costs:
+        # Dropping the bad value and summing the rest would report a confident number that
+        # is knowably too low. Withhold the total and say why.
+        ambiguous_cost = True
+        notes.append(
+            f"total_cost unavailable: {unusable_costs} step(s) reported a cost that is not a "
+            "finite non-negative decimal, so the remaining costs would understate the total."
+        )
     evaluations = [
         EvaluationFinding(
             step_id=step.step_id,
@@ -322,7 +409,7 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
             else None
         ),
         evaluations=evaluations,
-    )
+    ), notes, duration_complete
 
 
 def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, Step]:
@@ -371,7 +458,16 @@ def _comparison(
     *,
     current_patterns: list[PatternFinding],
     current_metrics: MetricSummary,
+    current_duration_complete: bool,
+    notes: list[str] | None = None,
 ) -> ComparisonSummary:
+    """Compare against a baseline. Appends the baseline's own metric disclosures to ``notes``.
+
+    A delta is only as trustworthy as both sides of it, so a baseline whose duration is a
+    lower bound (or whose cost had to be withheld) must say so too — otherwise the report
+    presents a confident metric_delta computed from a number it would not have published
+    on its own.
+    """
     structural = tree_diff(baseline, current, display_label=_display_name)
     table = {}
     before, after = _logical_keys(baseline, table), _logical_keys(current, table)
@@ -408,7 +504,8 @@ def _comparison(
         - sum(item.pattern_id == name for item in before_patterns)
         for name in sorted(pattern_ids)
     }
-    bm, cm = _metrics(baseline), current_metrics
+    bm, baseline_notes, baseline_duration_complete = _metrics_with_notes(baseline)
+    cm = current_metrics
     cost_delta: str | None = None
     if (
         bm.total_cost is not None
@@ -417,6 +514,19 @@ def _comparison(
         and bm.cost_currency == cm.cost_currency
     ):
         cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
+    if notes is not None:
+        notes.extend(f"baseline: {note}" for note in baseline_notes)
+    # A delta between two lower bounds is not a lower bound on the delta. If either side
+    # missed a step, the unobserved work could be longer than the difference, so the number
+    # would be wrong in magnitude and possibly in sign. Withhold it and say why; disclosing
+    # the inputs' incompleteness does not license publishing a confident subtraction of them.
+    durations_comparable = current_duration_complete and baseline_duration_complete
+    if not durations_comparable and None not in (cm.wall_duration_ms, bm.wall_duration_ms):
+        if notes is not None:
+            notes.append(
+                "wall_duration_ms delta unavailable: at least one side's duration covers "
+                "only part of its trace, so the difference has unknown size and sign."
+            )
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
         topology_identical=structural.identical,
@@ -424,7 +534,11 @@ def _comparison(
         behavior_changes=changes,
         pattern_count_deltas=deltas,
         metric_deltas={
-            "wall_duration_ms": _delta(cm.wall_duration_ms, bm.wall_duration_ms),
+            "wall_duration_ms": (
+                _delta(cm.wall_duration_ms, bm.wall_duration_ms)
+                if durations_comparable
+                else None
+            ),
             "prompt_tokens": _delta(cm.prompt_tokens, bm.prompt_tokens),
             "completion_tokens": _delta(cm.completion_tokens, bm.completion_tokens),
             "total_tokens": _delta(cm.total_tokens, bm.total_tokens),
@@ -438,9 +552,15 @@ def _digest(nt: NormalizedTrace) -> str:
 
 
 def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> AnalysisReport:
+    # Analyses index by step id and walk causes in seq order; on a malformed trace that
+    # surfaces as a raw KeyError deep inside a helper. Reject it here as a ValueError so the
+    # library entry point has the same failure contract as artifact.loads().
+    validate_structure(nt)
+    if baseline is not None:
+        validate_structure(baseline)
     primary, propagated = _failures(nt)
     patterns = _patterns(nt)
-    metrics = _metrics(nt)
+    metrics, metric_notes, duration_complete = _metrics_with_notes(nt)
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
@@ -462,6 +582,22 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         warnings.append("Failure candidates are investigation leads. Containment/unknown edges do not prove propagation; explicit causal ancestry is context, not proof of exception propagation.")
     if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):
         warnings.append("Metrics sum observed span values; coverage may be partial and producer aggregates may double count.")
+    # Withheld or partially-covered metrics are disclosed, never silently absorbed. The
+    # comparison is built first because it contributes the baseline's own disclosures: a
+    # delta is only as trustworthy as both sides of it.
+    comparison = (
+        _comparison(
+            nt,
+            baseline,
+            current_patterns=patterns,
+            current_metrics=metrics,
+            current_duration_complete=duration_complete,
+            notes=metric_notes,
+        )
+        if baseline
+        else None
+    )
+    warnings.extend(metric_notes)
     report = AnalysisReport(
         artifact_digest=_digest(nt),
         trace_id=nt.trace.trace_id,
@@ -478,19 +614,11 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         decision_evidence=[
             DecisionEvidenceFinding(**item.model_dump()) for item in nt.trace.decision_evidence
         ],
-        comparison=(
-            _comparison(nt, baseline, current_patterns=patterns, current_metrics=metrics)
-            if baseline
-            else None
-        ),
+        comparison=comparison,
         warnings=warnings,
     )
-    redacted = False
     def clean(value):
-        nonlocal redacted
-        safe = _safe(value)
-        redacted |= safe != value
-        return safe
+        return _safe(value)
 
     report.source_kind = clean(report.source_kind)
     report.metrics.cost_currency = clean(report.metrics.cost_currency)
@@ -506,12 +634,12 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
     if report.comparison:
         for change in report.comparison.behavior_changes:
             change.name = clean(change.name)
-    # Also disclose redaction confined to baseline topology descriptions or logical keys.
-    for trace in (nt, baseline):
-        if trace:
-            for step in trace.steps:
-                clean(step.name)
-    if redacted:
+    # Disclose redaction if and only if an alias actually survives into the report. Deriving
+    # the flag from the finished document (rather than from every clean() call) covers text
+    # that only reaches the report indirectly — baseline topology descriptions and logical
+    # step keys — without raising the warning on names that were never published at all. A
+    # disclosure attached to a report containing zero aliases just teaches readers to skip it.
+    if _ALIAS.search(dumps(report)):
         report.warnings.append("Display text was replaced with deterministic redacted aliases; safe-v1 retains structural identifiers and is not anonymization.")
     return report
 

@@ -61,6 +61,18 @@ tracegraph query tool-failure --backend ladybug A.json B.json   # use the option
 tracegraph export-review-candidates tool-retry-failure *.json -o candidates.json
 ```
 
+Frequently-used options, beyond `--out` / `--json-out`:
+
+| option | commands | effect |
+|---|---|---|
+| `--trace`, `-t` | `ingest-otlp`, `ingest-phoenix`, `analyze` | Pick one trace out of a multi-trace export. |
+| `--error-channel` | `ingest` | LangGraph state channel that signals a step error (default `error`). |
+| `--baseline`, `--baseline-trace` | `analyze`, `phoenix diagnose` | Compare against a known-good run, and pick its trace out of a multi-trace file. |
+| `--limit`, `-l` | `analyze`, `phoenix diagnose`, `query` | Cap how many failure candidates or matches are rendered (default 3 for diagnosis). |
+| `--explain` | `query` | Print each match's raw causal chain back to its root cause. |
+| `--structure` | `diff` | Compare topology only, ignoring labels. |
+| `--backend` | `query` | Use the optional LadybugDB Cypher accelerator instead of the pure-Python matcher. |
+
 ## Phoenix-first workflow
 
 Phoenix remains the trace UI, evaluation, and operational-observability layer. tracegraph
@@ -111,11 +123,21 @@ upgrade and contract-verification procedure, and the
 [Phoenix + SyncMill operational E2E runbook](docs/phoenix-syncmill-e2e.md) for the scheduled
 real-server verification boundary.
 
-The default `safe-v1` privacy contract retains structural IDs, identifier-shaped operation names,
-kind/status/time, tokens, explicit cost, and annotation name/label/score. It drops prompts,
-inputs/outputs, messages, tool arguments/results, retrieved documents, arbitrary metadata,
-raw errors and stacktraces, annotation explanations, session/user/project identifiers, and
-credentials. Missing metrics are reported as `unavailable`, never as zero.
+The default `safe-v1` privacy contract governs **analysis reports** (`analyze`,
+`phoenix diagnose`, `--json-out`). It retains structural IDs, identifier-shaped operation
+names, kind/status/time, tokens, explicit cost, and annotation name/label/score. It drops
+prompts, inputs/outputs, messages, tool arguments/results, retrieved documents, arbitrary
+metadata, raw errors and stacktraces, annotation explanations, session/user/project
+identifiers, and credentials. Missing metrics are reported as `unavailable`, never as zero.
+
+**Artifacts are not reports.** Phoenix ingestion applies the same filtering at the source
+(identifier-shaped span names only, error messages dropped), but the OTLP and LangGraph
+adapters record the span name and error text they were given: OTLP keeps `status.message`
+and exception messages, and LangGraph stringifies the configured error state channel. Those
+values reach the artifact on disk and are printed verbatim by `inspect` and `explain`. If
+your producer puts prompt text or secrets in span names or error strings, treat artifacts
+from those two adapters as sensitive, or ingest through Phoenix. See "Analysis and output
+guarantees" below.
 
 For link-preserving analysis, use the optional Collector fan-out example at
 [`examples/otel-collector-phoenix-tracegraph.yaml`](examples/otel-collector-phoenix-tracegraph.yaml).
@@ -247,8 +269,13 @@ with a 30-second deadline, preserving source data, schema, and journal mode. Liv
 readers can still participate in SQLite's WAL/shared-memory coordination.
 
 `safe-v1` reports retain identifier-shaped display names and replace other display text
-with deterministic SHA-256 aliases. Trace/step identifiers remain; this is not anonymization.
-Raw artifact names and bytes are not rewritten for report privacy or matching. Logical
+with deterministic SHA-256 aliases, and disclose in `warnings` when an alias actually reached
+the report. Trace/step identifiers remain; this is not anonymization.
+Raw artifact names and bytes are not rewritten for report privacy or matching, so the
+artifact — unlike the report — can still carry whatever the producer put in a span name or
+error message (Phoenix ingestion excepted; it filters at the source).
+`export-review-candidates` output is not passed through the report redactor: its `tool_key`
+is the raw endpoint span name. Logical
 comparison keys are JSON-encoded typed paths; consumers should treat them as opaque strings.
 Containment and unknown edges preserve all error investigation candidates, deeper first.
 Explicit causal ancestry supplies context, not proof that an exception propagated.
@@ -259,7 +286,9 @@ LangGraph observes the configured error state channel; native pending-write exce
 are not yet ingested. Missing observed errors do not prove success. Link preservation
 means valid in-trace links only. Structural diff compares the derived tree and discloses
 lossy step counts. Metrics sum available span observations: partial coverage and producer
-aggregation can undercount or double count. File input has a size limit, but stdin/Phoenix
+aggregation can undercount or double count. Coverage gaps are disclosed rather than absorbed
+— a wall duration derived from a subset of steps says so, one whose end precedes its start is
+withheld, and a single unparseable cost withholds the whole total instead of understating it. File input has a size limit, but stdin/Phoenix
 subprocess output and query materialization are not streaming memory guarantees.
 
 Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;

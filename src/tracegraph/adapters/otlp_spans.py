@@ -508,8 +508,18 @@ class OTLPSpanAdapter:
             grouped: dict[str, list[dict]] = {}
             for span in _iter_spans(self._doc):
                 tid = _first(span, "traceId", "trace_id")
-                if tid is not None:
-                    grouped.setdefault(tid, []).append(span)
+                if tid is None:
+                    # Skipping it would drop the span from every trace with no error, and
+                    # its children would then fail with a misleading "parent not in trace"
+                    # message pointing at the wrong span. A missing spanId already raises;
+                    # a missing traceId is the same class of corrupt export.
+                    sid = _first(span, "spanId", "span_id")
+                    raise ValueError(
+                        f"span {sid!r} has no traceId; the export is partial or corrupt"
+                        if sid is not None
+                        else "a span has neither traceId nor spanId; the export is corrupt"
+                    )
+                grouped.setdefault(tid, []).append(span)
             self._spans_by_trace = grouped
         return self._spans_by_trace
 

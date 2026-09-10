@@ -1,6 +1,8 @@
 """Rooted-tree (AHU) isomorphism + structural diff."""
 
-from tracegraph.analysis import diff, is_isomorphic, structure_only
+import pytest
+
+from tracegraph.analysis import canonical, diff, is_isomorphic, structure_only
 from tracegraph.model import Edge, EdgeType, RawTrace, Step, Trace
 from tracegraph.normalize import normalize
 
@@ -69,7 +71,7 @@ def test_no_false_isomorphism_from_punctuated_labels():
 def test_deep_linear_chain_does_not_overflow_recursion():
     # Agent traces are deep-linear (one super-step per node); a recursive AHU post-order
     # overflowed Python's recursion limit at ~500 nodes. Both the identical path
-    # (canonical/is_isomorphic) and the divergence path (pair/localize + _render) must run
+    # (canonical/is_isomorphic) and the divergence path (pair/localize + render) must run
     # iteratively at depth far beyond that.
     names = [f"n{i}" for i in range(3000)]
     a, b = _chain(*names), _chain(*names)
@@ -129,3 +131,102 @@ def test_sibling_relabel_with_shared_children_is_localized():
     assert not result.identical
     assert any("A='p'" in c and "B='P'" in c for c in result.changes), result.changes
     assert any("A='q'" in c and "B='Q'" in c for c in result.changes), result.changes
+
+
+def _cyclic_tree_layer():
+    """A trace whose derived TREE_PARENT layer contains a 2-cycle (b <-> c).
+
+    Built by hand: normalize() would never emit this, but a hand-edited or partly-corrupt
+    artifact can carry it, and loads() does not validate. Steps b and c then have a
+    TREE_PARENT edge each, so neither is a root and the whole component is unreachable.
+    """
+    steps = [
+        Step(step_id="a", trace_id="t", seq=0, name="a"),
+        Step(step_id="b", trace_id="t", seq=1, name="b"),
+        Step(step_id="c", trace_id="t", seq=2, name="c"),
+    ]
+    nt = normalize(
+        RawTrace(
+            trace=Trace(trace_id="t", source_kind="x"),
+            steps=steps,
+            causal_edges=[Edge(type=EdgeType.CAUSED_BY, src="b", dst="a"),
+                          Edge(type=EdgeType.CAUSED_BY, src="c", dst="a")],
+        )
+    )
+    nt.edges = [e for e in nt.edges if e.type is not EdgeType.TREE_PARENT] + [
+        Edge(type=EdgeType.TREE_PARENT, src="b", dst="c"),
+        Edge(type=EdgeType.TREE_PARENT, src="c", dst="b"),
+    ]
+    return nt
+
+
+def _tree_layer(nt, *pairs):
+    """Replace the derived TREE_PARENT layer with `pairs` of (child, parent)."""
+    nt.edges = [e for e in nt.edges if e.type is not EdgeType.TREE_PARENT] + [
+        Edge(type=EdgeType.TREE_PARENT, src=child, dst=parent) for child, parent in pairs
+    ]
+    return nt
+
+
+def _three_step_trace():
+    steps = [
+        Step(step_id="a", trace_id="t", seq=0, name="a"),
+        Step(step_id="b", trace_id="t", seq=1, name="b"),
+        Step(step_id="c", trace_id="t", seq=2, name="c"),
+    ]
+    return normalize(
+        RawTrace(
+            trace=Trace(trace_id="t", source_kind="x"),
+            steps=steps,
+            causal_edges=[
+                Edge(type=EdgeType.CAUSED_BY, src="b", dst="a"),
+                Edge(type=EdgeType.CAUSED_BY, src="c", dst="a"),
+            ],
+        )
+    )
+
+
+def _every_entry_point(bad):
+    just_a = _chain("a")
+    return (
+        lambda: diff(bad, just_a),
+        lambda: diff(just_a, bad),
+        lambda: is_isomorphic(bad, just_a),
+        lambda: canonical(bad),
+    )
+
+
+def test_disconnected_cycle_is_an_error_not_a_silent_subset():
+    """Dropping unreachable nodes let two different traces compare as identical."""
+    bad = _cyclic_tree_layer()
+    for call in _every_entry_point(bad):
+        with pytest.raises(ValueError, match="not a forest"):
+            call()
+
+
+def test_cycle_reachable_from_a_root_is_rejected_rather_than_walked_forever():
+    """A guard placed after traversal never runs: this shape loops until interrupted.
+
+    ``b`` has both a real parent (``a``, reachable from the root) and a self-edge, so ``a``
+    is still a root and the walk from it re-expands ``b`` endlessly.
+    """
+    bad = _tree_layer(_three_step_trace(), ("b", "a"), ("b", "b"))
+    for call in _every_entry_point(bad):
+        with pytest.raises(ValueError, match="not a forest"):
+            call()
+
+
+def test_tree_parent_edge_to_an_unknown_step_is_rejected():
+    bad = _tree_layer(_three_step_trace(), ("b", "ghost"))
+    for call in _every_entry_point(bad):
+        with pytest.raises(ValueError, match="not a forest"):
+            call()
+
+
+def test_duplicate_step_ids_are_rejected_with_a_clear_message():
+    """A count-based coverage check reported this as an empty "missing" list and crashed."""
+    bad = _three_step_trace()
+    bad.steps.append(bad.steps[0].model_copy())
+    for call in _every_entry_point(bad):
+        with pytest.raises(ValueError, match="duplicate step_id"):
+            call()

@@ -34,6 +34,23 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/tracegraph"]
 
+# The package is fully annotated; without this marker PEP 561 tells type checkers to ignore
+# the installed distribution, so downstream consumers get no types at all.
+[tool.hatch.build.targets.wheel.force-include]
+"src/tracegraph/py.typed" = "tracegraph/py.typed"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Deliberately narrow: this codebase carries long explanatory comments and intentionally
+# dense expressions, so the goal is catching real defects (undefined names, unused imports,
+# shadowed builtins), not enforcing a house style after the fact.
+select = ["F", "E4", "E7", "E9", "B"]
+ignore = ["B008"]  # typer declares option defaults in the signature by design
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["examples"]

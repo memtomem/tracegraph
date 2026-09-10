@@ -90,7 +90,7 @@ def test_return_columns_are_ordered_s0_through_sn_minus_one():
 def test_compiled_query_is_frozen_dataclass():
     q = compile_to_cypher(PRESETS["tool-failure"])
     assert isinstance(q, CompiledQuery)
-    with pytest.raises(Exception):  # FrozenInstanceError, but dataclass version differs
+    with pytest.raises(Exception):  # noqa: B017 - FrozenInstanceError, name varies by version
         q.cypher = "tampered"  # type: ignore[misc]
 
 

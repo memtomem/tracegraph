@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from collections.abc import Iterable, Mapping
 import re
 import os
 from pathlib import Path
@@ -28,15 +29,51 @@ def dumps(nt: NormalizedTrace) -> str:
 
 
 def _migrate_v1(trace_payload: dict) -> dict:
-    """Add only v2 evidence metadata; never reinterpret legacy causal semantics."""
-    migrated = json.loads(json.dumps(trace_payload))
+    """Add only v2 evidence metadata; never reinterpret legacy causal semantics.
+
+    Copies exactly the containers it writes to — the envelope, the trace header, and the
+    CAUSED_BY edges — and shares everything else with the caller. Nothing outside those is
+    mutated, so sharing is safe. The cost still scales with the edge collection, which it has
+    to walk; what it no longer does is traverse unrelated nested values it never reads.
+
+    Whole-payload copies were tried twice and both leaked an exception type this module
+    promises never to raise. A JSON round-trip raises ``TypeError`` on any value json cannot
+    serialize, and ``from_obj`` accepts already-parsed payloads that may hold such values.
+    ``copy.deepcopy`` fixed that but recurses per level, so a deeply-nested value in a field
+    the model ignores raised ``RecursionError`` on an artifact that used to load. Neither is
+    ``OSError`` or ``ValueError``, so both escaped every load-boundary handler and crashed the
+    command. Touching only what we modify avoids the whole class: no traversal, no recursion.
+    """
+    migrated = dict(trace_payload)
     header = migrated.get("trace")
     if isinstance(header, dict):
+        header = dict(header)
         header.setdefault("causal_fidelity", "legacy_unknown")
         header.setdefault("links_preserved", None)
-    for edge in migrated.get("edges") or []:
-        if isinstance(edge, dict) and edge.get("type") == "CAUSED_BY":
-            edge.setdefault("origin", "legacy_unknown")
+        migrated["trace"] = header
+    edges = migrated.get("edges")
+    # Match the *shape*, not a list of concrete types. The model accepts any iterable for its
+    # edge sequence (list, tuple, deque, a one-shot iterator), and enumerating types here
+    # meant every shape not on the list silently skipped migration, so its CAUSED_BY edges
+    # lost the legacy origin default. Strings, bytes and mappings are iterable but are never
+    # an edge sequence; anything else non-iterable falls through untouched for the model to
+    # reject as a clean ValueError. Materializing once also leaves a one-shot iterator usable,
+    # which iterating in place did not.
+    if isinstance(edges, Iterable) and not isinstance(edges, (str, bytes, bytearray, Mapping)):
+        try:
+            # Mapping, not dict: the model accepts any mapping as an edge record, and matching
+            # dict alone left mapping-shaped records without the legacy origin default.
+            migrated["edges"] = [
+                {"origin": "legacy_unknown", **edge}
+                if isinstance(edge, Mapping) and edge.get("type") == "CAUSED_BY"
+                else edge
+                for edge in edges
+            ]
+        except Exception as exc:
+            # Consuming a caller-supplied lazy sequence can raise anything at all. This is a
+            # load boundary that promises ValueError, and the v2 path already reports a
+            # failing iterator that way (as a ValidationError), so v1 must not differ.
+            raise ValueError(f"artifact edges could not be read: {exc}") from exc
     return migrated
 
 
