@@ -2,9 +2,12 @@
 
 ## 현재 전달 상태 — 2026-09-10 (Asia/Seoul)
 
-- 기준 HEAD: `0d5091c`, 브랜치 `tracegraph-mvp`. 전체 코드 리뷰 후 확인된 결함을 수정했다.
-- 이번 범위: 리뷰에서 재현된 correctness 결함(Tier 1), 회귀 테스트, lint gate·패키징 위생.
-- 공개 계약을 바꾸는 항목(Tier 2)은 **수행하지 않았다**. 아래 "남은 결정 필요 항목"을 참조한다.
+- **상태: 착지 완료.** [PR #20](https://github.com/memtomem/tracegraph/pull/20)이 병합 커밋
+  `6da0886`으로 기본 브랜치 `tracegraph-mvp`에 병합됐다 (2026-09-10 02:55 UTC). 기준은 `0d5091c`,
+  커밋 5개다. 아래 "검증 증거"는 병합 **전** 기록이고, 병합 후 원격 CI 결과는 그 아래 별도로 적었다.
+- 이번 범위: 전체 코드 리뷰에서 재현된 correctness 결함, 회귀 테스트 45개, lint gate·패키징 위생.
+- 공개 계약을 바꾸는 항목은 **수행하지 않았다**. 아래 "남은 결정 필요 항목"을 참조한다. 독립 리뷰어도
+  이 6건 때문에 PR을 막을 필요는 없다고 판단했다.
 
 ### 수정한 결함
 
@@ -55,7 +58,14 @@
 재현되지 않았고, 정수 연산으로 바꾸면 sub-microsecond 나머지를 가진 실제 OTLP 타임스탬프에서
 artifact 바이트가 달라진다(`...000000501` → `.000001`). 실익 없는 계약 변경이므로 원래 식을 유지한다.
 
-원격 CI와 실제 Phoenix + SyncMill E2E는 이번에도 **미실행**이다. 로컬 통과를 원격 성공으로 표기하지 않는다.
+**병합 후 원격 CI: 전체 통과.** PR #20의 최종 head `98b358f`에서 14개 check 전부 pass —
+`pure-python core`, `with [cypher] extra (LadybugDB)`, `installed wheel (core/cypher)`,
+`Phoenix CLI contract`, `perf regression guards`, 그리고 이번에 추가한 `lint`.
+한 차례 `lint` 실패가 있었으나 코드가 아니라 `Install uv` 단계의 `fetch failed`(일시적 네트워크)였고,
+동일 커밋 재실행으로 통과했다. **setup 단계에서 죽은 job은 검사 목록에서 해당 도구의 실패처럼 보이지만
+diff와 무관하다** — 로그가 도구 실행 전에 끝나는 것이 판별점이다.
+
+실제 Phoenix + SyncMill E2E는 이번에도 **미실행**이다. 로컬·CI 통과를 실제 서버 검증으로 표기하지 않는다.
 
 ### 남은 결정 필요 항목 (Tier 2 — 공개 계약 변경)
 
