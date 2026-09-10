@@ -410,3 +410,34 @@ def test_baseline_withheld_cost_is_disclosed():
     baseline.steps[1].evidence = StepEvidence(total_cost="not-a-number", cost_currency="USD")
     report = analyze(_trace("cur-cost", StepStatus.OK), baseline=baseline)
     assert any("baseline: total_cost unavailable" in w for w in report.warnings), report.warnings
+
+
+def test_a_step_ending_before_it_began_withholds_the_duration():
+    """The aggregate envelope hides an internally inconsistent step.
+
+    With steps spanning [0s, 2s] and [10s, 1s], `max(ends) - min(starts)` is a
+    healthy-looking +2s and the 10s start never reaches the answer at all, so checking only
+    the outer bounds reports a confident number built on contradictory timestamps.
+    """
+    nt = _trace("reversed", StepStatus.OK)
+    nt.steps[0].ts = "2026-01-01T00:00:00Z"
+    nt.steps[0].evidence = StepEvidence(end_ts="2026-01-01T00:00:02Z")
+    nt.steps[1].ts = "2026-01-01T00:00:10Z"
+    nt.steps[1].evidence = StepEvidence(end_ts="2026-01-01T00:00:01Z")
+    nt.steps[2].ts = "2026-01-01T00:00:01Z"
+    nt.steps[2].evidence = StepEvidence(end_ts="2026-01-01T00:00:02Z")
+
+    report = analyze(nt)
+    assert report.metrics.wall_duration_ms is None
+    assert any("end before their own start" in w for w in report.warnings), report.warnings
+
+
+def test_a_reversed_step_also_withholds_the_duration_delta():
+    """An unusable duration must not become a confident comparison either."""
+    baseline = _fully_timed(_trace("bl-rev", StepStatus.OK), 0, 3)
+    current = _fully_timed(_trace("cur-rev", StepStatus.OK), 0, 5)
+    current.steps[1].ts = "2026-01-01T00:00:10Z"
+    report = analyze(current, baseline=baseline)
+    assert report.metrics.wall_duration_ms is None
+    assert report.comparison.metric_deltas["wall_duration_ms"] is None
+    assert any("end before their own start" in w for w in report.warnings), report.warnings

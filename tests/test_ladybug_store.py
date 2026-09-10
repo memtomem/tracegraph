@@ -32,6 +32,7 @@ from tracegraph.model import (  # noqa: E402
 )
 from tracegraph.normalize import normalize  # noqa: E402
 from tracegraph.store import InMemoryStore, LadybugStore  # noqa: E402
+from tracegraph.store.ladybug import _collect  # noqa: E402
 
 pytestmark = pytest.mark.cypher
 runner = CliRunner()
@@ -706,3 +707,69 @@ def test_from_trace_does_not_alias_the_callers_trace_header() -> None:
         assert memory_store.trace().trace.source_kind == "x"
     finally:
         ladybug_store.close()
+
+
+def test_failed_commit_rolls_back_and_leaves_the_store_usable() -> None:
+    """COMMIT must run inside the try, or a failure there leaves the transaction open.
+
+    Every later statement on that connection would then silently run inside a dangling
+    transaction. Forcing COMMIT to fail is the only way to reach this path.
+    """
+    nt = _erroring_tool_trace("CF")
+    store = LadybugStore()
+    store.init_schema()
+    try:
+        store._insert_trace(nt.trace)
+        store.upsert_nodes(nt.steps)
+
+        real_execute = store._conn.execute
+        failed = {"commit": False}
+
+        def flaky(query, *args, **kwargs):
+            if isinstance(query, str) and query.strip().upper() == "COMMIT":
+                failed["commit"] = True
+                raise RuntimeError("commit refused")
+            return real_execute(query, *args, **kwargs)
+
+        store._conn.execute = flaky
+        with pytest.raises(RuntimeError, match="commit refused"):
+            store.upsert_edges(nt.edges)
+        assert failed["commit"]
+        store._conn.execute = real_execute
+
+        # The rollback ran, so no edge from the failed batch survived, and the connection is
+        # still usable rather than stuck mid-transaction.
+        assert _collect(store._conn.execute("MATCH ()-[e:CAUSED_BY]->() RETURN count(e)"))[0][0] == 0
+        store.upsert_edges(nt.edges)
+        assert _collect(store._conn.execute("MATCH ()-[e:CAUSED_BY]->() RETURN count(e)"))[0][0] > 0
+    finally:
+        store.close()
+
+
+def test_query_results_are_closed_after_reads_and_after_iteration_errors() -> None:
+    """Result handles are released on both paths, so a directory sweep cannot accumulate them."""
+    closed: list[str] = []
+
+    class Tracked:
+        def __init__(self, rows, fail=False):
+            self._rows = list(rows)
+            self._fail = fail
+
+        def has_next(self):
+            if self._fail:
+                raise RuntimeError("iteration blew up")
+            return bool(self._rows)
+
+        def get_next(self):
+            return self._rows.pop(0)
+
+        def close(self):
+            closed.append("closed")
+
+    assert _collect(Tracked([[1], [2]])) == [[1], [2]]
+    assert closed == ["closed"]
+
+    closed.clear()
+    with pytest.raises(RuntimeError, match="iteration blew up"):
+        _collect(Tracked([[1]], fail=True))
+    assert closed == ["closed"], "the handle must be released even when iteration raises"

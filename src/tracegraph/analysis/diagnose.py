@@ -295,14 +295,32 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
     """
     notes: list[str] = []
     duration_complete = False
-    starts = [_iso(step.ts) for step in nt.steps]
-    ends = [_iso(step.evidence.end_ts) for step in nt.steps if step.evidence]
-    starts = [value for value in starts if value is not None]
-    ends = [value for value in ends if value is not None]
+    starts: list[datetime] = []
+    ends: list[datetime] = []
+    reversed_steps = 0
+    for step in nt.steps:
+        start = _iso(step.ts)
+        end = _iso(step.evidence.end_ts) if step.evidence else None
+        if start is not None:
+            starts.append(start)
+        if end is not None:
+            ends.append(end)
+        # A step that ends before it began is internally inconsistent, and the aggregate
+        # envelope hides it: with steps [0s,2s] and [10s,1s] the envelope max(ends)-min(starts)
+        # is a healthy-looking +2s, and the 10s start never appears in the answer at all. Check
+        # each pair on its own, not just the outer bounds.
+        if start is not None and end is not None and end < start:
+            reversed_steps += 1
     wall: float | None = None
     if starts and ends:
         wall = round((max(ends) - min(starts)).total_seconds() * 1000, 6)
-        if wall < 0:
+        if reversed_steps:
+            wall = None
+            notes.append(
+                f"wall_duration_ms unavailable: {reversed_steps} step(s) report an end before "
+                "their own start; span timestamps are inconsistent."
+            )
+        elif wall < 0:
             # An end that precedes every start means the timestamps disagree (clock skew,
             # a mis-scaled unit, a mislabeled span). A negative duration is not a fact.
             wall = None
