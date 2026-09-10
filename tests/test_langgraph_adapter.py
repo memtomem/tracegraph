@@ -446,3 +446,71 @@ def test_cross_namespace_missing_parent_raises():
     root = _ck("c1", "", 1, "missing", parent_ns="sub")
     with pytest.raises(ValueError, match="missing parent checkpoint"):
         LangGraphCheckpointAdapter(_StubSaver([root])).ingest("A")
+
+
+def _twice_entered_namespace():
+    """A loop that enters the same subgraph namespace twice.
+
+    Each entry has its own terminal, so the parent graph has two continuation edges to
+    recover, not one. Pairing a single entry with a single terminal per namespace gets at
+    most one of them right and silently drops the other.
+    """
+    return [
+        _ck("001-root-before", "", 1, None, channel_values={"branch:to:mid": True}),
+        _ck("002-sub-in", "sub", -1, None, parents={"": "001-root-before"}),
+        _ck("003-sub-done", "sub", 0, "002-sub-in"),
+        _ck("004-root-mid", "", 2, "001-root-before", channel_values={"branch:to:after": True}),
+        _ck("005-sub-in", "sub", -1, None, parents={"": "004-root-mid"}),
+        _ck("006-sub-done", "sub", 1, "005-sub-in"),
+        _ck("007-root-after", "", 3, "004-root-mid"),
+    ]
+
+
+@pytest.mark.parametrize("newest_first", [True, False])
+def test_repeated_namespace_recovers_every_invocations_continuation(newest_first):
+    """Both continuations must be recovered, under either enumeration order.
+
+    `saver.list()` pages newest-first, but that is an implementation detail: the result must
+    not depend on it. Each root step resumes from the terminal of the invocation *it*
+    launched, never from another invocation's terminal.
+    """
+    checkpoints = _twice_entered_namespace()
+    ordered = list(reversed(checkpoints)) if newest_first else checkpoints
+    raw = LangGraphCheckpointAdapter(_StubSaver(ordered)).ingest("A")
+    caused = {(e.src, e.dst) for e in raw.causal_edges}
+
+    assert ("004-root-mid", "sub:003-sub-done") in caused, sorted(caused)
+    assert ("007-root-after", "sub:006-sub-done") in caused, sorted(caused)
+    # The namespace-level shortcuts they replace must be gone, and no continuation may
+    # point at the other invocation's terminal.
+    assert ("004-root-mid", "001-root-before") not in caused
+    assert ("007-root-after", "004-root-mid") not in caused
+    assert ("007-root-after", "sub:003-sub-done") not in caused
+    assert ("004-root-mid", "sub:006-sub-done") not in caused
+    normalize(raw)
+
+
+def test_explicit_return_from_a_nested_subgraph_continues_the_outer_invocation():
+    """A parent in a *descendant* namespace is a return, not a new entry.
+
+    `outer` launches `outer|inner`, and `outer:005` resumes by explicitly referencing the
+    inner terminal. Counting that as an entry would close the outer invocation at its first
+    checkpoint, so the root would resume from before the nested work rather than after it,
+    losing the inner execution and the remaining outer work from its ancestry.
+    """
+    checkpoints = [
+        _ck("001-root", "", 1, None, channel_values={"branch:to:outer": True}),
+        _ck("002-outer-in", "outer", -1, None, parents={"": "001-root"}),
+        _ck("003-inner-in", "outer|inner", -1, None, parents={"outer": "002-outer-in"}),
+        _ck("004-inner-done", "outer|inner", 0, "003-inner-in"),
+        _ck("005-outer-resume", "outer", 0, "004-inner-done", parent_ns="outer|inner"),
+        _ck("006-outer-done", "outer", 1, "005-outer-resume"),
+        _ck("007-root-after", "", 2, "001-root"),
+    ]
+    for ordered in (checkpoints, list(reversed(checkpoints))):
+        raw = LangGraphCheckpointAdapter(_StubSaver(ordered)).ingest("A")
+        caused = {(e.src, e.dst) for e in raw.causal_edges}
+        assert ("007-root-after", "outer:006-outer-done") in caused, sorted(caused)
+        assert ("007-root-after", "outer:002-outer-in") not in caused, sorted(caused)
+        assert ("007-root-after", "001-root") not in caused, sorted(caused)
+        normalize(raw)
