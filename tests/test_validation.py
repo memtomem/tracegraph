@@ -1,5 +1,8 @@
 """Negative-path guards: malformed raw input must be rejected, not silently mangled."""
 
+import json
+from collections import UserDict, deque
+
 import pytest
 
 from tracegraph import artifact
@@ -311,3 +314,142 @@ def test_tree_cycle_error_names_the_lowest_seq_step_deterministically():
     with pytest.raises(ValueError) as excinfo:
         validate_tree(nt)
     assert "'b'" in str(excinfo.value), str(excinfo.value)
+
+
+def test_v1_migration_loads_a_deeply_nested_ignored_field():
+    """The migration must not recurse over data it does not touch.
+
+    A v1 artifact can carry a deeply nested value in a field the model ignores. Copying the
+    whole payload — by JSON round-trip or by deepcopy — walked it and raised, so an artifact
+    that used to load stopped loading. Both TypeError and RecursionError escape the load
+    boundary, which only handles OSError and ValueError.
+    """
+    deep = json.loads('{"a":' * 600 + "1" + "}" * 600)
+    loaded = artifact.from_obj(
+        {
+            "schema_version": 1,
+            "trace": {
+                "trace": {"trace_id": "t", "source_kind": "x"},
+                "steps": [],
+                "edges": [],
+                "junk": deep,
+            },
+        }
+    )
+    assert loaded.trace.trace_id == "t"
+    assert loaded.trace.causal_fidelity.value == "legacy_unknown"
+
+
+def test_v1_migration_does_not_mutate_the_callers_payload():
+    """Only the containers the migration writes to are copied; the caller's stay untouched."""
+    header = {"trace_id": "t", "source_kind": "x"}
+    edge = {"type": "CAUSED_BY", "src": "b", "dst": "a"}
+    payload = {
+        "schema_version": 1,
+        "trace": {
+            "trace": header,
+            "steps": [
+                {"step_id": "a", "trace_id": "t", "seq": 0},
+                {"step_id": "b", "trace_id": "t", "seq": 1},
+            ],
+            "edges": [edge],
+        },
+    }
+    artifact.from_obj(payload)
+    assert "causal_fidelity" not in header
+    assert "origin" not in edge
+
+
+@pytest.mark.parametrize("sequence", [list, tuple, deque, iter])
+def test_v1_migration_covers_every_accepted_edge_sequence(sequence):
+    """The model accepts any iterable for its edge sequence, so the migration must too.
+
+    Enumerating concrete types here meant each shape left off the list silently skipped
+    migration, and its CAUSED_BY edges came back with no origin instead of the legacy
+    default. A one-shot iterator additionally has to survive: iterating it in place consumed
+    it before the model ever saw it.
+    """
+    loaded = artifact.from_obj(
+        {
+            "schema_version": 1,
+            "trace": {
+                "trace": {"trace_id": "t", "source_kind": "x"},
+                "steps": [
+                    {"step_id": "a", "trace_id": "t", "seq": 0},
+                    {"step_id": "b", "trace_id": "t", "seq": 1},
+                ],
+                "edges": sequence([{"type": "CAUSED_BY", "src": "b", "dst": "a"}]),
+            },
+        }
+    )
+    origins = [edge.origin for edge in loaded.edges_of(EdgeType.CAUSED_BY)]
+    assert [origin.value for origin in origins] == ["legacy_unknown"], origins
+
+
+def test_v1_migration_leaves_a_non_sequence_edges_field_to_the_model():
+    """A malformed edges field stays a clean ValueError, not a migration crash."""
+    with pytest.raises(ValueError):
+        artifact.from_obj(
+            {
+                "schema_version": 1,
+                "trace": {
+                    "trace": {"trace_id": "t", "source_kind": "x"},
+                    "steps": [],
+                    "edges": 7,
+                },
+            }
+        )
+
+
+def test_v1_migration_reports_a_failing_edge_iterator_as_value_error():
+    """Consuming a caller-supplied lazy sequence must not leak its exception type.
+
+    The v2 path already surfaces a failing iterator as a ValidationError, which is a
+    ValueError; v1 must not differ, or the failure escapes every load-boundary handler.
+    """
+    def edges():
+        yield {"type": "CAUSED_BY", "src": "b", "dst": "a"}
+        raise RuntimeError("upstream went away")
+
+    with pytest.raises(ValueError):
+        artifact.from_obj(
+            {
+                "schema_version": 1,
+                "trace": {
+                    "trace": {"trace_id": "t", "source_kind": "x"},
+                    "steps": [
+                        {"step_id": "a", "trace_id": "t", "seq": 0},
+                        {"step_id": "b", "trace_id": "t", "seq": 1},
+                    ],
+                    "edges": edges(),
+                },
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [({}, "legacy_unknown"), ({"origin": "graph_parent"}, "graph_parent")],
+)
+def test_v1_migration_covers_mapping_shaped_edge_records(declared, expected):
+    """The model accepts any mapping as an edge record, so the migration must too.
+
+    Matching `dict` alone left these without the legacy origin default, while an equivalent
+    plain dictionary got one. An origin the record already declares is never overwritten.
+    """
+    edge = UserDict({"type": "CAUSED_BY", "src": "b", "dst": "a", **declared})
+    loaded = artifact.from_obj(
+        {
+            "schema_version": 1,
+            "trace": {
+                "trace": {"trace_id": "t", "source_kind": "x"},
+                "steps": [
+                    {"step_id": "a", "trace_id": "t", "seq": 0},
+                    {"step_id": "b", "trace_id": "t", "seq": 1},
+                ],
+                "edges": [edge],
+            },
+        }
+    )
+    origins = [e.origin.value for e in loaded.edges_of(EdgeType.CAUSED_BY)]
+    assert origins == [expected], origins

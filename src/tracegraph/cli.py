@@ -698,7 +698,11 @@ def _render_tree(nt: NormalizedTrace) -> None:
             for child in sorted(children.get(nid, []), key=lambda i: (steps[i].seq, i), reverse=True):
                 stack.append((branch, child))
 
-    root_tree = Tree(f"[bold]{nt.trace.trace_id}[/] ({nt.trace.source_kind})")
+    # The header is producer-controlled too: a trace id or source kind containing brackets
+    # would raise MarkupError on an otherwise valid artifact, exactly as the step labels did.
+    root_tree = Tree(
+        f"[bold]{escape(nt.trace.trace_id)}[/] ({escape(nt.trace.source_kind)})"
+    )
     for rid in [i for i in order if i not in has_parent]:
         add_subtree(root_tree, rid)
     console.print(root_tree)
@@ -928,7 +932,7 @@ def validate(
             console.print(f"[bold red]INVALID[/] {path}: {exc}")
             continue
         console.print(
-            f"[green]OK[/] {path}  [dim]{nt.trace.trace_id} · {len(nt.steps)} steps[/]"
+            f"[green]OK[/] {escape(str(path))}  [dim]{escape(nt.trace.trace_id)} · {len(nt.steps)} steps[/]"
         )
 
     if failures:

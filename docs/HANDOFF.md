@@ -18,11 +18,13 @@
 | `cli.py` | `explain`/`query`가 대괄호를 포함한 이름에서 `MarkupError`로 죽고, `inspect`는 이름·오류 텍스트를 조용히 삭제했다. 모든 경로를 `escape()`한다. |
 | `cli.py` | `--json-out`/`--save-artifact` 대상이 쓰기 불가일 때 raw traceback을 냈다. 이제 exit 2의 usage error다. |
 | `cli.py` | `inspect` 트리 정렬이 seq 동률에서 hash 순서였다. 정규 `(seq, step_id)` 키로 바꿨다. |
-| `artifact.py` | `from_obj`가 v1 migration의 JSON round-trip 때문에 `TypeError`를 냈다. `copy.deepcopy`로 대체했다. |
+| `artifact.py` | `from_obj`가 v1 migration의 전체 복사 때문에 예외를 흘렸다. JSON round-trip은 `TypeError`를, `copy.deepcopy`는 깊게 중첩된 무시 필드에서 `RecursionError`를 냈다. 이제 migration이 수정하는 컨테이너(envelope·header·CAUSED_BY edge)만 복사한다. |
 | `adapters/otlp_spans.py` | `traceId` 없는 span을 조용히 버려 자식 span이 잘못된 오류를 냈다. 이제 거부한다. |
 | `analysis/ahu.py` | TREE_PARENT 검사가 순회 **뒤에** 있어, root에서 도달 가능한 cycle(자기 간선 등)은 검사에 닿기 전에 무한 순회했다. 세 진입점 모두 순회 전에 `validate_tree`와 중복 step_id를 검사한다. |
 | `analysis/diagnose.py` | 커버리지 경고가 end 타임스탬프만 봤다. 누락된 start도 동일하게 duration을 왜곡하므로 함께 공개한다. |
 | `analysis/diagnose.py` | baseline 메트릭 요약이 disclosure note를 버려, 신뢰할 수 없는 baseline 값으로 계산한 delta가 경고 없이 실렸다. `baseline:` 접두어로 전달한다. |
+| `analysis/diagnose.py` | 두 하한(lower bound)의 차이는 차이의 하한이 아니다. 어느 한쪽이라도 커버리지가 불완전하면 `wall_duration_ms` delta는 크기도 부호도 알 수 없으므로 **보류**한다. 이전 라운드에서 추가한 테스트가 오히려 이 잘못된 값을 고정하고 있었다. |
+| `cli.py` | `inspect`/`validate`의 헤더가 `trace_id`·`source_kind`를 escape 없이 넣어, 대괄호가 든 정상 artifact에서 `MarkupError`로 죽었다. step 이름만 escape하고 헤더를 빠뜨렸다. |
 | `adapters/langgraph_checkpoint.py` | subgraph entry parent 선택이 `saver.list()` 페이징 순서에 의존했고, namespace 하나당 entry·terminal을 **한 쌍만** 유지해 두 번 진입한 namespace에서 continuation 간선이 사라졌다. namespace의 체크포인트를 invocation 단위로 묶어 각 entry를 자기 invocation의 terminal과 짝지운다. |
 | `store/ladybug.py` | 호출자의 `Trace`를 참조로 보관해 `InMemoryStore`와 갈렸다. deep-copy로 맞췄다. `COMMIT`을 `try` 안으로 옮기고 `QueryResult`를 닫는다. |
 | `normalize.py` | TREE_PARENT cycle 오류 메시지가 hash 순서에 의존했다. 정규 순서로 고정했다. |
@@ -33,12 +35,15 @@
 
 | 검증 | 명령 | 결과 |
 | --- | --- | --- |
-| 전체 테스트 | `uv run --no-sync pytest -q` | **477 passed** (기존 449 + 신규 28) |
+| 전체 테스트 | `uv run --no-sync pytest -q` | **490 passed** (기존 449 + 신규 41) |
 | 성능 guard | `uv run --no-sync pytest -q -m perf` | **4 passed** |
 | 회귀 테스트 판별력 | 신규 테스트를 수정 전 소스에 실행 | 대부분 실패 (일부는 기존 동작의 커버리지 보강) |
 | Codex 리뷰 게이트 | `ask-codex.sh` 작업 트리 3라운드 | **NEEDS-FIX**(Major 4) → SHIP(Nit 1) → **SHIP**(지적 0) |
 | Codex 리뷰 게이트 | 커밋된 범위 재검토 | **NEEDS-FIX**(Major 1: 반복 진입 namespace) → 수정 |
 | Codex 리뷰 게이트 | 4·5라운드 | **NEEDS-FIX**(중첩 subgraph 복귀를 진입으로 오분류) → **SHIP** |
+| Codex 리뷰 게이트 | 전체 커밋 범위 재검토 | **NEEDS-FIX**(deepcopy의 `RecursionError`, 커버리지 테스트 판별력) → 수정 |
+| Codex 리뷰 게이트 | 8~10라운드 | migration 입력 shape 관련 소소한 지적 → SHIP. 이전 라운드 결과를 프롬프트에 계속 넣은 탓에 같은 함수만 파고든 것으로, 프롬프트가 만든 편향이었다. |
+| Codex 리뷰 게이트 | **선입견 없는 재검토** | **NEEDS-FIX**(duration delta 과신, CLI 헤더 escape 누락) → 수정. 8~10라운드 전체보다 가치 있었다. |
 | artifact 바이트 불변 | fixture 13개를 adapter로 재수집해 SHA-256 비교 | **전부 동일**, canonical form도 동일 |
 | 보고서 변화 | 동일 fixture의 analysis report 비교 | 5개에서 이전에 삼켜졌던 `error` finding 1건씩 **추가**, 삭제·경고 변화 없음 |
 | lint | `uvx ruff@0.14.2 check src tests scripts examples` | **All checks passed** |

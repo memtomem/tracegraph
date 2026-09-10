@@ -1316,3 +1316,24 @@ def test_output_may_not_alias_an_input_artifact(artifacts):
     res = runner.invoke(app, ["analyze", str(a_json), "--json-out", str(a_json)])
     assert res.exit_code == 2, res.output
     assert "must not overwrite an input" in _panel_text(res.output)
+
+
+def test_inspect_header_survives_markup_in_trace_id_and_source_kind(tmp_path):
+    """The tree header is producer-controlled too, not just the step labels."""
+    nt = normalize(
+        RawTrace(
+            trace=Trace(trace_id="t[/]x[/]", source_kind="k[bold]z"),
+            steps=[Step(step_id="s0", trace_id="t[/]x[/]", seq=0, name="n")],
+            causal_edges=[],
+        )
+    )
+    path = tmp_path / "hdr.json"
+    artifact.save(nt, path)
+    res = runner.invoke(app, ["inspect", str(path)])
+    assert res.exit_code == 0, res.output
+    assert "t[/]x[/]" in res.output, res.output
+    assert "k[bold]z" in res.output, res.output
+
+    validated = runner.invoke(app, ["validate", str(path)])
+    assert validated.exit_code == 0, validated.output
+    assert "t[/]x[/]" in validated.output, validated.output

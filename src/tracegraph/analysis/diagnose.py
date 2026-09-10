@@ -280,15 +280,21 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
     return _metrics_with_notes(nt)[0]
 
 
-def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str]]:
+def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], bool]:
     """Summarize observed metrics and report what had to be withheld.
 
     Every degradation is disclosed rather than absorbed: a wall duration that cannot be
     trusted becomes ``None`` with a note, and a single unparseable cost withholds the whole
     total (the same posture the mixed-currency path already takes) instead of silently
     summing the remainder into an understated figure. "Unavailable", never a wrong number.
+
+    The third element says whether ``wall_duration_ms`` covers every step. A duration built
+    from a subset is a lower bound, which is honest to publish on its own but cannot be
+    subtracted: the unobserved work has unknown length, so a delta computed from it has
+    unknown magnitude *and* unknown sign.
     """
     notes: list[str] = []
+    duration_complete = False
     starts = [_iso(step.ts) for step in nt.steps]
     ends = [_iso(step.evidence.end_ts) for step in nt.steps if step.evidence]
     starts = [value for value in starts if value is not None]
@@ -318,6 +324,8 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str]]:
                 notes.append(
                     "wall_duration_ms is a lower bound: " + "; ".join(gaps) + "."
                 )
+            else:
+                duration_complete = True
 
     evidence_items = [step.evidence for step in nt.steps if step.evidence]
 
@@ -383,7 +391,7 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str]]:
             else None
         ),
         evaluations=evaluations,
-    ), notes
+    ), notes, duration_complete
 
 
 def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, Step]:
@@ -432,6 +440,7 @@ def _comparison(
     *,
     current_patterns: list[PatternFinding],
     current_metrics: MetricSummary,
+    current_duration_complete: bool,
     notes: list[str] | None = None,
 ) -> ComparisonSummary:
     """Compare against a baseline. Appends the baseline's own metric disclosures to ``notes``.
@@ -477,7 +486,7 @@ def _comparison(
         - sum(item.pattern_id == name for item in before_patterns)
         for name in sorted(pattern_ids)
     }
-    bm, baseline_notes = _metrics_with_notes(baseline)
+    bm, baseline_notes, baseline_duration_complete = _metrics_with_notes(baseline)
     cm = current_metrics
     cost_delta: str | None = None
     if (
@@ -489,6 +498,17 @@ def _comparison(
         cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
     if notes is not None:
         notes.extend(f"baseline: {note}" for note in baseline_notes)
+    # A delta between two lower bounds is not a lower bound on the delta. If either side
+    # missed a step, the unobserved work could be longer than the difference, so the number
+    # would be wrong in magnitude and possibly in sign. Withhold it and say why; disclosing
+    # the inputs' incompleteness does not license publishing a confident subtraction of them.
+    durations_comparable = current_duration_complete and baseline_duration_complete
+    if not durations_comparable and None not in (cm.wall_duration_ms, bm.wall_duration_ms):
+        if notes is not None:
+            notes.append(
+                "wall_duration_ms delta unavailable: at least one side's duration covers "
+                "only part of its trace, so the difference has unknown size and sign."
+            )
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
         topology_identical=structural.identical,
@@ -496,7 +516,11 @@ def _comparison(
         behavior_changes=changes,
         pattern_count_deltas=deltas,
         metric_deltas={
-            "wall_duration_ms": _delta(cm.wall_duration_ms, bm.wall_duration_ms),
+            "wall_duration_ms": (
+                _delta(cm.wall_duration_ms, bm.wall_duration_ms)
+                if durations_comparable
+                else None
+            ),
             "prompt_tokens": _delta(cm.prompt_tokens, bm.prompt_tokens),
             "completion_tokens": _delta(cm.completion_tokens, bm.completion_tokens),
             "total_tokens": _delta(cm.total_tokens, bm.total_tokens),
@@ -518,7 +542,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         validate_structure(baseline)
     primary, propagated = _failures(nt)
     patterns = _patterns(nt)
-    metrics, metric_notes = _metrics_with_notes(nt)
+    metrics, metric_notes, duration_complete = _metrics_with_notes(nt)
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
@@ -549,6 +573,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             baseline,
             current_patterns=patterns,
             current_metrics=metrics,
+            current_duration_complete=duration_complete,
             notes=metric_notes,
         )
         if baseline

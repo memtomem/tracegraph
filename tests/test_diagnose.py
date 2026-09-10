@@ -271,12 +271,17 @@ def test_negative_wall_duration_is_withheld_with_a_reason():
 
 
 def test_partial_end_timestamp_coverage_is_disclosed():
+    """Every step has a usable start, so only the end-coverage gap can raise this."""
     nt = _trace("partial", StepStatus.OK)
-    nt.steps[0].ts = "2026-01-01T00:00:00Z"
+    for index, step in enumerate(nt.steps):
+        step.ts = f"2026-01-01T00:00:0{index}Z"
     nt.steps[1].evidence = StepEvidence(end_ts="2026-01-01T00:00:02Z")
     report = analyze(nt)
     assert report.metrics.wall_duration_ms == 2000
-    assert any("lower bound" in w for w in report.warnings), report.warnings
+    disclosure = next((w for w in report.warnings if "lower bound" in w), None)
+    assert disclosure is not None, report.warnings
+    assert "reported an end" in disclosure, disclosure
+    assert "usable start" not in disclosure, disclosure
 
 
 def test_unparseable_cost_withholds_the_total_instead_of_understating_it():
@@ -364,10 +369,39 @@ def test_baseline_metric_disclosures_reach_the_report():
         step.evidence = StepEvidence(end_ts=f"2026-01-01T00:00:0{index + 1}Z")
 
     report = analyze(current, baseline=baseline)
-    assert report.comparison.metric_deltas["wall_duration_ms"] is not None
     assert any(w.startswith("baseline: ") and "lower bound" in w for w in report.warnings), (
         report.warnings
     )
+    # Disclosing that the baseline is a lower bound does not license subtracting it.
+    assert report.comparison.metric_deltas["wall_duration_ms"] is None
+    assert any("delta unavailable" in w for w in report.warnings), report.warnings
+
+
+def _fully_timed(trace, start, end):
+    for index, step in enumerate(trace.steps):
+        step.ts = f"2026-01-01T00:00:0{start + index}Z"
+    trace.steps[-1].evidence = StepEvidence(end_ts=f"2026-01-01T00:00:0{end}Z")
+    for step in trace.steps[:-1]:
+        step.evidence = StepEvidence(end_ts=f"2026-01-01T00:00:0{end}Z")
+    return trace
+
+
+def test_duration_delta_is_published_when_both_sides_are_complete():
+    """The withholding must be targeted: two fully-observed traces still get a delta."""
+    baseline = _fully_timed(_trace("bl-full", StepStatus.OK), 0, 3)
+    current = _fully_timed(_trace("cur-full", StepStatus.OK), 0, 5)
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["wall_duration_ms"] == 2000
+    assert not any("delta unavailable" in w for w in report.warnings), report.warnings
+
+
+def test_duration_delta_is_withheld_when_the_current_side_is_partial():
+    baseline = _fully_timed(_trace("bl-ok", StepStatus.OK), 0, 3)
+    current = _fully_timed(_trace("cur-partial", StepStatus.OK), 0, 5)
+    current.steps[1].evidence = None
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["wall_duration_ms"] is None
+    assert any("delta unavailable" in w for w in report.warnings), report.warnings
 
 
 def test_baseline_withheld_cost_is_disclosed():
