@@ -329,3 +329,50 @@ def test_analyze_rejects_a_malformed_baseline_with_value_error():
     )
     with pytest.raises(ValueError):
         analyze(_trace("fine", StepStatus.OK), baseline=baseline)
+
+
+def test_missing_start_timestamps_are_disclosed_like_missing_ends():
+    """A missing start distorts the duration exactly as a missing end does.
+
+    The earliest step may be the one with no usable timestamp, in which case the computed
+    span begins too late and the duration comes out short.
+    """
+    nt = _trace("no-start", StepStatus.OK)
+    nt.steps[0].ts = None
+    nt.steps[1].ts = "2026-01-01T00:00:01Z"
+    nt.steps[2].ts = "2026-01-01T00:00:02Z"
+    nt.steps[2].evidence = StepEvidence(end_ts="2026-01-01T00:00:03Z")
+    report = analyze(nt)
+    assert report.metrics.wall_duration_ms is not None
+    assert any("usable start" in w for w in report.warnings), report.warnings
+
+
+def test_baseline_metric_disclosures_reach_the_report():
+    """A delta is only as trustworthy as both sides of it.
+
+    The baseline's metrics were summarized with the notes discarded, so a comparison could
+    publish a confident duration delta computed from a baseline number that, on its own,
+    would have been reported as a lower bound.
+    """
+    baseline = _trace("bl", StepStatus.OK)
+    baseline.steps[0].ts = "2026-01-01T00:00:00Z"
+    baseline.steps[1].evidence = StepEvidence(end_ts="2026-01-01T00:00:02Z")
+
+    current = _trace("cur", StepStatus.OK)
+    for index, step in enumerate(current.steps):
+        step.ts = f"2026-01-01T00:00:0{index}Z"
+        step.evidence = StepEvidence(end_ts=f"2026-01-01T00:00:0{index + 1}Z")
+
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["wall_duration_ms"] is not None
+    assert any(w.startswith("baseline: ") and "lower bound" in w for w in report.warnings), (
+        report.warnings
+    )
+
+
+def test_baseline_withheld_cost_is_disclosed():
+    baseline = _trace("bl-cost", StepStatus.OK)
+    baseline.steps[0].evidence = StepEvidence(total_cost="1.00", cost_currency="USD")
+    baseline.steps[1].evidence = StepEvidence(total_cost="not-a-number", cost_currency="USD")
+    report = analyze(_trace("cur-cost", StepStatus.OK), baseline=baseline)
+    assert any("baseline: total_cost unavailable" in w for w in report.warnings), report.warnings

@@ -24,11 +24,13 @@ correspondence between two genuinely unrelated siblings.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from functools import cmp_to_key
 from typing import Callable
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step
+from tracegraph.normalize import validate_tree
 
 #: How a node is identified for structural comparison. Default = node name, falling back to
 #: kind. Pass ``structure_only`` to compare pure topology (shape) ignoring labels.
@@ -59,23 +61,36 @@ def _roots(nt: NormalizedTrace, children: dict[str, list[str]]) -> list[str]:
     return [s.step_id for s in nt.steps if s.step_id not in has_parent]
 
 
-def _require_full_coverage(covered: dict[str, object], nt: NormalizedTrace, side: str) -> None:
-    """Reject a derived layer whose nodes are not all reachable from a root.
+def _require_forest(nt: NormalizedTrace, side: str) -> None:
+    """Reject a derived layer that is not a forest, *before* walking it.
 
-    ``_roots`` treats "has no TREE_PARENT edge" as "is a root", so a cycle in the derived
-    layer (or an edge to a missing step) leaves a whole component with no root and therefore
-    unvisited. Left unchecked, those nodes never enter the canon table and the comparison
-    silently runs on a *subset* of the tree — two traces can then be reported identical while
-    one of them contains an entire component the other lacks. Silent truncation is exactly
-    what this project refuses to do, so this is an error, not a smaller answer.
+    ``_roots`` treats "has no TREE_PARENT edge" as "is a root", which makes three malformed
+    shapes dangerous, and only a pre-check catches all of them:
+
+    * a **disconnected** cycle leaves its whole component rootless and therefore unvisited,
+      so the comparison silently ran on a subset — two traces could be reported identical
+      while one held an entire component the other lacked;
+    * a cycle **reachable** from a root (a self-edge, say) is walked forever, so a check
+      placed after traversal never runs at all;
+    * duplicate step ids make any count-based check unreliable.
+
+    ``validate_tree`` already rejects unknown endpoints, multi-parent steps and cycles; a
+    trace that passes it has every node reachable from a root, because following parents is
+    then a terminating walk. Unique ids are checked here since ``validate_tree`` does not.
     """
-    if len(covered) != len(nt.steps):
-        missing = sorted({s.step_id for s in nt.steps} - set(covered))
+    ids = [step.step_id for step in nt.steps]
+    if len(ids) != len(set(ids)):
+        # One pass, not `ids.count()` per id: rejecting a large malformed trace should not
+        # itself be quadratic.
+        duplicates = sorted(sid for sid, n in Counter(ids).items() if n > 1)
+        raise ValueError(f"{side}: duplicate step_id in trace: {', '.join(duplicates)}")
+    try:
+        validate_tree(nt)
+    except ValueError as exc:
         raise ValueError(
-            f"{side}: {len(missing)} step(s) are unreachable from any TREE_PARENT root "
-            f"(first: {missing[0]!r}); the derived layer is not a forest, so a structural "
-            "comparison would silently ignore them. Run validate_tree() on the artifact."
-        )
+            f"{side}: the derived TREE_PARENT layer is not a forest ({exc}), so a structural "
+            "comparison would silently ignore or endlessly revisit part of it."
+        ) from exc
 
 
 def _compare(left: Canon, right: Canon) -> int:
@@ -136,22 +151,22 @@ def _subtree_canons(
 
 def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
     """Sorted nested root tuples; use is_isomorphic for recursion-safe deep equality."""
+    _require_forest(nt, "trace")
     children = _children(nt)
     steps = nt.steps_by_id()
     roots = _roots(nt, children)
     canon = _subtree_canons(steps, children, roots, label)
-    _require_full_coverage(canon, nt, "trace")
     return tuple(sorted((canon[r] for r in roots), key=cmp_to_key(_compare)))
 
 
 def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label) -> bool:
+    _require_forest(a, "A")
+    _require_forest(b, "B")
     table = {}
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a, ca), _roots(b, cb)
     aa = _intern(a.steps_by_id(), ca, ra, label, table)
     bb = _intern(b.steps_by_id(), cb, rb, label, table)
-    _require_full_coverage(aa, a, "A")
-    _require_full_coverage(bb, b, "B")
     return sorted(aa[r] for r in ra) == sorted(bb[r] for r in rb)
 
 
@@ -173,14 +188,14 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
     unmatched subtrees as present-only-in-A / present-only-in-B. Iterative throughout, so it
     handles the deep-linear traces LangGraph produces without overflowing the stack.
     """
+    _require_forest(a, "A")
+    _require_forest(b, "B")
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a, ca), _roots(b, cb)
     table = {}
     canA = _intern(sa, ca, ra, label, table)
     canB = _intern(sb, cb, rb, label, table)
-    _require_full_coverage(canA, a, "A")
-    _require_full_coverage(canB, b, "B")
     show = display_label or label
 
     def render(node, steps, children):

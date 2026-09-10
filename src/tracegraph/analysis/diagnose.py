@@ -304,11 +304,20 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str]]:
                 "wall_duration_ms unavailable: the latest observed end precedes the earliest "
                 "observed start; span timestamps are inconsistent."
             )
-        elif len(ends) < len(nt.steps):
-            notes.append(
-                f"wall_duration_ms covers the {len(ends)} of {len(nt.steps)} step(s) that "
-                "reported an end timestamp; it is a lower bound on the real span."
-            )
+        else:
+            # Both ends of the span matter. A missing *start* is as distorting as a missing
+            # end: the earliest step may be the one without a usable timestamp, in which case
+            # min(starts) is later than the real beginning and the duration comes out short.
+            total = len(nt.steps)
+            gaps = []
+            if len(starts) < total:
+                gaps.append(f"{len(starts)} of {total} reported a usable start")
+            if len(ends) < total:
+                gaps.append(f"{len(ends)} of {total} reported an end")
+            if gaps:
+                notes.append(
+                    "wall_duration_ms is a lower bound: " + "; ".join(gaps) + "."
+                )
 
     evidence_items = [step.evidence for step in nt.steps if step.evidence]
 
@@ -423,7 +432,15 @@ def _comparison(
     *,
     current_patterns: list[PatternFinding],
     current_metrics: MetricSummary,
+    notes: list[str] | None = None,
 ) -> ComparisonSummary:
+    """Compare against a baseline. Appends the baseline's own metric disclosures to ``notes``.
+
+    A delta is only as trustworthy as both sides of it, so a baseline whose duration is a
+    lower bound (or whose cost had to be withheld) must say so too — otherwise the report
+    presents a confident metric_delta computed from a number it would not have published
+    on its own.
+    """
     structural = tree_diff(baseline, current, display_label=_display_name)
     table = {}
     before, after = _logical_keys(baseline, table), _logical_keys(current, table)
@@ -460,7 +477,8 @@ def _comparison(
         - sum(item.pattern_id == name for item in before_patterns)
         for name in sorted(pattern_ids)
     }
-    bm, cm = _metrics(baseline), current_metrics
+    bm, baseline_notes = _metrics_with_notes(baseline)
+    cm = current_metrics
     cost_delta: str | None = None
     if (
         bm.total_cost is not None
@@ -469,6 +487,8 @@ def _comparison(
         and bm.cost_currency == cm.cost_currency
     ):
         cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
+    if notes is not None:
+        notes.extend(f"baseline: {note}" for note in baseline_notes)
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
         topology_identical=structural.identical,
@@ -520,7 +540,20 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         warnings.append("Failure candidates are investigation leads. Containment/unknown edges do not prove propagation; explicit causal ancestry is context, not proof of exception propagation.")
     if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):
         warnings.append("Metrics sum observed span values; coverage may be partial and producer aggregates may double count.")
-    # Withheld or partially-covered metrics are disclosed, never silently absorbed.
+    # Withheld or partially-covered metrics are disclosed, never silently absorbed. The
+    # comparison is built first because it contributes the baseline's own disclosures: a
+    # delta is only as trustworthy as both sides of it.
+    comparison = (
+        _comparison(
+            nt,
+            baseline,
+            current_patterns=patterns,
+            current_metrics=metrics,
+            notes=metric_notes,
+        )
+        if baseline
+        else None
+    )
     warnings.extend(metric_notes)
     report = AnalysisReport(
         artifact_digest=_digest(nt),
@@ -538,11 +571,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         decision_evidence=[
             DecisionEvidenceFinding(**item.model_dump()) for item in nt.trace.decision_evidence
         ],
-        comparison=(
-            _comparison(nt, baseline, current_patterns=patterns, current_metrics=metrics)
-            if baseline
-            else None
-        ),
+        comparison=comparison,
         warnings=warnings,
     )
     def clean(value):

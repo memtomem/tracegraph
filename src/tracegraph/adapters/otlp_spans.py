@@ -208,15 +208,7 @@ def _iso_ts(start_nano: Any) -> str | None:
         nanos = int(start_nano)
     except (TypeError, ValueError):
         return None
-    # Exact integer arithmetic instead of nanos / 1e9. datetime resolves microseconds, so
-    # this rounds nanoseconds to the nearest one — the same value the float path produces at
-    # present-day epochs, where float64's error (~0.12us) stays well inside half a microsecond.
-    # That margin is a property of the current epoch, not of the code: past ~year 2400 a
-    # float64 second count can no longer round-trip microseconds, and the timestamp would
-    # start landing on a neighbouring microsecond. Integer math has no such horizon.
-    seconds, microseconds = divmod((nanos + 500) // 1000, 1_000_000)
-    moment = datetime.fromtimestamp(seconds, tz=timezone.utc)
-    return moment.replace(microsecond=microseconds).isoformat()
+    return datetime.fromtimestamp(nanos / 1e9, tz=timezone.utc).isoformat()
 
 
 def _int_attr(attrs: dict[str, Any], *names: str) -> int | None:
