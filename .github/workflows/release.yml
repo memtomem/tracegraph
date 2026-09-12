@@ -1,0 +1,255 @@
+name: Publish
+
+# Tag-triggered. `test-v*` rehearses against TestPyPI, `v*` publishes to PyPI. Both build
+# from the tagged commit; neither can run without the owner pushing a tag, and the `pypi`
+# environment holds the publish job for review before either upload happens.
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+      - "test-v[0-9]*"
+
+permissions:
+  contents: read
+
+# Building and publishing are separate jobs on purpose. Only `publish` holds
+# `id-token: write`, and it runs no repository code, installs no dependency and does not
+# check out the repository -- it downloads what `build` produced and calls the publisher.
+# In a single job, every build script and every transitive build dependency would run
+# inside a job that can mint an OIDC token and upload to PyPI as this project.
+#
+# Be precise about what that buys: the digest comparison in `publish` proves nothing
+# tampered with the files between the jobs. It is not an independent attestation of the
+# build, because the same job produced both the artifacts and the digests. A compromised
+# build still publishes a compromised artifact; the split removes the much larger surface
+# of build scripts and transitive build dependencies from the job holding the token.
+
+jobs:
+  build:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # The release gate reads this commit's workflow runs through the Actions API.
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          # Pinned, not floating: a `test-v` rehearsal and its production tag are two runs
+          # on two days, and an unpinned toolchain can build different bytes from the same
+          # reviewed commit. `test.yml`'s wheel job pins the same version so pull requests
+          # exercise the release toolchain. Bump deliberately, then rehearse.
+          version: "0.12.13"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install locked environment
+        run: uv sync --locked
+
+      # The wheel smoke in the next job proves the package works; it does not prove the
+      # code in it was ever tested. That is this step: the full suite must already have
+      # passed for this exact commit, on the default branch.
+      - name: Require the tagged commit to have passed CI on the default branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --no-sync python scripts/require_ci_success.py --workflow test.yml --branch tracegraph-mvp
+
+      - name: Verify the tag matches the packaged version
+        run: |
+          VERSION="${GITHUB_REF_NAME#test-v}"
+          VERSION="${VERSION#v}"
+          test "$VERSION" = "$(uv run --no-sync python -c 'import tracegraph; print(tracegraph.__version__)')"
+
+      - name: Verify the changelog entry is dated
+        run: |
+          VERSION="${GITHUB_REF_NAME#test-v}"
+          VERSION="${VERSION#v}"
+          # A dated entry is required rather than merely rejecting one spelling of
+          # "Unreleased": a missing entry must fail too. Shell pattern matching against
+          # the whole line, so the version is never a regex and the match is anchored at
+          # the heading -- prose mentioning the version cannot satisfy it.
+          found=""
+          while IFS= read -r line; do
+            case "$line" in
+              "## ${VERSION} - "*)
+                case "${line#"## ${VERSION} - "}" in
+                  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) found=yes ;;
+                esac
+                ;;
+            esac
+          done < CHANGELOG.md
+          if [ -z "$found" ]; then
+            echo "CHANGELOG.md has no dated '## ${VERSION} - YYYY-MM-DD' entry." >&2
+            echo "pyproject.toml embeds README.md as package metadata and PyPI refuses a" >&2
+            echo "re-upload, so the release notes are frozen at tag time." >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build
+
+      # Pinned to 7.0.0 deliberately. twine 6.2.0 rejects the `Metadata-Version: 2.5` the
+      # pinned backend emits ("'2.5' is not a valid metadata version"); 7.0.0 accepts it,
+      # and the publisher below runs twine 7.0.0 inside its own container. An unpinned
+      # `uvx twine` can resolve to either. See CONTRIBUTING.md.
+      - name: twine check
+        run: uvx twine@7.0.0 check dist/*
+
+      - name: Verify the distributions
+        run: |
+          VERSION="${GITHUB_REF_NAME#test-v}"
+          VERSION="${VERSION#v}"
+          # The version comes from the tag, not from a filename: this is what rejects an
+          # unexpected artifact name before it travels into a later step.
+          uv run --no-sync python scripts/verify_artifacts.py dist "$VERSION"
+
+      - name: Record artifact digests
+        id: digests
+        run: |
+          sha256sum dist/* | tee "$RUNNER_TEMP/SHA256SUMS"
+          # Random heredoc delimiter, per GitHub's guidance for multiline outputs: a
+          # predictable one is an escape hatch, because a value containing it closes the
+          # block early and the rest becomes further `key=value` output lines.
+          delimiter="$(openssl rand -hex 16)"
+          {
+            echo "sums<<${delimiter}"
+            cat "$RUNNER_TEMP/SHA256SUMS"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+    outputs:
+      sums: ${{ steps.digests.outputs.sums }}
+
+  verify-wheel:
+    # The same smoke `test.yml` runs on every pull request, but against the *downloaded*
+    # artifact rather than a local rebuild -- so the bytes verified here are the bytes
+    # `publish` uploads, and `--expected-version` pins the distribution-name lookup
+    # against the tag (a wrong name reports 0.0.0.dev0 and fails nothing else).
+    name: installed wheel (${{ matrix.extra }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: [core, cypher]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.12.13"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Install the built wheel into a locked fresh environment
+        env:
+          WHEEL_EXTRA: ${{ matrix.extra }}
+        run: |
+          set -euo pipefail
+          WHEEL_ROOT=$(mktemp -d "$RUNNER_TEMP/tracegraph-wheel.XXXXXX")
+          echo "WHEEL_ROOT=$WHEEL_ROOT" >> "$GITHUB_ENV"
+          if [ "$WHEEL_EXTRA" = cypher ]; then
+            uv export --locked --no-dev --no-emit-project --extra cypher --output-file "$WHEEL_ROOT/requirements.txt"
+          else
+            uv export --locked --no-dev --no-emit-project --output-file "$WHEEL_ROOT/requirements.txt"
+          fi
+          uv venv --python 3.12 "$WHEEL_ROOT/venv"
+          uv pip sync --python "$WHEEL_ROOT/venv/bin/python" --require-hashes "$WHEEL_ROOT/requirements.txt"
+          uv pip install --python "$WHEEL_ROOT/venv/bin/python" --no-deps dist/*.whl
+          uv pip check --python "$WHEEL_ROOT/venv/bin/python"
+
+      - name: Verify the installed entrypoint outside the checkout
+        env:
+          WHEEL_EXTRA: ${{ matrix.extra }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#test-v}"
+          VERSION="${VERSION#v}"
+          "$WHEEL_ROOT/venv/bin/python" scripts/verify_wheel.py \
+            --extra "$WHEEL_EXTRA" --expected-version "$VERSION"
+
+  publish:
+    name: Publish to ${{ startsWith(github.ref_name, 'test-') && 'TestPyPI' || 'PyPI' }}
+    needs: [build, verify-wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: ${{ startsWith(github.ref_name, 'test-') && 'https://test.pypi.org/p/agent-tracegraph' || 'https://pypi.org/p/agent-tracegraph' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - name: Verify the downloaded files match the digests the build recorded
+        # The digests arrive through the environment, never interpolated into this script.
+        # `${{ }}` inside a run: block is textual substitution, so a build-produced value
+        # containing a quote would become shell code -- executing inside the one job that
+        # holds id-token: write.
+        #
+        # coreutils only: no checkout, no project code, nothing installed.
+        env:
+          SUMS: ${{ needs.build.outputs.sums }}
+        run: |
+          # Explicit, not inherited. The runner's default shell is `bash -e`, and every
+          # check below is a plain `test` whose failure must stop the upload -- if that
+          # default ever changes, or the step's `shell:` is overridden, this block would
+          # otherwise run to the end and exit on its last command's status.
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#test-v}"
+          VERSION="${VERSION#v}"
+          printf '%s\n' "$SUMS" > "$RUNNER_TEMP/SHA256SUMS"
+          cat "$RUNNER_TEMP/SHA256SUMS"
+          # Bind the manifest to the two files that must be uploaded. Counting lines is
+          # not enough: two valid records for the same path, or for a path outside dist/,
+          # would satisfy a count and a --check while saying nothing about what is in
+          # dist/.
+          expected="$(printf 'dist/agent_tracegraph-%s-py3-none-any.whl\ndist/agent_tracegraph-%s.tar.gz\n' "$VERSION" "$VERSION" | sort)"
+          actual="$(sed -E 's/^[0-9a-f]{64} [ *]//' "$RUNNER_TEMP/SHA256SUMS" | sort)"
+          test "$actual" = "$expected"
+          test "$(find dist -type f | wc -l)" -eq 2
+          sha256sum --check --strict "$RUNNER_TEMP/SHA256SUMS"
+
+      - name: Publish to PyPI
+        if: ${{ !startsWith(github.ref_name, 'test-') }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          # No skip-existing on production. A version already there means something went
+          # wrong; reporting success would hide a partial or duplicate publication behind
+          # a green check. `verify-metadata` and `attestations` are left at their defaults
+          # (both on): the action's own twine is 7.0.0, which accepts Metadata 2.5.
+
+      - name: Publish to TestPyPI
+        if: ${{ startsWith(github.ref_name, 'test-') }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          # Rehearsals get re-run; a repeated TestPyPI upload is not a failure.
+          skip-existing: true

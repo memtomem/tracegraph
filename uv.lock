@@ -25,6 +25,7 @@ dev = [
     { name = "jsonschema" },
     { name = "langgraph" },
     { name = "pytest" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -44,6 +45,7 @@ dev = [
     { name = "jsonschema", specifier = ">=4,<5" },
     { name = "langgraph", specifier = ">=0.2" },
     { name = "pytest", specifier = ">=8" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [[package]]

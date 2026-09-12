@@ -65,6 +65,10 @@ dev = [
     "pytest>=8",
     "langgraph>=0.2",
     "jsonschema>=4,<5",
+    # Declared, not left transitive. The release-workflow shape test parses the CI YAML,
+    # and pyyaml only reaches the environment today through langgraph -> langchain-core:
+    # a dependency bump there would turn that test red for a reason nothing in it names.
+    "pyyaml>=6",
 ]
 
 [build-system]
