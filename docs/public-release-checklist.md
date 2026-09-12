@@ -54,9 +54,17 @@ what stays, and rewrite history or do not publish, rather than deleting and hopi
 - Configure independent pending Trusted Publishers on **TestPyPI and PyPI** for
   `memtomem/tracegraph`, workflow `release.yml`, environment `pypi`, project
   `agent-tracegraph`.
-- Add the `PERSONAL_ACCESS_TOKEN` secret the CLA workflow needs (fine-grained, this
-  repository only: Contents read/write for the signature branch, Issues read/write for PR
-  comments, Pull requests read for the contributor listing).
+- Add the `PERSONAL_ACCESS_TOKEN` secret the CLA workflow needs: fine-grained, this
+  repository only, with **Contents: read/write** (the signature branch), **Issues:
+  read/write** and **Pull requests: read/write**.
+
+  GitHub documents the comment endpoint as accepting *either* Issues write or Pull
+  requests write, so in principle read on one of them should do. What actually happened
+  here, on 2026-09-12: with Issues at write and Pull requests at read, posting the comment
+  returned `Resource not accessible by personal access token`; raising Pull requests to
+  write cleared it. That is an observation, not an explanation — the cause was not
+  established, and a permission change that had not taken effect yet would look the same.
+  All three at write is the configuration observed to work.
 - Seed the signature store: `cla-check.py` writes to a `cla-signatures` branch and has no
   branch-creation path, so create that orphan branch first, containing only
   `signatures/v1/cla.json` = `{"signedContributors": []}`.
