@@ -11,7 +11,7 @@ In-memory by default (``ladybug.Database(":memory:")``) so it matches the InMemo
 ephemerality. Pass ``path=`` to persist. Database caches are version-local and rebuildable;
 durable persistence is the JSON artifact, not the DB directory.
 
-Requires the ``[cypher]`` extra (``pip install tracegraph[cypher]``). The import will fail
+Requires the ``[cypher]`` extra (``pip install agent-tracegraph[cypher]``). The import will fail
 cleanly with the ModuleNotFoundError raised by ``ladybug`` itself; the package's default install
 never touches this module.
 """

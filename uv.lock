@@ -3,6 +3,50 @@ revision = 3
 requires-python = ">=3.12"
 
 [[package]]
+name = "agent-tracegraph"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "langgraph-checkpoint" },
+    { name = "langgraph-checkpoint-sqlite" },
+    { name = "pydantic" },
+    { name = "rich" },
+    { name = "typer" },
+    { name = "xxhash" },
+]
+
+[package.optional-dependencies]
+cypher = [
+    { name = "ladybug" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "jsonschema" },
+    { name = "langgraph" },
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ladybug", marker = "extra == 'cypher'", specifier = ">=0.18,<0.19" },
+    { name = "langgraph-checkpoint", specifier = ">=4.1" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=2" },
+    { name = "pydantic", specifier = ">=2,<3" },
+    { name = "rich", specifier = ">=13" },
+    { name = "typer", specifier = ">=0.12" },
+    { name = "xxhash", specifier = ">=3" },
+]
+provides-extras = ["cypher"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "jsonschema", specifier = ">=4,<5" },
+    { name = "langgraph", specifier = ">=0.2" },
+    { name = "pytest", specifier = ">=8" },
+]
+
+[[package]]
 name = "aiosqlite"
 version = "0.22.1"
 source = { registry = "https://pypi.org/simple" }
@@ -869,48 +913,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
-]
-
-[[package]]
-name = "tracegraph"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "langgraph-checkpoint-sqlite" },
-    { name = "pydantic" },
-    { name = "rich" },
-    { name = "typer" },
-    { name = "xxhash" },
-]
-
-[package.optional-dependencies]
-cypher = [
-    { name = "ladybug" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "jsonschema" },
-    { name = "langgraph" },
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ladybug", marker = "extra == 'cypher'", specifier = ">=0.18,<0.19" },
-    { name = "langgraph-checkpoint-sqlite", specifier = ">=2" },
-    { name = "pydantic", specifier = ">=2,<3" },
-    { name = "rich", specifier = ">=13" },
-    { name = "typer", specifier = ">=0.12" },
-    { name = "xxhash", specifier = ">=3" },
-]
-provides-extras = ["cypher"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "jsonschema", specifier = ">=4,<5" },
-    { name = "langgraph", specifier = ">=0.2" },
-    { name = "pytest", specifier = ">=8" },
 ]
 
 [[package]]
