@@ -54,9 +54,12 @@ what stays, and rewrite history or do not publish, rather than deleting and hopi
 - Configure independent pending Trusted Publishers on **TestPyPI and PyPI** for
   `memtomem/tracegraph`, workflow `release.yml`, environment `pypi`, project
   `agent-tracegraph`.
-- Add the `PERSONAL_ACCESS_TOKEN` secret the CLA workflow needs (fine-grained, this
-  repository only: Contents read/write for the signature branch, Issues read/write for PR
-  comments, Pull requests read for the contributor listing).
+- Add the `PERSONAL_ACCESS_TOKEN` secret the CLA workflow needs: fine-grained, this
+  repository only, with **Contents: read/write** (the signature branch), **Issues:
+  read/write** and **Pull requests: read/write**. Pull requests must be *write*, not read:
+  the script posts to `/issues/{n}/comments`, and when that number is a pull request
+  GitHub enforces the Pull requests permission rather than the Issues one — measured, the
+  token gets `Resource not accessible by personal access token` otherwise.
 - Seed the signature store: `cla-check.py` writes to a `cla-signatures` branch and has no
   branch-creation path, so create that orphan branch first, containing only
   `signatures/v1/cla.json` = `{"signedContributors": []}`.

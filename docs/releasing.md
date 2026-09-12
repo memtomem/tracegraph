@@ -62,6 +62,13 @@ and the local gate name `twine@7.0.0` explicitly. See `CONTRIBUTING.md`.
 5. Create the same pending publisher on **PyPI**. The two are separate services and both
    must be configured. A pending publisher does not reserve the name.
 
+   **"Environment name" means the GitHub environment, not the index.** One environment
+   named `pypi` serves both, because which index a run uploads to is decided by the tag,
+   not by the environment — so `pypi` goes in the TestPyPI form as well. Filling in
+   `testpypi` there fails the rehearsal with `invalid-publisher: valid token, but no
+   corresponding publisher`, which is what happened on the first attempt at 0.2.0. A
+   pending publisher cannot be edited field by field: remove it and add it again.
+
 ## Cutting a release
 
 ### 1. The release-prep commit
@@ -227,6 +234,10 @@ with the prerelease flag on; the tag and the package version are the same number
   the wheel smoke — re-run that workflow run from the Actions UI once the cause is fixed
   outside the repository, or push a new commit and a new tag if the fix is a code change.
   The tag still points at the same commit and nothing has been published.
+- **A publisher mismatch costs nothing but time.** Trusted Publishing fails at the OIDC
+  token exchange, before any upload, so the index never sees the version and the number is
+  not consumed. Fix the publisher, re-run the same failed run, same tag, same version.
+  Ask *which step did it fail at*, not *is this reversible* — the answer follows.
 - **Do not move, delete or recreate a tag**, and do not reuse a version once anything
   reached an index. Fix forward with a new patch or prerelease version. PyPI refuses a
   re-upload, so the number is spent even if what landed was wrong.

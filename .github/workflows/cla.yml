@@ -43,5 +43,7 @@ jobs:
           SIGNATURES_PATH: signatures/v1/cla.json
           SIGNATURES_BRANCH: cla-signatures
           CLA_DOCUMENT_URL: https://github.com/memtomem/tracegraph/blob/tracegraph-mvp/CLA.md
-          CLA_ALLOWLIST: dependabot[bot],memtomem
+          # Both accounts are the maintainer: `memtomem` owns the repository and
+          # `tsdata` is the account the commit author e-mail resolves to.
+          CLA_ALLOWLIST: dependabot[bot],memtomem,tsdata
           CLA_SIGNATURE_TEXT: I have read the CLA Document and I hereby sign the CLA
