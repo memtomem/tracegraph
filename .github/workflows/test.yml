@@ -33,6 +33,11 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
+          # Pinned to match release.yml, so the toolchain that will build the published
+          # artifacts is the one every pull request exercises. The other jobs below
+          # deliberately track whatever setup-uv installs by default -- catching toolchain
+          # breakage early is their point.
+          version: "0.12.13"
 
       - name: Set up Python
         run: uv python install 3.12
@@ -54,11 +59,27 @@ jobs:
           uv pip sync --python "$WHEEL_ROOT/venv/bin/python" --require-hashes "$WHEEL_ROOT/requirements.txt"
           uv pip install --python "$WHEEL_ROOT/venv/bin/python" --no-deps "$WHEEL_ROOT"/dist/*.whl
           uv pip check --python "$WHEEL_ROOT/venv/bin/python"
+          # Read with the environment's own 3.12 interpreter, not the runner's `python3`,
+          # so this block stays copy-pasteable as the handoff runbook documents it.
+          VERSION="$("$WHEEL_ROOT/venv/bin/python" -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+          echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # The same two checks release.yml runs on a tag. Running them here means a source
+      # distribution that stops being buildable, or that starts carrying tests, is caught
+      # on the pull request rather than by whoever downloads it from PyPI. There is no tag
+      # here, so the version comes from pyproject.toml.
+      - name: twine check and verify the distributions
+        run: |
+          set -euo pipefail
+          uvx twine@7.0.0 check "$WHEEL_ROOT"/dist/*
+          "$WHEEL_ROOT/venv/bin/python" scripts/verify_artifacts.py "$WHEEL_ROOT/dist" "$PACKAGE_VERSION"
 
       - name: Verify installed entrypoint outside checkout
         env:
           WHEEL_EXTRA: ${{ matrix.extra }}
-        run: '"$WHEEL_ROOT/venv/bin/python" scripts/verify_wheel.py --extra "$WHEEL_EXTRA"'
+        run: >-
+          "$WHEEL_ROOT/venv/bin/python" scripts/verify_wheel.py
+          --extra "$WHEEL_EXTRA" --expected-version "$PACKAGE_VERSION"
 
   phoenix-cli-contract:
     name: Phoenix CLI contract

@@ -78,7 +78,8 @@ diff와 무관하다** — 로그가 도구 실행 전에 끝나는 것이 판�
    옵션을 추가할지. 이번에는 README의 범위 설명만 정정했다.
 4. **review-candidates 스키마**: candidate 수준이 `additionalProperties: true`라 body 필드가 v1으로 검증된다.
 5. **`phoenix` 종료 코드**: 같은 환경 실패에 `doctor`는 1, `diagnose`는 2를 쓴다.
-6. **LICENSE 부재**: 배포용으로 패키징되어 있으나 라이선스가 없다. 라이선스 선택은 소유자의 결정이다.
+6. ~~**LICENSE 부재**~~ — **결정됨(2026-09-12, PR #23)**: Apache-2.0 + DAPADA CLA.
+   배포명은 `agent-tracegraph`이고 import 패키지·CLI·스키마 `kind` 상수는 `tracegraph` 그대로다.
 
 
 ## 현재 전달 상태 — 2026-09-08 (Asia/Seoul)
@@ -156,8 +157,14 @@ uv venv --python 3.12 "$WHEEL_ROOT/venv"
 uv pip sync --python "$WHEEL_ROOT/venv/bin/python" --require-hashes "$WHEEL_ROOT/requirements.txt"
 uv pip install --python "$WHEEL_ROOT/venv/bin/python" --no-deps "$WHEEL_ROOT"/dist/*.whl
 uv pip check --python "$WHEEL_ROOT/venv/bin/python"
-"$WHEEL_ROOT/venv/bin/python" scripts/verify_wheel.py --extra "$WHEEL_EXTRA"
+VERSION="$("$WHEEL_ROOT/venv/bin/python" -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
+uvx twine@7.0.0 check "$WHEEL_ROOT"/dist/*
+"$WHEEL_ROOT/venv/bin/python" scripts/verify_artifacts.py "$WHEEL_ROOT/dist" "$VERSION"
+"$WHEEL_ROOT/venv/bin/python" scripts/verify_wheel.py --extra "$WHEEL_EXTRA" --expected-version "$VERSION"
 ```
+
+`--expected-version`은 배포명 조회가 조용히 실패하는 경우를 막는다. 이름이 틀리면
+`PackageNotFoundError`가 삼켜져 정상 설치가 `0.0.0.dev0`을 보고한다.
 
 ## 다음 작업과 계약 경계
 
@@ -176,6 +183,21 @@ uv pip check --python "$WHEEL_ROOT/venv/bin/python"
   제품 소스와 패키지 의존성은 이 후속 수정에서도 바꾸지 않았다.
 - Bash 3.2에서 문서/CI 각각 core/Cypher의 **4개 shell 경로 통과**.
   이 검사는 uv stub으로 export 인자와 shell 동작을 검증했으며 새 설치 실행 증거는 아니다.
+
+### 릴리스 경로 — 2026-09-12
+
+PR #22(native 실패 수집)와 PR #23(license·CLA·PyPI 메타데이터)에 이어 태그 기반 배포
+워크플로를 추가했다. **이 PR 자체는 아무것도 배포하지 않는다.** 배포에는 소유자의 태그 push와
+아래 일회성 설정이 모두 필요하다.
+
+- `test-v*` → TestPyPI 예행, `v*` → PyPI. Trusted Publishing이며 장기 토큰은 없다.
+- 빌드 전 게이트: 태그 커밋이 기본 브랜치에 있고 그 커밋에 대한 `tests` push 실행이 이미
+  성공했는지 확인한다. 대기(polling)하지 않으므로, CI가 끝나기 전에 태그를 밀면 실패하고
+  Actions UI에서 재실행하라고 안내한다.
+- 절차와 소유자 일회성 설정은 [릴리스 런북](releasing.md), 공개 전환 점검은
+  [공개 체크리스트](public-release-checklist.md)에 있다.
+- `twine check`는 게이트로 복귀했다. twine 6이 거부하던 `Metadata-Version: 2.5`를
+  twine 7.0.0이 수용하며, 배포 액션도 내부적으로 twine 7.0.0을 쓴다. 버전 핀은 유지한다.
 
 ### 기능 개선 백로그
 

@@ -34,21 +34,20 @@ uv run --no-sync --extra cypher pytest -m "not perf"
 `uv sync --locked` plus `uv run --no-sync` is deliberate: it fails on lockfile drift instead
 of silently resolving something different from CI.
 
-**`twine check` currently false-fails here.** The pinned backend emits
-`Metadata-Version: 2.5`, and twine 6.2.0 (packaging 26.0) rejects it with:
+**Pin `twine` to 7.0.0 when you run it.** The pinned backend emits
+`Metadata-Version: 2.5`. twine 6.2.0 rejects that outright:
 
 ```
 InvalidDistribution: Invalid distribution metadata: '2.5' is not a valid metadata version
 ```
 
-PyPI itself accepts that metadata. The primary evidence is the sibling project: the published
-`toolgraph` 0.0.1 wheel on PyPI carries `Metadata-Version: 2.5` and `Generator: hatchling
-1.32.0` — download it and read its `METADATA` and `WHEEL` files. So the rejection is the
-linter trailing the spec, not a defect in the artifact.
+twine **7.0.0 accepts it** — measured against this project's own build. So the rejection was
+the linter trailing the spec, and it is fixed upstream; `uvx twine@7.0.0 check dist/*` is a
+real gate again and both CI and the release workflow run it. Do not drop the version pin:
+an unpinned `uvx twine` can still resolve to 6.x. The publishing action runs twine 7.0.0
+inside its own container for the same reason.
 
-Scope the workaround to exactly that: do not gate a release on `twine check` while it rejects
-2.5. Running it is still useful for its other checks — just don't treat *this* failure as
-authoritative. Once a twine release understands 2.5, restore it as a gate.
+Releases are tag-driven and documented in the [release runbook](docs/releasing.md).
 
 Lint is **not** a style gate. The rule set is narrow (`F,E4,E7,E9,B`) and aimed at real
 defects — undefined names, unused imports, shadowed builtins. `UP` is excluded because

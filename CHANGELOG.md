@@ -54,6 +54,25 @@ Dated to `## 0.2.0 - YYYY-MM-DD` at release time.
   way to ask an installed build what it was.
 - An sdist allowlist. Previously the source distribution shipped everything git tracked —
   tests, docs, CI workflows, the lockfile and the checkpoint fixtures.
+- A tag-triggered release workflow publishing through PyPI Trusted Publishing: `test-v*`
+  rehearses against TestPyPI, `v*` publishes to PyPI. Only the publishing job holds an OIDC
+  token, and it checks out nothing, installs nothing, and uploads only files whose digests
+  match what the build job recorded. Before any of that, the build refuses a tag whose
+  commit is not on the default branch, has no green `tests` run of its own, disagrees with
+  the packaged version, or has no dated changelog entry.
+- `scripts/verify_artifacts.py`, which checks that the built distributions are exactly the
+  two files that will be uploaded and that the source distribution carries only what the
+  packaging allowlist intends. It also refuses tests, docs, CI configuration and the
+  lockfile outright, so widening that allowlist cannot quietly start shipping them, and
+  refuses any archive member whose path does not go where it reads — a `..` segment is
+  what would let a member satisfy both lists and still land somewhere else, or outside
+  the archive entirely, when someone extracts it.
+- `scripts/require_ci_success.py`, the release gate described above.
+- A [release runbook](docs/releasing.md) and a
+  [public release checklist](docs/public-release-checklist.md).
+- The installed-wheel CI jobs now pin the version they expect and run the artifact
+  verifier, so the release checks are exercised on every pull request rather than first at
+  tag time.
 
 ### Changed
 
@@ -63,7 +82,10 @@ Dated to `## 0.2.0 - YYYY-MM-DD` at release time.
   you install differs. Installing from source or from a checkout is unaffected.
 - The build backend version is pinned (`hatchling==1.32.0`), so a release rehearsal and the
   production tag cannot run *different backend versions* against the same commit. This is
-  drift control, not reproducibility: hatchling's own dependencies still float.
+  drift control, not reproducibility: hatchling's own dependencies still float. The uv
+  version used to build is pinned in the same way.
+- `twine check` is a gate again, pinned to `twine@7.0.0`. It was disabled because twine 6
+  rejected the `Metadata-Version: 2.5` this backend emits; twine 7 accepts it.
 - **Artifact schema version 3**, stamped *by content*: an artifact carrying derived task steps
   declares 3 so an older reader refuses it by name instead of failing on an enum, while
   artifacts without them still serialize as version 2 byte for byte. The envelope is inside

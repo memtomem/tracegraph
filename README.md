@@ -273,6 +273,10 @@ outside the checkout, checks candidate golden bytes and baseline diagnosis, and 
 the optional-backend boundary and parity. See the [handoff runbook](docs/HANDOFF.md)
 for local reproduction and the distinction between local checks and remote/server evidence.
 
+Releases are tag-driven: a `v*` tag publishes to PyPI through Trusted Publishing, and a
+`test-v*` tag rehearses the same build against TestPyPI. The procedure, including what is
+verified before anything is uploaded, is in the [release runbook](docs/releasing.md).
+
 The optional Cypher accelerator (`agent-tracegraph[cypher]`, LadybugDB) is **not** required for the
 core; `explain` and `query` can opt into it with `--backend ladybug`. Its tests are marked
 `@pytest.mark.cypher` and skip cleanly without the extra. The tested LadybugDB compatibility
