@@ -282,8 +282,21 @@ Explicit causal ancestry supplies context, not proof that an exception propagate
 Explicit OTLP OK takes precedence over handled exception events on new ingestion; old
 artifacts are not reinterpreted.
 
-LangGraph observes the configured error state channel; native pending-write exceptions
-are not yet ingested. Missing observed errors do not prove success. Link preservation
+LangGraph ingestion reads both the configured error state channel and native task failures
+from checkpoint pending writes. A node that raises becomes a derived `task` step under the
+checkpoint that scheduled it, never a mark on that checkpoint, whose own name belongs to the
+node that produced it. The failing node is named by recomputing LangGraph's task id from
+checkpoint data; when nothing proves which node ran, the step stays unnamed rather than
+borrowing a neighbour's name. When one task raises, LangGraph
+cancels its siblings and records that through the same channel; a cancelled task is reported
+as an `unset` step with no message, because it was torn down rather than at fault. Only the
+latest persisted error survives per task, so repeated attempts are not reconstructed, and
+`Send` packets are nameable only where `langgraph.types` is importable — an ordinary install discloses them instead. An artifact carrying derived task
+steps declares artifact `schema_version` 3, so an older reader refuses it by name; artifacts
+without them still serialize as version 2, byte for byte. Missing observed errors still do not
+prove success: an artifact ingested by an older build, or one using an unrecognized checkpoint
+layout, carries no derived step and looks exactly like a clean run, which is why the capture
+disclosure is unconditional. Link preservation
 means valid in-trace links only. Structural diff compares the derived tree and discloses
 lossy step counts. Metrics sum available span observations: partial coverage and producer
 aggregation can undercount or double count. Coverage gaps are disclosed rather than absorbed

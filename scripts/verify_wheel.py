@@ -145,8 +145,28 @@ with LadybugStore.from_trace(nt) as store:
     if artifact.dumps(store.trace()) != artifact.dumps(nt):
         raise RuntimeError('Ladybug artifact round-trip changed bytes')
 """])
+        # Native LangGraph failures, from a committed checkpoint DB. Only the `langgraph`
+        # *namespace* exists here (langgraph-checkpoint ships `langgraph.checkpoint`);
+        # `langgraph.types` and the graph library itself are absent, which is the real
+        # deployment shape and the one where Send packets cannot be revived.
+        checkpoints = repo / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
+        (work / "checkpoints.sqlite").write_bytes(checkpoints.read_bytes())
+        cli("ingest", "--sqlite", "checkpoints.sqlite", "--thread", "t", "--out", "native.json")
+        native = json.loads((work / "native.json").read_text(encoding="utf-8"))
+        require(native["schema_version"] == 3,
+                "an artifact carrying derived task steps must declare the version that reads it")
+        derived = [s for s in native["trace"]["steps"] if s["source"] == "task"]
+        require([s["name"] for s in derived] == ["call_tool"],
+                "native failure lost its node attribution outside the checkout")
+        require(derived[0]["status"] == "error" and native["trace"]["trace"]["status"] == "error",
+                "native failure did not reach the trace status")
+        # The same build still writes v2 for content that needs no new reader.
+        require(json.loads((work / "failure.json").read_text(encoding="utf-8"))["schema_version"] == 2,
+                "envelope version must follow content, not the build")
+
         require((work / "source.json").read_bytes() == source, "source fixture was modified")
         return {"result": "PASS", "extra": extra, "module": str(module),
+                "native_failure": "attributed",
                 "candidate_golden": "byte-identical", "baseline_digest": baseline_digest,
                 "backend_parity": "PASS" if extra == "cypher" else "NOT_RUN"}
 

@@ -575,7 +575,13 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         if lossy:
             warnings.append(f"{label}: derived tree drops causes at {lossy} step(s); topology comparison covers TREE_PARENT only.")
         if trace.trace.source_kind == "langgraph":
-            warnings.append(f"{label}: LangGraph errors reflect the configured state channel only; no observed error does not prove execution success.")
+            # Unconditional on purpose. Capture now covers both the configured error channel
+            # and native task failures, but an artifact ingested by an older build, or one
+            # whose checkpoints use a layout this adapter does not recognize, carries no
+            # derived failure step and looks identical to a clean run. Absence of a failure
+            # is therefore still not evidence of success, and nothing in the artifact says
+            # which case applies — so the disclosure cannot be made conditional.
+            warnings.append(f"{label}: LangGraph failure capture covers the configured error channel and task pending writes for recognized checkpoint layouts; absence of an observed failure does not prove execution success.")
         if trace.trace.links_preserved:
             warnings.append(f"{label}: link preservation covers valid in-trace links only; foreign or unresolved links are omitted.")
     if primary or propagated:

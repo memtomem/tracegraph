@@ -51,12 +51,19 @@ class StepKind(str, Enum):
 
 
 class StepSource(str, Enum):
-    """How the step entered the trace (mirrors LangGraph ``metadata.source``)."""
+    """How the step entered the trace (mirrors LangGraph ``metadata.source``).
+
+    ``TASK`` is the one value that does *not* come from ``metadata.source``: it marks a step
+    derived from a checkpoint's **pending writes** (one LangGraph task) rather than from a
+    checkpoint itself. It is explicit provenance, not a naming convention — ``step_id`` is an
+    unrestricted string, so nothing about an id may be read as evidence of how a step was made.
+    """
 
     INPUT = "input"
     LOOP = "loop"
     UPDATE = "update"
     FORK = "fork"
+    TASK = "task"
 
 
 class StepStatus(str, Enum):
@@ -187,6 +194,10 @@ class RawTrace(BaseModel):
     trace: Trace
     steps: list[Step] = Field(default_factory=list)
     causal_edges: list[Edge] = Field(default_factory=list)
+    #: Disclosures that are only knowable while reading the source (e.g. a checkpoint whose
+    #: task writes could not be attributed to a node). They describe the *ingestion*, not the
+    #: run, so they never reach ``NormalizedTrace`` or the artifact — the CLI prints them.
+    ingest_warnings: list[str] = Field(default_factory=list)
 
     def steps_by_id(self) -> dict[str, Step]:
         return {s.step_id: s for s in self.steps}

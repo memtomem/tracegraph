@@ -16,15 +16,36 @@ import os
 from pathlib import Path
 import tempfile
 
-from tracegraph.model import NormalizedTrace
+from tracegraph.model import NormalizedTrace, StepSource
 
 #: Bump when the on-disk shape changes incompatibly.
-ARTIFACT_SCHEMA_VERSION = 2
+ARTIFACT_SCHEMA_VERSION = 3
+
+#: Versions this build can read. 1 needs a migration (see ``_migrate_v1``); 2 -> 3 is the
+#: identity, because 3 adds only a new ``Step.source`` value and changes nothing existing.
+_READABLE_VERSIONS = (1, 2, ARTIFACT_SCHEMA_VERSION)
+
+
+def _required_version(nt: NormalizedTrace) -> int:
+    """The lowest version that can read these bytes.
+
+    Stamped from the *content*, not from the build, so serializing an artifact that uses no
+    new vocabulary keeps producing byte-identical v2 output. That matters because the
+    envelope is inside the hash: ``review_candidates`` binds each candidate to the sha256 of
+    the artifact file, and ``LadybugStore`` round-trips artifacts byte for byte. A blanket
+    bump would invalidate digests already exported in review-candidate reports for artifacts
+    whose content did not change at all.
+
+    An artifact that *does* carry a derived task step is stamped 3, so an older build refuses
+    it with a clear "unsupported artifact schema_version" instead of a pydantic enum error.
+    """
+    task = StepSource.TASK
+    return 3 if any(step.source is task for step in nt.steps) else 2
 
 
 def dumps(nt: NormalizedTrace) -> str:
     """Serialize a trace to a JSON string (stable key order for diff-friendly output)."""
-    payload = {"schema_version": ARTIFACT_SCHEMA_VERSION, "trace": nt.model_dump(mode="json")}
+    payload = {"schema_version": _required_version(nt), "trace": nt.model_dump(mode="json")}
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
@@ -106,10 +127,10 @@ def from_obj(payload: object) -> NormalizedTrace:
             f"artifact JSON must be a top-level object, got {type(payload).__name__}"
         )
     version = payload.get("schema_version")
-    if version not in (1, ARTIFACT_SCHEMA_VERSION):
+    if version not in _READABLE_VERSIONS:
+        readable = ", ".join(str(v) for v in _READABLE_VERSIONS)
         raise ValueError(
-            f"unsupported artifact schema_version {version!r} "
-            f"(this build reads 1 and {ARTIFACT_SCHEMA_VERSION})"
+            f"unsupported artifact schema_version {version!r} (this build reads {readable})"
         )
     # Guard the last raw dereference: a dict with the right schema_version but no "trace" key
     # (e.g. `{"schema_version": 1}`) would otherwise raise a bare KeyError, which — like the

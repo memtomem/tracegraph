@@ -303,7 +303,7 @@ def test_redacted_alias_does_not_become_matching_identity():
     assert len({c.logical_step_key for c in comparison.behavior_changes}) == 2
 
 
-@pytest.mark.parametrize("adapter", ["otlp", "phoenix", "langgraph"])
+@pytest.mark.parametrize("adapter", ["otlp", "phoenix", "langgraph", "langgraph-native"])
 def test_report_privacy_after_real_adapter_ingestion(adapter):
     secret = "PRIVATE ACCOUNT BODY"
     if adapter == "otlp":
@@ -322,10 +322,23 @@ def test_report_privacy_after_real_adapter_ingestion(adapter):
         class State(TypedDict):
             error: str
         graph = StateGraph(State)
-        graph.add_node(secret, lambda state: {"error": secret})
+        if adapter == "langgraph-native":
+            # A raised exception carries the secret in its *message*, which reaches the trace
+            # through pending writes rather than through a state channel — a second way in,
+            # so the redaction guarantee has to hold on that path too.
+            def node(state):
+                raise RuntimeError(secret)
+        else:
+            def node(state):
+                return {"error": secret}
+        graph.add_node(secret, node)
         graph.add_edge(START, secret)
         graph.add_edge(secret, END)
-        graph.compile(checkpointer=saver).invoke({"error":""}, {"configurable":{"thread_id":"t"}})
+        app = graph.compile(checkpointer=saver)
+        try:
+            app.invoke({"error":""}, {"configurable":{"thread_id":"t"}})
+        except RuntimeError:
+            assert adapter == "langgraph-native"
         raw = LangGraphCheckpointAdapter(saver).ingest("t")
     nt = normalize(raw)
     report = analyze(nt)

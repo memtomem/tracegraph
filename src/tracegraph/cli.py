@@ -729,7 +729,13 @@ def ingest(
     target = out or artifact.default_path(thread)
     _distinct_paths([sqlite], [target])
     try:
-        nt = normalize(ingest_snapshot(sqlite, thread, error_channel=error_channel))
+        raw = ingest_snapshot(sqlite, thread, error_channel=error_channel)
+        for warning in raw.ingest_warnings:
+            # Disclosures about the *read*, not the run: they describe evidence this ingest
+            # could not interpret, so they belong on stderr next to the command that read it
+            # rather than in the artifact, which records the run itself.
+            err_console.print(f"[yellow]warning:[/] {escape(warning)}")
+        nt = normalize(raw)
         _save_ingested(nt, target, explicit=out is not None)
     except (OSError, ValueError, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc
