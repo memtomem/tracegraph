@@ -33,6 +33,7 @@ from tracegraph.analysis import Match
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
+from tracegraph import __version__
 from tracegraph.analysis import structure_only
 from tracegraph.model import EdgeType, NormalizedTrace, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
@@ -51,6 +52,30 @@ phoenix_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(phoenix_app, name="phoenix")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        # Printed bare: this is the one output a release script parses, and a prefix would
+        # make every consumer strip it.
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        None,
+        "--version",
+        "-V",
+        help="Print the installed version and exit.",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """Causal-graph analysis of LangGraph, Phoenix, and OpenInference traces."""
+
+
 console = Console()
 err_console = Console(stderr=True)  # diagnostics (warnings) — keep them off result stdout
 
@@ -580,7 +605,7 @@ def _store_cls(backend: QueryBackend) -> type[Any]:
         if exc.name != "ladybug":
             raise
         raise typer.BadParameter(
-            "--backend ladybug requires the optional tracegraph[cypher] dependency"
+            "--backend ladybug requires the optional agent-tracegraph[cypher] dependency"
         ) from exc
     return LadybugStore
 

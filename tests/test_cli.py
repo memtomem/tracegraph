@@ -1337,3 +1337,30 @@ def test_inspect_header_survives_markup_in_trace_id_and_source_kind(tmp_path):
     validated = runner.invoke(app, ["validate", str(path)])
     assert validated.exit_code == 0, validated.output
     assert "t[/]x[/]" in validated.output, validated.output
+
+
+def test_version_option_prints_bare_version():
+    """`--version` is what a release script parses, so it prints the number and nothing else."""
+    from tracegraph import __version__
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip() == __version__
+    assert __version__ != "0.0.0.dev0", (
+        "the distribution name in tracegraph/__init__.py does not match pyproject; "
+        "this fails silently, reporting a dev version for a real install"
+    )
+
+
+def test_version_short_flag_matches():
+    assert (
+        runner.invoke(app, ["-V"]).stdout.strip()
+        == runner.invoke(app, ["--version"]).stdout.strip()
+    )
+
+
+def test_no_args_still_shows_help():
+    """Adding a root callback must not turn a bare invocation into a silent success."""
+    result = runner.invoke(app, [])
+    assert result.exit_code != 0
+    assert "Usage:" in result.stdout

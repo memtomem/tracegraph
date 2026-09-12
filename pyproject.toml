@@ -1,12 +1,41 @@
 [project]
-name = "tracegraph"
-version = "0.1.0"
+# The PyPI name `tracegraph` is held by an unrelated project, so the *distribution* is
+# `agent-tracegraph`. The import package and the console script stay `tracegraph`, and so do
+# the schema `kind` constants and the TRACEGRAPH_* environment variables — those are package
+# identity, not distribution identity, and renaming them would break published contracts.
+name = "agent-tracegraph"
+version = "0.2.0"
 description = "Time-travel debugging and causal RCA for LangGraph agent traces, on a causal graph."
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "DAPADA Inc.", email = "contact@dapada.co.kr" },
+    { name = "Tracegraph contributors" },
+]
+keywords = [
+    "langgraph", "tracing", "observability", "debugging",
+    "causal-graph", "root-cause-analysis", "agents", "phoenix", "otlp",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    # 3.12 only: that is what CI actually proves. Widen this when the matrix does.
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Debuggers",
+    "Typing :: Typed",
+]
+
 dependencies = [
     "pydantic>=2,<3",
     "langgraph-checkpoint-sqlite>=2",
+    # Declared directly, not left transitive, because `ingest` now calls its serializer API:
+    # `JsonPlusSerializer(allowed_msgpack_modules=...)` is what stops a checkpoint payload
+    # invoking arbitrary callables, and it does not exist before 4.1 (4.0.0 raises TypeError,
+    # verified). A transitive dependency is not a contract.
+    "langgraph-checkpoint>=4.1",
     "typer>=0.12",
     "rich>=13",
     # Recomputes a LangGraph task id to name the node behind a native failure. LangGraph
@@ -15,6 +44,12 @@ dependencies = [
     # langgraph-checkpoint pulls in only ormsgpack — so the dependency is ours to declare.
     "xxhash>=3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/memtomem/tracegraph"
+Repository = "https://github.com/memtomem/tracegraph"
+Issues = "https://github.com/memtomem/tracegraph/issues"
+Changelog = "https://github.com/memtomem/tracegraph/blob/tracegraph-mvp/CHANGELOG.md"
 
 [project.scripts]
 tracegraph = "tracegraph.cli:main"
@@ -33,11 +68,31 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+# Pinned exactly. A release rehearsal and the production tag are two builds on two days, and
+# an unpinned backend can put different bytes behind the same reviewed commit.
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tracegraph"]
+
+# Without an allowlist hatchling ships everything git tracks — tests, docs, CI workflows, the
+# lockfile, the checkpoint fixtures. An sdist is a build input for the wheel, not a mirror of
+# the repository: it carries the package, the contracts other repos consume, the README PyPI
+# renders, and the license. (hatchling also force-includes PKG-INFO and the VCS ignore file
+# regardless of this list.)
+[tool.hatch.build.targets.sdist]
+# Root files are anchored with a leading slash: a bare `README.md` matches at every depth and
+# quietly pulled `tests/fixtures/*/README.md` into an sdist that is supposed to exclude tests.
+include = [
+    "/src/tracegraph/",
+    "/contracts/",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE",
+    "/SECURITY.md",
+    "/pyproject.toml",
+]
 
 # The package is fully annotated; without this marker PEP 561 tells type checkers to ignore
 # the installed distribution, so downstream consumers get no types at all.

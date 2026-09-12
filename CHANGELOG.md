@@ -1,0 +1,95 @@
+# Changelog
+
+All notable changes to Tracegraph are documented here.
+
+The **artifact** schema version and the **report**/**review-candidate** JSON schemas are
+separate contracts from this version number; changes to any of them are called out
+explicitly.
+
+## Unreleased
+
+Dated to `## 0.2.0 - YYYY-MM-DD` at release time.
+
+### Fixed
+
+- **A LangGraph node that raised an exception was reported as a successful run**
+  (`status=ok`, `error_count=0`). LangGraph does not route such a failure through a state
+  channel: it records it in the checkpoint's pending writes and writes no further checkpoint,
+  so reading channel values alone could not see it and no `--error-channel` value recovered
+  it. Each failed task now becomes its own step, hanging off the checkpoint that scheduled it
+  rather than marking that checkpoint — which is named after the node that *produced* it, so
+  marking it reported the wrong node.
+- A task cancelled because a *sibling* failed is no longer counted as a second failure.
+  LangGraph records sibling cancellation through the same `__error__` channel as a genuine
+  fault; those tasks are reported as `unset` with no message, so one fault stays one failure
+  and a healthy node is never a primary candidate.
+
+### Security
+
+- **Reading a checkpoint database no longer executes what it contains.** LangGraph's
+  deserializer revives stored objects by importing a module and calling a name, both taken
+  from the payload, and by default an unrecognized target is logged and then called — so a
+  crafted checkpoint naming `os.system` or `subprocess.run` ran on the machine doing the
+  analysis (both verified against the pinned dependency). `tracegraph ingest` now passes a
+  serializer with an empty allowlist.
+
+  **Behaviour change:** objects outside the framework's registered types no longer revive
+  through `ingest`; they come back as their raw arguments. If you were relying on a custom
+  class being reconstructed from checkpoint state, it will now surface as plain data.
+  Constructing `LangGraphCheckpointAdapter` yourself is unaffected — the serializer is
+  whichever one your saver carries.
+
+### Added
+
+- The failing node's name, recovered by recomputing LangGraph's task id from checkpoint data.
+  The match is self-verifying, so a task nothing identifies keeps no name rather than
+  borrowing a neighbour's.
+- `StepSource.TASK`, marking a step derived from pending writes rather than from a checkpoint.
+- `RawTrace.ingest_warnings`, printed by `ingest` to stderr — disclosures about the *read*
+  (for example `Send` packets that could not be decoded), which are not part of the run and so
+  never enter the artifact.
+- First public release metadata: Apache-2.0 `LICENSE`, `CLA.md`, `CODE_OF_CONDUCT.md`,
+  `CONTRIBUTING.md`, `SECURITY.md`, and PyPI classifiers, keywords, authors and project URLs.
+- `tracegraph --version` (`-V`), which prints the bare version and nothing else. There was no
+  way to ask an installed build what it was.
+- An sdist allowlist. Previously the source distribution shipped everything git tracked —
+  tests, docs, CI workflows, the lockfile and the checkpoint fixtures.
+
+### Changed
+
+- **The distribution is now `agent-tracegraph`.** The plain `tracegraph` name on PyPI belongs
+  to an unrelated project. The import package, the console script, the schema `kind`
+  constants and the `TRACEGRAPH_*` environment variables are **unchanged** — only the name
+  you install differs. Installing from source or from a checkout is unaffected.
+- The build backend version is pinned (`hatchling==1.32.0`), so a release rehearsal and the
+  production tag cannot run *different backend versions* against the same commit. This is
+  drift control, not reproducibility: hatchling's own dependencies still float.
+- **Artifact schema version 3**, stamped *by content*: an artifact carrying derived task steps
+  declares 3 so an older reader refuses it by name instead of failing on an enum, while
+  artifacts without them still serialize as version 2 byte for byte. The envelope is inside
+  the digest `export-review-candidates` binds to, so a blanket bump would have invalidated
+  digests already published for unchanged artifacts.
+- The LangGraph capture disclosure in every report now names both the error channel and task
+  pending writes. It remains unconditional: an artifact ingested by an older build, or one
+  using an unrecognized checkpoint layout, carries no derived step and is indistinguishable
+  from a genuinely clean run.
+- `xxhash` is now a direct runtime dependency (LangGraph hashes task ids with it, but
+  `langgraph` itself is only a development dependency here).
+- `langgraph-checkpoint>=4.1` is now declared directly rather than left transitive, because
+  ingestion calls its serializer API. `allowed_msgpack_modules` does not exist before 4.1
+  (4.0.0 raises `TypeError`), so the floor is what makes the hardening above guaranteed
+  rather than incidental.
+
+### Known limitations
+
+- Tasks that were *scheduled but never committed* — a run paused by `interrupt()`, stopped by
+  the recursion limit, or killed — are not reported. Trace `status` still means "did a step
+  error", so such a run reports `ok`.
+- Only the latest persisted error survives per task, so repeated attempts are not
+  reconstructed.
+- `Send` packets can only be named where `langgraph.types` is importable; an ordinary install
+  has only the `langgraph.checkpoint` half of that namespace, and the gap is disclosed.
+
+## 0.1.0 - 2026-05-30
+
+Tagged but never published. Initial read-path causal-graph analysis of LangGraph agent traces.

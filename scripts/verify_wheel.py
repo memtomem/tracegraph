@@ -44,7 +44,7 @@ def checked_output(
     return result.stdout
 
 
-def verify(extra: str) -> dict:
+def verify(extra: str, expected_version: str | None = None) -> dict:
     repo = Path(__file__).resolve().parents[1]
     env = {key: value for key, value in os.environ.items()
            if key not in {"PYTHONPATH", "PYTHONHOME", "FORCE_COLOR", "PY_COLORS"}}
@@ -80,6 +80,19 @@ print(json.dumps({
             return run([str(executable), *args], expected, expected_line)
 
         cli("--help")
+        # The distribution is `agent-tracegraph` while the import package and command are
+        # `tracegraph`. If that lookup is ever pointed at the wrong name the failure is
+        # silent — importlib raises PackageNotFoundError and __init__ reports a dev version
+        # for a perfectly good install — so both surfaces are checked against the tag.
+        reported = cli("--version").strip()
+        imported = run([sys.executable, "-I", "-c",
+                        "import tracegraph; print(tracegraph.__version__)"]).strip()
+        require(reported == imported, f"CLI reports {reported!r}, import reports {imported!r}")
+        require(reported != "0.0.0.dev0",
+                "version lookup failed: the distribution name in __init__ does not match the wheel")
+        if expected_version is not None:
+            require(reported == expected_version,
+                    f"installed version {reported!r} is not the expected {expected_version!r}")
         # The v1 fixture must retain its exact bytes: candidate identity hashes the
         # queried file, not the v2 serialization produced by migration on load.
         fixtures = repo / "tests" / "fixtures" / "review-candidates"
@@ -166,6 +179,7 @@ with LadybugStore.from_trace(nt) as store:
 
         require((work / "source.json").read_bytes() == source, "source fixture was modified")
         return {"result": "PASS", "extra": extra, "module": str(module),
+                "version": reported,
                 "native_failure": "attributed",
                 "candidate_golden": "byte-identical", "baseline_digest": baseline_digest,
                 "backend_parity": "PASS" if extra == "cypher" else "NOT_RUN"}
@@ -174,9 +188,11 @@ with LadybugStore.from_trace(nt) as store:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--extra", choices=("core", "cypher"), required=True)
+    parser.add_argument("--expected-version",
+                        help="Fail unless the installed distribution reports exactly this version.")
     args = parser.parse_args()
     try:
-        print(json.dumps(verify(args.extra), sort_keys=True))
+        print(json.dumps(verify(args.extra, args.expected_version), sort_keys=True))
     except (SmokeFailure, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         print(f"Wheel smoke failed: {exc}", file=sys.stderr)
         return 1

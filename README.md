@@ -18,6 +18,26 @@ for the full rationale and competitive landscape. Korean readers can start with
 Current delivery evidence, known limitations, and next work are maintained in
 [`docs/HANDOFF.md`](docs/HANDOFF.md).
 
+## Install
+
+```bash
+uv tool install agent-tracegraph
+# or: python -m pip install agent-tracegraph
+
+# With the optional Cypher accelerator (LadybugDB):
+uv tool install "agent-tracegraph[cypher]"
+
+# Or run it without installing:
+uvx --from agent-tracegraph tracegraph --version
+```
+
+**The distribution is `agent-tracegraph`; the command and the import package are
+`tracegraph`.** The plain name was already taken on PyPI by an unrelated project, so only the
+name you install differs — you still run `tracegraph` and still `import tracegraph`.
+
+Requires Python 3.12. CI exercises 3.12 on Linux; other versions and platforms are untested
+rather than unsupported.
+
 ## Design commitment: causality is never faked
 
 We persist the **raw multi-parent causal graph** as the system of record (`CAUSED_BY`,
@@ -230,7 +250,7 @@ result, blast radius, preflight result, or graph state.
 - **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. The official `tool-retry-failure@v2` requires an explicit producer marker; variable-length **gaps** and **back-references** (`same_name_as`) remain available for query-only heuristics. Uncompilable unbounded patterns degrade honestly rather than truncate.
 - **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests Collector JSON/JSONL spans into the same causal model — the source that exercises full link-preserving raw/derived causality.
 - **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
-- **Phase 6 (optional Cypher backend):** `tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
+- **Phase 6 (optional Cypher backend):** `agent-tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
 - **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, Toolgraph G3 artifact annotation, and the pinned live single-failure review path are complete. Explicit retry causality and SyncMill-to-Phoenix streaming are covered by the controlled E2E workflow; broader operational coverage remains separate.
 - **SyncMill contract completion:** route/pipeline/compete/council/decompose plus cancellation fixtures, stable span naming, body-free artifact digests, fail-open exporter reference behavior, operational failure presets, and non-causal Toolgraph preflight evidence are covered by executable tests.
 
@@ -253,7 +273,7 @@ outside the checkout, checks candidate golden bytes and baseline diagnosis, and 
 the optional-backend boundary and parity. See the [handoff runbook](docs/HANDOFF.md)
 for local reproduction and the distinction between local checks and remote/server evidence.
 
-The optional Cypher accelerator (`tracegraph[cypher]`, LadybugDB) is **not** required for the
+The optional Cypher accelerator (`agent-tracegraph[cypher]`, LadybugDB) is **not** required for the
 core; `explain` and `query` can opt into it with `--backend ladybug`. Its tests are marked
 `@pytest.mark.cypher` and skip cleanly without the extra. The tested LadybugDB compatibility
 range is declared in `pyproject.toml`; its embedded cache format is not load-bearing because
@@ -309,3 +329,17 @@ Ladybug's existing insertion semantics are unchanged. Use `is_isomorphic` or `di
 deep-tree equality; `canonical()` preserves nested tuples, whose external Python equality
 can still reach the interpreter recursion limit. CI currently covers Python 3.12/Linux;
 other supported Python versions and platforms require separate validation.
+
+## Contributing, security, and license
+
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) — development setup, what this project
+  treats as a defect, and the Contributor License Agreement.
+- **CLA:** [CLA.md](CLA.md). Signing is one-time per GitHub account per repository; a workflow
+  comments on your first pull request with instructions.
+- **Code of conduct:** [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — applies to issues, pull
+  requests and discussions.
+- **Security:** [SECURITY.md](SECURITY.md) — please use private vulnerability reporting rather
+  than a public issue. Read the redaction boundary there before sharing artifacts: reports are
+  filtered, **artifacts are not**.
+- **License:** Apache License 2.0 — see [LICENSE](LICENSE).
+  Copyright 2025-2026 DAPADA Inc. and memtomem contributors.

@@ -567,3 +567,126 @@ def test_undecodable_send_packets_are_disclosed():
     raw = LangGraphCheckpointAdapter(_StubSaver(tuples)).ingest("A")
     assert [e.name for e in _errors(raw.steps)] == [None]
     assert any("Send packet" in w and "2" in w for w in raw.ingest_warnings)
+
+
+# --- reading a checkpoint database must not execute what it contains ---
+
+
+def test_hostile_checkpoint_payload_is_not_invoked(tmp_path):
+    """A checkpoint row can name a module and a callable. Reading one must not call it.
+
+    LangGraph's msgpack deserializer revives objects by importing `module` and calling `name`,
+    both taken from the stored payload, and by default an unrecognized target is merely logged
+    before being invoked. That turns "analyze this trace someone sent me" into code execution
+    on the analyst's machine, so `ingest_snapshot` pins an empty allowlist.
+
+    The payload is embedded inside an otherwise *valid* checkpoint, because a malformed row
+    fails earlier for unrelated reasons and would let this pass while the door stood open.
+    """
+    import sqlite3
+
+    import ormsgpack
+    from langgraph.checkpoint.serde.jsonplus import EXT_CONSTRUCTOR_POS_ARGS
+
+    marker = tmp_path / "PAYLOAD_EXECUTED"
+    assert not marker.exists()
+    hostile = ormsgpack.Ext(
+        EXT_CONSTRUCTOR_POS_ARGS,
+        # Path(...).touch() is not reachable through the constructor, so the observable proof
+        # is open(marker, "w"): if the payload is invoked at all, the file appears.
+        ormsgpack.packb(["builtins", "open", [str(marker), "w"]]),
+    )
+
+    db = tmp_path / "hostile.sqlite"
+    with SqliteSaver.from_conn_string(str(db)) as saver:
+        graph = StateGraph(_State)
+        graph.add_node("plan", lambda state: {"x": 1})
+        graph.add_edge(START, "plan")
+        graph.add_edge("plan", END)
+        graph.compile(checkpointer=saver).invoke({"x": 0}, _config())
+        saver.conn.execute("PRAGMA journal_mode=DELETE")
+
+    # Rewrite one checkpoint's channel_values to carry the payload, keeping the row valid.
+    with sqlite3.connect(db) as conn:
+        row = conn.execute(
+            "SELECT rowid, checkpoint FROM checkpoints ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        checkpoint = ormsgpack.unpackb(row[1], option=ormsgpack.OPT_NON_STR_KEYS)
+        checkpoint["channel_values"] = {"x": hostile}
+        conn.execute(
+            "UPDATE checkpoints SET checkpoint = ? WHERE rowid = ?",
+            (ormsgpack.packb(checkpoint, option=ormsgpack.OPT_NON_STR_KEYS), row[0]),
+        )
+        conn.commit()
+
+    from tracegraph.sqlite_snapshot import ingest_snapshot
+
+    # Whether ingestion succeeds or raises is not the contract; not executing it is.
+    try:
+        ingest_snapshot(db, "t", error_channel="error")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        pass
+
+    assert not marker.exists(), "the checkpoint payload was invoked while reading the database"
+
+
+def test_inert_serde_refuses_an_unregistered_callable():
+    """Pin the mechanism directly, so a serializer swap cannot silently re-open the door."""
+    import ormsgpack
+    from langgraph.checkpoint.serde.jsonplus import EXT_CONSTRUCTOR_POS_ARGS
+
+    from tracegraph.sqlite_snapshot import _inert_serde
+
+    blob = ormsgpack.packb(
+        ormsgpack.Ext(
+            EXT_CONSTRUCTOR_POS_ARGS,
+            ormsgpack.packb(["subprocess", "run", [["echo", "unreachable"]]]),
+        ),
+        option=ormsgpack.OPT_NON_STR_KEYS,
+    )
+    revived = _inert_serde().loads_typed(("msgpack", blob))
+    assert not hasattr(revived, "returncode"), "subprocess.run was actually called"
+    assert revived == [["echo", "unreachable"]], "payload should come back as inert data"
+
+
+def test_inert_serde_still_round_trips_ordinary_values():
+    """The lockdown must not cost the data the adapter actually reads."""
+    import datetime
+
+    from tracegraph.sqlite_snapshot import _inert_serde
+
+    serde = _inert_serde()
+    for value in ({"x": 1}, [1, 2, 3], {"when": datetime.datetime(2026, 1, 1)}, {"s", "t"}):
+        assert serde.loads_typed(serde.dumps_typed(value)) == value
+
+
+def test_declared_floor_covers_the_serializer_api_we_depend_on():
+    """The hardening in `ingest` is only as real as the version floor that guarantees the API.
+
+    `JsonPlusSerializer(allowed_msgpack_modules=...)` does not exist before
+    langgraph-checkpoint 4.1 — 4.0.0 raises `TypeError` — so leaving that dependency
+    transitive behind `langgraph-checkpoint-sqlite>=2` would let a resolver pick a version
+    where `ingest` raises instead of ingesting, and where nothing blocks a hostile payload.
+    """
+    import tomllib
+    from importlib.metadata import version
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    root = Path(__file__).resolve().parents[1]
+    declared = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    floors = {
+        r.name: min(
+            (Version(spec.version) for spec in r.specifier if spec.operator in (">=", "==")),
+            default=None,
+        )
+        for r in (Requirement(d) for d in declared)
+    }
+    assert floors.get("langgraph-checkpoint") is not None, (
+        "langgraph-checkpoint must be declared directly: this package calls its serializer API"
+    )
+    assert floors["langgraph-checkpoint"] >= Version("4.1")
+    # And the environment actually running the suite honours it.
+    assert Version(version("langgraph-checkpoint")) >= floors["langgraph-checkpoint"]
