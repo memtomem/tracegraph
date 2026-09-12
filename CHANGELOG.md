@@ -13,9 +13,12 @@ explicitly.
 - The CLA workflow refused every pull request from the maintainer's own commit-author
   account, which is not the account that owns the repository. Both are allowlisted now.
 - The release documentation asked for a personal access token with *read* access to pull
-  requests. Posting the CLA comment needs *write*: the call is to `/issues/{n}/comments`,
-  and GitHub enforces the Pull requests permission when that number is a pull request.
-  It also did not say that a Trusted Publisher's "Environment name" is the GitHub
+  requests. Posting the CLA comment failed with that configuration and succeeded after
+  raising it to write; the cause remains unconfirmed, since GitHub documents either Issues
+  write or Pull requests write as sufficient. The documentation now asks for write on
+  Contents, Issues and Pull requests alike and records the observation rather than
+  inferring a rule.
+- It also did not say that a Trusted Publisher's "Environment name" is the GitHub
   environment rather than the index, which failed the first 0.2.0 rehearsal.
 
 ## 0.2.0 - 2026-09-12

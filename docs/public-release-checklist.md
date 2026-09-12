@@ -56,10 +56,15 @@ what stays, and rewrite history or do not publish, rather than deleting and hopi
   `agent-tracegraph`.
 - Add the `PERSONAL_ACCESS_TOKEN` secret the CLA workflow needs: fine-grained, this
   repository only, with **Contents: read/write** (the signature branch), **Issues:
-  read/write** and **Pull requests: read/write**. Pull requests must be *write*, not read:
-  the script posts to `/issues/{n}/comments`, and when that number is a pull request
-  GitHub enforces the Pull requests permission rather than the Issues one — measured, the
-  token gets `Resource not accessible by personal access token` otherwise.
+  read/write** and **Pull requests: read/write**.
+
+  GitHub documents the comment endpoint as accepting *either* Issues write or Pull
+  requests write, so in principle read on one of them should do. What actually happened
+  here, on 2026-09-12: with Issues at write and Pull requests at read, posting the comment
+  returned `Resource not accessible by personal access token`; raising Pull requests to
+  write cleared it. That is an observation, not an explanation — the cause was not
+  established, and a permission change that had not taken effect yet would look the same.
+  All three at write is the configuration observed to work.
 - Seed the signature store: `cla-check.py` writes to a `cla-signatures` branch and has no
   branch-creation path, so create that orphan branch first, containing only
   `signatures/v1/cla.json` = `{"signedContributors": []}`.
