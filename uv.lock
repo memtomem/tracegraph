@@ -880,6 +880,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "rich" },
     { name = "typer" },
+    { name = "xxhash" },
 ]
 
 [package.optional-dependencies]
@@ -901,6 +902,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "rich", specifier = ">=13" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "xxhash", specifier = ">=3" },
 ]
 provides-extras = ["cypher"]
 

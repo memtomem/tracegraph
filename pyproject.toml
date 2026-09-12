@@ -9,6 +9,11 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2",
     "typer>=0.12",
     "rich>=13",
+    # Recomputes a LangGraph task id to name the node behind a native failure. LangGraph
+    # hashes those ids with xxh3-128 and depends on xxhash itself, but langgraph is a *dev*
+    # dependency here (this package reads checkpoints, it does not run graphs), and
+    # langgraph-checkpoint pulls in only ormsgpack — so the dependency is ours to declare.
+    "xxhash>=3",
 ]
 
 [project.scripts]

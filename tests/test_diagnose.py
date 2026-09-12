@@ -441,3 +441,40 @@ def test_a_reversed_step_also_withholds_the_duration_delta():
     assert report.metrics.wall_duration_ms is None
     assert report.comparison.metric_deltas["wall_duration_ms"] is None
     assert any("end before their own start" in w for w in report.warnings), report.warnings
+
+
+def _langgraph_trace(status: StepStatus = StepStatus.OK):
+    from tracegraph.normalize import normalize
+
+    return normalize(
+        RawTrace(
+            trace=Trace(trace_id="lg", source_kind="langgraph"),
+            steps=[Step(step_id="s0", trace_id="lg", seq=0, name="plan", status=status)],
+        )
+    )
+
+
+def test_langgraph_capture_disclosure_is_unconditional():
+    """Absence of a failure is not evidence of success, and the artifact cannot say which.
+
+    Capture now covers both the error channel and native task failures, but an artifact
+    ingested by an older build — or one whose checkpoints use an unrecognized layout — has no
+    derived failure step and is indistinguishable from a genuinely clean run. Making this
+    warning conditional would silently upgrade "nothing observed" into "nothing happened".
+    """
+    warnings = analyze(_langgraph_trace()).warnings
+    disclosure = [w for w in warnings if "LangGraph failure capture" in w]
+    assert len(disclosure) == 1
+    assert "pending writes" in disclosure[0]
+    assert "does not prove execution success" in disclosure[0]
+    # It stays put when a failure *was* observed: coverage is still partial either way.
+    assert any(
+        "LangGraph failure capture" in w
+        for w in analyze(_langgraph_trace(StepStatus.ERROR)).warnings
+    )
+
+
+def test_non_langgraph_traces_carry_no_langgraph_disclosure():
+    assert not [
+        w for w in analyze(_trace("t", StepStatus.OK)).warnings if "LangGraph" in w
+    ]

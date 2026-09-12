@@ -483,7 +483,8 @@ Python 3.12.11/macOS에서 잠금 파일로 만든 독립 환경을 사용했다
 ### 유지한 계약과 남은 한계
 
 - artifact v1/v2 읽기, artifact v2 쓰기, report v2, candidate v1, preset ID/version, exact-byte candidate digest를 유지했다. 새 OTLP ingest의 status 정정은 이후 후보 결과를 달라지게 할 수 있다.
-- L-01: LangGraph native pending-write exception 지원은 추가하지 않았다. state-channel 관측 범위를 보고서 warning과 문서에 명시했다.
+- L-01: LangGraph native pending-write exception 지원은 이 리뷰 시점에는 추가하지 않았다. state-channel 관측 범위를 보고서 warning과 문서에 명시했다.
+  **2026-09-12 해결**: pending write의 `__error__`를 읽어 실패 task마다 파생 step을 생성한다. 리뷰의 재현 사례는 이제 `status=error`, `error_count=1`을 보고하며 실패 노드 이름이 붙는다. 미완료 task 보고는 별도 후속 작업이다.
 - L-02: link 보존은 유효한 in-trace link만 뜻한다. foreign/unresolved link 수집을 새로 구현하지 않았다.
 - L-03: derived-tree 동일성은 raw DAG 동일성이 아니다. CLI와 보고서는 lossy step 수 및 baseline 한계를 표시한다.
 - L-04: metric은 관측값 합계다. 부분 coverage·producer aggregation 및 stdin/subprocess/query materialization의 메모리 제약은 남아 있다.

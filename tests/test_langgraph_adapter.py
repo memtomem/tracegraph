@@ -248,6 +248,10 @@ def _ck(
     parent_ns: str | None = None,
     parents: dict[str, str] | None = None,
     channel_values: dict | None = None,
+    channel_versions: dict | None = None,
+    versions_seen: dict | None = None,
+    pending_writes: list | None = None,
+    v: int = 4,
 ) -> CheckpointTuple:
     cfg = {"configurable": {"thread_id": "A", "checkpoint_ns": ns, "checkpoint_id": cid}}
     pcfg = (
@@ -267,10 +271,13 @@ def _ck(
             "id": cid,
             "ts": "2026-01-01T00:00:00+00:00",
             "channel_values": channel_values or {},
+            "channel_versions": channel_versions or {},
+            "versions_seen": versions_seen or {},
+            "v": v,
         },
         metadata={"step": step, "source": "loop", "parents": parents or {}},
         parent_config=pcfg,
-        pending_writes=[],
+        pending_writes=pending_writes or [],
     )
 
 

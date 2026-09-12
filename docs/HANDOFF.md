@@ -181,7 +181,8 @@ uv pip check --python "$WHEEL_ROOT/venv/bin/python"
 
 | 우선순위 | 후속 범위 | 설계·수용 기준 |
 | --- | --- | --- |
-| P1 | LangGraph native 예외 관측 | 실제 `pending_writes.__error__=1`인데 현재 `status=ok`, `error_count=0`인 사례를 해결. task 실패를 이전 정상 checkpoint에 잘못 귀속하지 않으며 중단·재개·복구도 구분한다. |
+| ~~P1~~ (완료) | LangGraph native 예외 관측 | **해결.** `pending_writes.__error__`를 읽어 실패한 task마다 파생 `task` step을 만든다. task id를 checkpoint 데이터에서 재계산해 실패 노드를 지목하므로 이전 정상 checkpoint에 잘못 귀속하지 않는다. 증거가 없으면 이름을 비워 둔다. **중단·재개 구분은 이 범위에 없다**: 미완료 작업(interrupt·recursion limit·crash) 보고는 후속 작업으로 남아 있다. |
+| P1b | 미완료(pending) task 보고 | 최종 checkpoint에 예약되었으나 커밋되지 않은 task를 `unset` step으로 보고. 완료된 실행을 미완료로 표시하지 않는 것이 수용 기준이다(barrier 채널 직렬화, replay 분기, 미확인 trigger 대상 주의). |
 | P2 | 관측 범위 구조화 | 외부/누락 링크의 수·사유와 지표별 coverage를 보존한다. 현재 일반 경고는 이미 있으므로 경고 추가만으로 완료 처리하지 않는다. |
 | P3 | 자원 제한 | stdin·px stdout/stderr byte cap 및 batch·매치 계산 예산. `query --limit`의 표시량 제한과 계산량 제한을 구분한다. |
 | P4 | U1 사후 분석 예제 | 정상·state-channel 오류·native 예외·복구/중단·fan-in을 다룬다. 상위 8월 handoff의 "문서·예제만으로 즉시 가능"은 native 예외 감지 공백을 고려해 조정한다. |

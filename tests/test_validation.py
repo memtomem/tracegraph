@@ -453,3 +453,60 @@ def test_v1_migration_covers_mapping_shaped_edge_records(declared, expected):
     )
     origins = [e.origin.value for e in loaded.edges_of(EdgeType.CAUSED_BY)]
     assert origins == [expected], origins
+
+
+# --- artifact envelope version: content-stamped, not build-stamped ---
+
+
+def _one_step_trace(**step_kwargs):
+    from tracegraph.model import RawTrace, Step, Trace
+    from tracegraph.normalize import normalize
+
+    return normalize(
+        RawTrace(
+            trace=Trace(trace_id="t", source_kind="langgraph"),
+            steps=[Step(step_id="a", trace_id="t", seq=0, **step_kwargs)],
+        )
+    )
+
+
+def test_artifact_without_new_vocabulary_still_serializes_as_v2():
+    """The envelope is inside the hash, so bumping it for unchanged content breaks digests.
+
+    ``review_candidates`` binds each candidate to the sha256 of the artifact *file*, and those
+    digests are already published in exported reports. An artifact that uses nothing new must
+    therefore keep producing identical bytes.
+    """
+    from tracegraph import artifact
+
+    assert json.loads(artifact.dumps(_one_step_trace()))["schema_version"] == 2
+
+
+def test_artifact_with_a_derived_task_step_declares_v3():
+    """A reader that would mis-parse these bytes should be told so, not handed a pydantic error."""
+    from tracegraph import artifact
+    from tracegraph.model import StepSource
+
+    nt = _one_step_trace(source=StepSource.TASK)
+    payload = json.loads(artifact.dumps(nt))
+    assert payload["schema_version"] == 3
+    assert artifact.loads(artifact.dumps(nt)).steps[0].source is StepSource.TASK
+
+
+def test_v3_envelope_without_task_steps_still_loads():
+    """Version is a floor on the reader, not a claim about the content."""
+    from tracegraph import artifact
+
+    text = artifact.dumps(_one_step_trace())
+    payload = json.loads(text)
+    payload["schema_version"] = 3
+    assert artifact.from_obj(payload).steps[0].step_id == "a"
+
+
+def test_unknown_future_version_is_refused_by_name():
+    from tracegraph import artifact
+
+    payload = json.loads(artifact.dumps(_one_step_trace()))
+    payload["schema_version"] = 99
+    with pytest.raises(ValueError, match="unsupported artifact schema_version"):
+        artifact.from_obj(payload)
