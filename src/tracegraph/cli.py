@@ -1194,6 +1194,27 @@ def export_review_candidates(
     )
 
 
+@app.command(name="export-incident-memo")
+def export_incident_memo(
+    artifact_path: Path = typer.Argument(..., help="Path to artifact JSON file."),
+    out: Path = typer.Option(..., "--out", "-o", help="Destination markdown memo file path."),
+) -> None:
+    """Export a strict-allowlist incident post-mortem memo for memtomem LTM."""
+    _distinct_paths([artifact_path], [out])
+    try:
+        loaded = _load_artifact_evidence(artifact_path)
+    except _LOAD_ERRORS as exc:
+        raise typer.BadParameter(f"cannot load artifact {artifact_path}: {_load_reason(exc)}") from exc
+    from tracegraph.analysis.memo import build_incident_memo, save_incident_memo
+
+    memo_content = build_incident_memo(loaded.trace, loaded.digest)
+    try:
+        save_incident_memo(memo_content, out)
+    except OSError as exc:
+        raise typer.BadParameter(f"cannot save incident memo: {_load_reason(exc)}") from exc
+    console.print(f"[green]exported incident memo[/] → {out}")
+
+
 def main() -> None:
     app()
 
