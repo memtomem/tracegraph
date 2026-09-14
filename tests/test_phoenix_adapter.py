@@ -81,3 +81,29 @@ def test_phoenix_dangling_parent_and_mixed_trace_rejected():
     mixed["spans"][1]["context"]["trace_id"] = "other"
     with pytest.raises(ValueError, match="another trace"):
         PhoenixExportAdapter(mixed)
+
+
+def test_phoenix_naive_timestamp_normalizes_to_utc_across_timezones(monkeypatch):
+    import os
+    import time
+    from tracegraph.adapters.phoenix_export import _nanos
+
+    naive_iso = "2026-08-30T12:00:00.000000"
+    expected = "1788091200000000000"
+    orig_tz = os.environ.get("TZ")
+
+    try:
+        for tz in ("UTC", "Asia/Seoul", "America/New_York", "Europe/London"):
+            monkeypatch.setenv("TZ", tz)
+            if hasattr(time, "tzset"):
+                time.tzset()
+            assert _nanos(naive_iso) == expected
+            assert _nanos("2026-08-30T12:00:00.000000Z") == expected
+            assert _nanos("2026-08-30T12:00:00.000000+00:00") == expected
+    finally:
+        if orig_tz is not None:
+            os.environ["TZ"] = orig_tz
+        else:
+            os.environ.pop("TZ", None)
+        if hasattr(time, "tzset"):
+            time.tzset()
