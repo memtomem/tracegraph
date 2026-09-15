@@ -6,8 +6,9 @@ Adapters emit a :class:`~tracegraph.model.RawTrace` carrying steps and the **raw
 * **validates** the raw graph (:func:`validate_raw`) — endpoints exist, edges are
   ``CAUSED_BY``, no self-edges, and every cause precedes its effect (which also makes
   the raw graph acyclic by construction),
-* derives the ``TREE_PARENT`` layer — exactly one parent per non-root step — by picking
-  each step's *temporally-earliest* cause,
+* derives the ``TREE_PARENT`` layer — exactly one parent per non-root step — by prioritizing
+  explicit structural graph parents over containment and links, breaking ties by earliest time
+  (with legacy temporal-only fallback for backward compatibility),
 * flags ``projection_lossy=True`` on any step whose real causality had to be collapsed
   (more than one ``CAUSED_BY``), and
 * re-checks the derived layer is a forest (:func:`validate_tree`).
@@ -20,7 +21,15 @@ than letting it become a malformed artifact downstream.
 
 from __future__ import annotations
 
-from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, StepStatus
+from tracegraph.model import (
+    Edge,
+    EdgeOrigin,
+    EdgeType,
+    NormalizedTrace,
+    RawTrace,
+    Step,
+    StepStatus,
+)
 
 
 def _check_steps(trace_id: str, steps: list[Step]) -> None:
@@ -124,43 +133,76 @@ def validate_normalized(nt: NormalizedTrace) -> None:
         steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
         causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
     )
-    expected = normalize(raw)
+    expected = normalize(raw, origin_priority=True)
     if expected != nt:
-        raise ValueError(
-            "normalized trace is not in canonical form: derived edges, projection_lossy "
-            "flags, or step/edge ordering do not match what normalize() produces from "
-            "the raw CAUSED_BY layer. The JSON artifact must be the output of normalize() "
-            "verbatim — anything else would drift on the next save."
-        )
+        # Backward compatibility: accept authentic legacy artifacts produced under
+        # the previous temporal-only parent selection rule.
+        legacy_expected = normalize(raw, origin_priority=False)
+        if legacy_expected != nt:
+            raise ValueError(
+                "normalized trace is not in canonical form: derived edges, projection_lossy "
+                "flags, or step/edge ordering do not match what normalize() produces from "
+                "the raw CAUSED_BY layer. The JSON artifact must be the output of normalize() "
+                "verbatim — anything else would drift on the next save."
+            )
 
 
-def _parents_by_step(caused_by: list[Edge]) -> dict[str, list[str]]:
+_ORIGIN_PRIORITY: dict[EdgeOrigin | None, int] = {
+    EdgeOrigin.CHECKPOINT_PARENT: 0,
+    EdgeOrigin.GRAPH_PARENT: 0,
+    EdgeOrigin.SPAN_PARENT_FALLBACK: 1,
+    EdgeOrigin.SPAN_LINK: 2,
+    EdgeOrigin.LEGACY_UNKNOWN: 3,
+    None: 3,
+}
+
+
+def _incoming_edges_by_step(caused_by: list[Edge]) -> dict[str, list[Edge]]:
     """Raw causes per effect step (CAUSED_BY points effect → cause), built in one pass.
 
     Preserves the order of ``caused_by``, so feeding it the canonically sorted edge
-    list yields each step's parents in canonical order.
+    list yields each step's incoming causal edges in canonical order.
     """
-    parents: dict[str, list[str]] = {}
+    incoming: dict[str, list[Edge]] = {}
     for e in caused_by:
-        parents.setdefault(e.src, []).append(e.dst)
-    return parents
+        incoming.setdefault(e.src, []).append(e)
+    return incoming
 
 
-def _primary_parent(parent_ids: list[str], steps: dict[str, Step]) -> str:
-    """Pick the single TREE_PARENT: the temporally-earliest cause.
+def _parents_by_step(caused_by: list[Edge]) -> dict[str, list[str]]:
+    """Convenience helper returning destination step IDs per effect step."""
+    return {src: [e.dst for e in edges] for src, edges in _incoming_edges_by_step(caused_by).items()}
 
-    Ordering key is ``(seq, ts, step_id)`` so the choice is deterministic even when
-    seq or ts collide. The chosen parent is the one that happened first.
+
+def _primary_parent(
+    incoming_edges: list[Edge],
+    steps: dict[str, Step],
+    *,
+    origin_priority: bool = True,
+) -> str:
+    """Pick the single TREE_PARENT.
+
+    When ``origin_priority=True`` (default), explicit framework/graph execution parents
+    (CHECKPOINT_PARENT, GRAPH_PARENT) outrank span containment (SPAN_PARENT_FALLBACK),
+    which outranks non-hierarchical causal links (SPAN_LINK), which outranks unrecorded/legacy
+    origins (LEGACY_UNKNOWN, None).
+
+    When ``origin_priority=False`` (legacy compatibility mode), parent choice is purely
+    temporally-earliest cause.
+
+    In both modes, ties are broken by earliest cause ordered by ``(seq, ts, step_id)``.
     """
 
-    def key(pid: str) -> tuple[int, str, str]:
-        p = steps[pid]
-        return (p.seq, p.ts or "", p.step_id)
+    def key(edge: Edge) -> tuple[int, int, str, str]:
+        p = steps[edge.dst]
+        prio = _ORIGIN_PRIORITY.get(edge.origin, 3) if origin_priority else 0
+        return (prio, p.seq, p.ts or "", p.step_id)
 
-    return min(parent_ids, key=key)
+    chosen_edge = min(incoming_edges, key=key)
+    return chosen_edge.dst
 
 
-def normalize(raw: RawTrace) -> NormalizedTrace:
+def normalize(raw: RawTrace, *, origin_priority: bool = True) -> NormalizedTrace:
     """Validate a raw trace and return its normalized form (raw + derived layers).
 
     Deterministic and **canonically ordered**: the returned trace's steps and edges are
@@ -189,17 +231,17 @@ def normalize(raw: RawTrace) -> NormalizedTrace:
     )
 
     edges: list[Edge] = list(caused_by)  # carry the raw layer through unchanged
-    parents_by_step = _parents_by_step(caused_by)
+    incoming_by_step = _incoming_edges_by_step(caused_by)
     new_steps: list[Step] = []
     for step in steps_canonical:
-        parents = parents_by_step.get(step.step_id, [])
+        incoming = incoming_by_step.get(step.step_id, [])
         # Flag lossiness on a copy so we never mutate the caller's objects.
-        step = step.model_copy(update={"projection_lossy": len(parents) > 1})
+        step = step.model_copy(update={"projection_lossy": len(incoming) > 1})
         new_steps.append(step)
 
         edges.append(Edge(type=EdgeType.BELONGS_TO, src=step.step_id, dst=raw.trace.trace_id))
-        if parents:
-            chosen = _primary_parent(parents, steps_by_id)
+        if incoming:
+            chosen = _primary_parent(incoming, steps_by_id, origin_priority=origin_priority)
             edges.append(Edge(type=EdgeType.TREE_PARENT, src=step.step_id, dst=chosen))
 
     # The trace-level status is a derived view of its steps, not independent data: make it
@@ -246,3 +288,18 @@ def validate_tree(nt: NormalizedTrace) -> None:
             on_path.add(cur)
             cur = parent_of.get(cur)
         proven.update(path)
+
+
+def requires_origin_priority_projection(nt: NormalizedTrace) -> bool:
+    """True iff this trace's TREE_PARENT projection differs from legacy temporal-only selection."""
+    try:
+        raw = RawTrace(
+            trace=nt.trace,
+            steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
+            causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
+        )
+        return nt != normalize(raw, origin_priority=False)
+    except ValueError:
+        # If the trace is malformed, do not fail during serialization stamping.
+        # Store loading and validate_normalized remain the validation gate.
+        return False

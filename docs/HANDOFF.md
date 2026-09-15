@@ -1,6 +1,66 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-09-10 (Asia/Seoul)
+## 현재 전달 상태 — 2026-09-15 (Asia/Seoul)
+
+- **문서 작성 시점의 상태:** Phase 1은 기본 브랜치에 병합·푸시 완료. Phase 2.1(TREE_PARENT Origin 우선순위)은 로컬 구현·검증 완료이며, 아래 기록은 커밋 전 작업 트리를 기준으로 한다.
+- Phase 2.1 전달 대상은 소스 3개·테스트 1개·문서 2개, 총 6개 파일이다. 이 기록 시점에는 미커밋·미푸시이고 PR·해당 변경의 원격 CI는 대기 상태다. 이후 착지 결과는 이 문서를 포함한 Git 이력과 PR의 최종 SHA로 확인한다.
+- 기준 커밋: `8f6c3fa` (Merge feat/phoenix-utc-and-incident-memo), 브랜치 `feat/tree-parent-origin-preference`.
+- 이번 범위:
+  1. **Phoenix naive timestamp UTC 정규화** (`src/tracegraph/adapters/phoenix_export.py`):
+     - timezone-naive datetime을 UTC로 명시 해석하여 `TZ` 환경(로컬 `Asia/Seoul` vs UTC CI)에 따른 `artifact_digest` 불일치를 원천 차단. 기존 `Z` 접미사 타임스탬프는 100% 바이트 불변.
+  2. **memtomem LTM incident memo export** (`src/tracegraph/analysis/memo.py`, CLI `export-incident-memo`):
+     - 엄격한 allowlist 적용: 원시 `run_id` 대신 결정론적 해시 별칭 `run_digest`(`sha256:...[:16]`), 원시 step/UUID 대신 시퀀스 기반 별칭(`step_<N>_<kind>`), `error_msg`/평가 레이블/페이로드 원천 배제(비밀·토큰 누출 방지).
+     - 아티팩트 다이제스트 정규식 검증(`^sha256:[0-9a-f]{64}$`)으로 YAML 주입 방지 및 등록된 프리셋 패턴 한정 출력.
+     - 진실한 인과 표현: containment(`span_parent_fallback`) 및 미확인(`legacy_unknown`/None) 에지는 인과 전파 증거가 아니므로 `caused by`가 아닌 `preceded by (containment only)` 등으로 한정 공시.
+     - 선형 스케일링: 오류 단계별 선조 중복 순회를 배제하고 단일 `### Causal Ancestry Graph`에 $O(V+E)$로 출력. `analyze()`의 2차 다중 primary failure 탐색을 우회하고 `validate_structure()` 및 `_patterns()`를 직접 호출.
+     - 원자적 파일 저장: `NamedTemporaryFile` 진입 즉시 파일명을 확보하여 쓰기/fsync 실패 시 임시 파일 누수 없이 안전 정리.
+  3. **`TREE_PARENT` EdgeOrigin 우선순위 및 스키마 v4 도입** (`src/tracegraph/normalize.py`, `src/tracegraph/artifact.py`, `src/tracegraph/store/ladybug.py`):
+     - 단일 부모 projection 시 structural execution parent(`GRAPH_PARENT`, `CHECKPOINT_PARENT`: 우선순위 0)가 containment(`SPAN_PARENT_FALLBACK`: 1), cross-reference(`SPAN_LINK`: 2), legacy(`LEGACY_UNKNOWN`/None: 3)보다 우선하도록 변경. 동일 순위 내에서는 기존의 `(seq, ts, step_id)` 시간순 tie-breaker 유지.
+     - 하위 호환성 canonical 검증: `validate_normalized()`가 현재의 origin 우선순위 projection뿐 아니라 이전 구현의 temporal-only projection으로 생성된 레거시 아티팩트도 canonical 형태로 인정하여 안전하게 로드.
+     - `LadybugStore` 바이트 라운드트립 보존: 레거시 아티팩트 로드 시 `_legacy_projection` 모드를 기억하여 `trace()` 및 `export_artifact()`가 원본 레거시 아티팩트와 바이트 단위로 동일하게 재생성.
+     - 아티팩트 `schema_version: 4` 조건부 스탬핑: EdgeOrigin 우선순위에 의해 트리가 변경되는 아티팩트만 `schema_version: 4`로 스탬핑하여 구버전 판독기(1~3 지원)가 명확한 스키마 불일치로 거부하도록 보장. 기존 아티팩트 및 영향 없는 아티팩트는 2 또는 3을 유지하여 기존 골든 다이제스트 바이트 불변성 보장.
+
+### 검증 증거 (2026-09-15)
+
+환경: macOS/arm64, Python 3.12.11.
+
+| 검증 | 명령 | 결과 |
+| --- | --- | --- |
+| 전체 테스트 | `uv run --no-sync pytest -q` | **620 passed** in 9.99s (이 세션에서 재검증) |
+| 성능 guard | `uv run --no-sync pytest -q -m perf` | **4 passed, 616 deselected** in 2.48s |
+| Codex 코드 리뷰 | `codex-20260915-164249-65907` | **SHIP** (Major 0, Blocker 0, Nit 1). 소스·테스트 4개 파일 대상이며 테스트는 실행하지 않은 리뷰. README 지적은 후속 반영했고, 이후 작성한 handoff는 이 리뷰 범위 밖이다. |
+| lint | `uvx ruff@0.14.2 check src tests scripts examples` | **All checks passed** |
+| diff 검증 | `git diff --check` | **Clean** (공백/줄바꿈 결함 없음) |
+| 크로스 버전 호환성 | `test_cross_version_schema_signaling_for_origin_priority_and_legacy` | **PASS** (schema 4 스탬핑, 구버전 판독기 거부, 레거시 호환 로드 검증) |
+| 레거시 라운드트립 | `test_legacy_temporal_artifact_loads_validates_and_roundtrips` | **PASS** (InMemoryStore 및 LadybugStore 바이트 다이제스트 불변 검증) |
+
+추가 호환성 확인: 기준 HEAD `8f6c3fa`의 실제 `normalize.py`·`artifact.py`를 별도로 로드해
+v2/v3 아티팩트를 생성했다. 현재 판독·canonical 검증·Ladybug 재직렬화의 바이트 보존과
+기준 HEAD 판독기의 신규 v4 거부를 모두 확인했다. 위 로컬 검증 후에는 문서만 정리했다.
+리뷰의 `.final.md`, `.review.json`, `.manifest.json`은 모두 같은 invocation의 `SHIP`으로 일치했다.
+
+원격·실서버 증거는 별도다:
+
+- Phase 1 `8f6c3fa`의 [원격 tests 실행](https://github.com/memtomem/tracegraph/actions/runs/34901110223)은 **성공**했다. Phase 2.1 변경의 CI 증거는 아니다.
+- Phase 2.1의 원격 CI와 설치 wheel 검증은 이 기록 시점에 **미실행**이다. PR의 정확한 최종 head에서 확인해야 한다.
+- 이번 변경의 실제 Phoenix + SyncMill E2E는 **미실행**이다. [이전 성공 실행](https://github.com/memtomem/tracegraph/actions/runs/34825105597)은 `20d159b` 기준이다.
+
+### 남은 결정 필요 항목 (Tier 2 — 공개 계약 변경)
+
+1. ~~**Phoenix naive ISO의 UTC 해석**~~ — **해결됨 (2026-09-14, `130cb20` / `8f6c3fa`)**: naive datetime을 UTC로 명시 정규화 (`parsed.replace(tzinfo=timezone.utc)`).
+2. **TREE_PARENT 선택** — **로컬 구현·검증 완료, 착지 대기 (2026-09-15, 브랜치 `feat/tree-parent-origin-preference`)**: EdgeOrigin 우선순위(GRAPH/CHECKPOINT > SPAN_PARENT_FALLBACK > SPAN_LINK > LEGACY) 도입, 레거시 canonical 검증 호환, LadybugStore 라운드트립 보존, 아티팩트 `schema_version: 4` 조건부 스탬핑.
+3. **privacy 기본값**: OTLP `include_error_messages`의 기본값을 `False`로 바꿀지, `--redact-errors` 옵션을 추가할지. README의 범위 설명 정정은 이전 작업에서 완료했다.
+4. **review-candidates 스키마**: candidate 수준이 `additionalProperties: true`라 body 필드가 v1으로 검증된다.
+5. **`phoenix` 종료 코드**: 같은 환경 실패에 `doctor`는 1, `diagnose`는 2를 쓴다.
+6. ~~**LICENSE 부재**~~ — **결정됨(2026-09-12, PR #23)**: Apache-2.0 + DAPADA CLA. 배포명은 `agent-tracegraph`.
+7. **Trace-level `status: unset` for incomplete runs**: `interrupt()`나 recursion limit으로 중단된 미완료 실행에 대한 3-way 상태 도입 (아티팩트 스키마 및 마이그레이션 필요).
+8. **Phoenix 숫자 타임스탬프**: 숫자 입력을 나노초로 가정하며 하한 검증이 없다. naive ISO의 UTC 정규화와 별개의 미해결 계약 항목이다.
+
+---
+
+## 이전 전달 상태 — 2026-09-10 (Asia/Seoul)
+
+아래 본문은 당시 검증·판단 기록이다. 현재 상태와 미해결 목록은 문서 상단을 따른다.
 
 - **상태: 착지 완료.** [PR #20](https://github.com/memtomem/tracegraph/pull/20)이 병합 커밋
   `6da0886`으로 기본 브랜치 `tracegraph-mvp`에 병합됐다 (2026-09-10 02:55 UTC). 기준은 `0d5091c`,
@@ -33,7 +93,7 @@
 | `store/ladybug.py` | 호출자의 `Trace`를 참조로 보관해 `InMemoryStore`와 갈렸다. deep-copy로 맞췄다. `COMMIT`을 `try` 안으로 옮기고 `QueryResult`를 닫는다. |
 | `normalize.py` | TREE_PARENT cycle 오류 메시지가 hash 순서에 의존했다. 정규 순서로 고정했다. |
 
-### 검증 증거
+### 당시 검증 증거
 
 환경: macOS/arm64, Python 3.12.11.
 
@@ -82,7 +142,7 @@ diff와 무관하다** — 로그가 도구 실행 전에 끝나는 것이 판�
    배포명은 `agent-tracegraph`이고 import 패키지·CLI·스키마 `kind` 상수는 `tracegraph` 그대로다.
 
 
-## 현재 전달 상태 — 2026-09-08 (Asia/Seoul)
+## 이전 전달 상태 — 2026-09-08 (Asia/Seoul)
 
 - 기준 HEAD: `d048f400fdd39bb37c9608e45ee5931cba058b46`, 브랜치 `tracegraph-mvp`.
 - 아래 결과는 이 HEAD 위의 전달 변경을 **커밋 전에** 검증한 기록이다.
@@ -90,7 +150,7 @@ diff와 무관하다** — 로그가 도구 실행 전에 끝나는 것이 판�
 - 이번 범위: CI import 복구, 설치된 wheel 검증 자동화, 문서 상태 연결.
 - 제품 소스·의존성·lockfile·fixture·공개 데이터 계약은 변경하지 않았다.
 
-## 해결한 문제와 변경
+### 당시 해결한 문제와 변경
 
 2026-09-08의 [기준 HEAD CI](https://github.com/memtomem/tracegraph/actions/runs/34198950320)는
 core `389 passed, 2 failed`, Cypher `430 passed, 2 failed`였다. 실패한 두 테스트는
@@ -110,7 +170,7 @@ core `389 passed, 2 failed`, Cypher `430 passed, 2 failed`였다. 실패한 두 
   candidate golden의 exact bytes/digest, report privacy, Cypher 설명·매치 및 artifact round-trip을 검증한다.
   이 검증기는 설치 환경에 개발 의존성을 요구하지 않는다. 공개 JSON schema는 계속 저장소-vendored 계약이다.
 
-## 검증 증거
+### 당시 검증 증거
 
 환경: macOS/arm64, Python 3.12.11. 아래 결과는 위 기준 HEAD와 이번 작업 트리 변경의 조합이다.
 
@@ -138,7 +198,7 @@ uv 캐시 접근 역시 권한 확장 후 검증했다. 이를 제품 실패나 
   실제 서버 E2E를 실행하면 Tracegraph·SyncMill SHA, Phoenix image digest, px pin도 함께 기록한다.
   절차는 [E2E runbook](phoenix-syncmill-e2e.md)과 [runtime pin runbook](phoenix-cli-contract.md)을 따른다.
 
-### Wheel 검증 재실행
+#### 당시 Wheel 검증 재실행
 
 Linux/macOS에서 저장소 루트의 Bash로 실행한다. `uv`와 Python 3.12가 필요하다.
 `WHEEL_EXTRA=cypher`로 바꾸면 선택 backend도 검증한다. 임시 설치 경로는 공유 작업 트리와 분리된다.
@@ -216,7 +276,7 @@ PR #22(native 실패 수집)와 PR #23(license·CLA·PyPI 메타데이터)에 �
 유지할 계약:
 
 - raw multi-parent `CAUSED_BY`가 정본이며 `TREE_PARENT`는 손실 가능한 비교·표시용 projection이다.
-- artifact v1/v2 읽기와 v2 쓰기, analysis report v2, candidate v1을 유지한다.
+- 이 변경의 artifact reader는 v1~v4를 읽는다. writer는 origin 우선순위로 트리가 달라지면 v4, 그 외 task step이 있으면 v3, 나머지는 v2를 쓴다. 레거시 v2/v3 canonical 아티팩트의 재직렬화 바이트를 보존하며, analysis report v2와 candidate v1은 유지한다.
   report schema는 추가 필드를 거부하므로 관측 필드 추가 전에 버전·reader 호환성을 설계한다.
 - 자동 retry는 명시적 producer marker만 사용한다. heuristic은 governance export에 사용하지 않는다.
 - `safe-v1`은 구조 식별자를 유지하는 본문 제거 정책이며 익명화가 아니다.

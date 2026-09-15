@@ -315,9 +315,11 @@ borrowing a neighbour's name. When one task raises, LangGraph
 cancels its siblings and records that through the same channel; a cancelled task is reported
 as an `unset` step with no message, because it was torn down rather than at fault. Only the
 latest persisted error survives per task, so repeated attempts are not reconstructed, and
-`Send` packets are nameable only where `langgraph.types` is importable — an ordinary install discloses them instead. An artifact carrying derived task
-steps declares artifact `schema_version` 3, so an older reader refuses it by name; artifacts
-without them still serialize as version 2, byte for byte. Missing observed errors still do not
+`Send` packets are nameable only where `langgraph.types` is importable — an ordinary install
+discloses them instead. An artifact whose derived tree relies on EdgeOrigin precedence declares
+artifact `schema_version` 4; otherwise, an artifact carrying derived task steps declares
+`schema_version` 3, and artifacts without them still serialize as version 2, byte for byte.
+Missing observed errors still do not
 prove success: an artifact ingested by an older build, or one using an unrecognized checkpoint
 layout, carries no derived step and looks exactly like a clean run, which is why the capture
 disclosure is unconditional. Link preservation
