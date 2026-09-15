@@ -19,11 +19,13 @@ import tempfile
 from tracegraph.model import NormalizedTrace, StepSource
 
 #: Bump when the on-disk shape changes incompatibly.
-ARTIFACT_SCHEMA_VERSION = 3
+ARTIFACT_SCHEMA_VERSION = 4
 
 #: Versions this build can read. 1 needs a migration (see ``_migrate_v1``); 2 -> 3 is the
 #: identity, because 3 adds only a new ``Step.source`` value and changes nothing existing.
-_READABLE_VERSIONS = (1, 2, ARTIFACT_SCHEMA_VERSION)
+#: 4 signals that TREE_PARENT was derived under EdgeOrigin precedence rather than
+#: legacy temporal-only selection.
+_READABLE_VERSIONS = (1, 2, 3, ARTIFACT_SCHEMA_VERSION)
 
 
 def _required_version(nt: NormalizedTrace) -> int:
@@ -36,9 +38,17 @@ def _required_version(nt: NormalizedTrace) -> int:
     bump would invalidate digests already exported in review-candidate reports for artifacts
     whose content did not change at all.
 
-    An artifact that *does* carry a derived task step is stamped 3, so an older build refuses
-    it with a clear "unsupported artifact schema_version" instead of a pydantic enum error.
+    * An artifact whose derived TREE_PARENT relies on EdgeOrigin priority is stamped 4,
+      so older readers (which used temporal-only parent selection) refuse it with an
+      explicit "unsupported artifact schema_version 4" rather than failing canonical
+      validation with a confusing mismatch error.
+    * An artifact that carries a derived task step is stamped 3.
+    * Otherwise, stamped 2.
     """
+    from tracegraph.normalize import requires_origin_priority_projection
+
+    if requires_origin_priority_projection(nt):
+        return 4
     task = StepSource.TASK
     return 3 if any(step.source is task for step in nt.steps) else 2
 

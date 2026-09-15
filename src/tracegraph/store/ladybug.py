@@ -161,6 +161,14 @@ class LadybugStore:
         store = cls(path=path)
         try:
             store.init_schema()
+            # Preserve whether the artifact was loaded under legacy temporal-only projection
+            # so trace() and export_artifact() round-trip byte-for-byte.
+            raw_check = RawTrace(
+                trace=nt.trace,
+                steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
+                causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
+            )
+            store._legacy_projection = (nt != normalize(raw_check, origin_priority=True))
             # Deep-copy the header, matching InMemoryStore.from_trace. Holding the caller's
             # object by reference let a later mutation of the input change what trace()
             # returns while the persisted Trace row still held the original values, so the
@@ -311,7 +319,8 @@ class LadybugStore:
             for src, dst, origin in caused_by_pairs
         ]
         self._trace_cache = normalize(
-            RawTrace(trace=self._trace, steps=raw_steps, causal_edges=raw_edges)
+            RawTrace(trace=self._trace, steps=raw_steps, causal_edges=raw_edges),
+            origin_priority=not getattr(self, "_legacy_projection", False),
         )
         return self._trace_cache.model_copy(deep=True)
 
