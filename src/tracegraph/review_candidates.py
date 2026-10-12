@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,8 +13,8 @@ from tracegraph.analysis.patterns import Match, PathPattern
 from tracegraph.model import NormalizedTrace, Step, StepKind, StepStatus
 
 
-REVIEW_CANDIDATE_SCHEMA_VERSION = 1
-REVIEW_CANDIDATE_KIND = "tracegraph.review-candidates"
+REVIEW_CANDIDATE_SCHEMA_VERSION: Final = 1
+REVIEW_CANDIDATE_KIND: Final = "tracegraph.review-candidates"
 
 
 class ReviewCandidate(BaseModel):

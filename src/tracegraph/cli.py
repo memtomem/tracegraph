@@ -404,9 +404,9 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
 
     console.print("\n[bold]Repeated behavior[/]")
     if report.patterns:
-        for finding in report.patterns:
-            labels = " → ".join(escape(label or "(unnamed)") for label in finding.labels)
-            console.print(f"  • {finding.pattern_id}@v{finding.pattern_version}: {labels}")
+        for pattern in report.patterns:
+            labels = " → ".join(escape(label or "(unnamed)") for label in pattern.labels)
+            console.print(f"  • {pattern.pattern_id}@v{pattern.pattern_version}: {labels}")
     else:
         console.print("  [dim]No high-signal failure pattern found.[/]")
 

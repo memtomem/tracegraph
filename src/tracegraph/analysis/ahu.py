@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import cmp_to_key
-from typing import Callable
+from typing import Any, Callable
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step
 from tracegraph.normalize import validate_tree
@@ -95,7 +95,7 @@ def _require_forest(nt: NormalizedTrace, side: str) -> None:
 
 def _compare(left: Canon, right: Canon) -> int:
     # Tuple-compatible lexical order without Python's recursive tuple comparison.
-    stack = [(left, right)]
+    stack: list[tuple[Any, Any]] = [(left, right)]
     while stack:
         a, b = stack.pop()
         if a is b:
@@ -112,7 +112,7 @@ def _compare(left: Canon, right: Canon) -> int:
 
 
 def _intern(steps, children, roots, label, table):
-    result = {}
+    result: dict[str, int] = {}
     stack = [(root, False) for root in roots]
     while stack:
         node, ready = stack.pop()
@@ -162,7 +162,7 @@ def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
 def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label) -> bool:
     _require_forest(a, "A")
     _require_forest(b, "B")
-    table = {}
+    table: dict[Any, int] = {}
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a), _roots(b)
     aa = _intern(a.steps_by_id(), ca, ra, label, table)
@@ -193,7 +193,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
     ra, rb = _roots(a), _roots(b)
-    table = {}
+    table: dict[Any, int] = {}
     canA = _intern(sa, ca, ra, label, table)
     canB = _intern(sb, cb, rb, label, table)
     show = display_label or label
@@ -313,7 +313,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
         return pairs
 
     # Iterative worklist: a recursive descent would overflow on a deep-linear divergence.
-    worklist = [
+    worklist: list[tuple[str, str, Any]] = [
         (an, bn, None) for an, bn in localize(*align(ra, rb), here=None, root_level=True)
     ]
     while worklist:

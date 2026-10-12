@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from typing import Any, overload
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -151,6 +152,12 @@ class AnalysisReport(BaseModel):
 _ALIAS = re.compile(r"redacted:[0-9a-f]{64}")
 
 
+@overload
+def _safe(value: str) -> str: ...
+@overload
+def _safe(value: None) -> None: ...
+@overload
+def _safe(value: str | None) -> str | None: ...
 def _safe(value: str | None) -> str | None:
     if value is None or re.fullmatch(r"[A-Za-z0-9_.:/#@-]{1,200}", value):
         return value
@@ -185,8 +192,8 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
     steps = nt.steps_by_id()
     errors = {step.step_id for step in nt.steps if step.status is StepStatus.ERROR}
     adjacency = _cause_adjacency(nt)
-    explicit = {}
-    depth = {}
+    explicit: dict[str, list[str]] = {}
+    depth: dict[str, int] = {}
     for edge in nt.edges_of(EdgeType.CAUSED_BY):
         if edge.origin in EXPLICIT_ORIGINS:
             explicit.setdefault(edge.src, []).append(edge.dst)
@@ -457,7 +464,7 @@ def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, S
     if table is None:
         table = {}
     result: dict[int, Step] = {}
-    queue = deque()
+    queue: deque[tuple[str, int | None]] = deque()
     for root in children.get(None, []):
         queue.append((root, None))
     while queue:
@@ -492,7 +499,7 @@ def _comparison(
     on its own.
     """
     structural = tree_diff(baseline, current, display_label=_display_name)
-    table = {}
+    table: dict[Any, int] = {}
     before, after = _logical_keys(baseline, table), _logical_keys(current, table)
     signatures = {number: signature for signature, number in table.items()}
 
@@ -507,13 +514,14 @@ def _comparison(
     changes: list[BehaviorChange] = []
     for key in sorted(set(before) | set(after)):
         old, new = before.get(key), after.get(key)
+        either = new or old
         old_status = old.status.value if old else None
         new_status = new.status.value if new else None
         if old_status != new_status:
             changes.append(
                 BehaviorChange(
                     logical_step_key=display_key(key),
-                    name=(new or old).name if (new or old) else None,
+                    name=either.name if either else None,
                     before=old_status,
                     after=new_status,
                 )
@@ -550,27 +558,28 @@ def _comparison(
         return False
 
     cost_delta: str | None = None
-    if cm.total_cost is not None and bm.total_cost is not None and (
+    current_cost, baseline_cost = cm.total_cost, bm.total_cost
+    if current_cost is not None and baseline_cost is not None and (
         bm.cost_currency is None or bm.cost_currency != cm.cost_currency
     ):
         notes.append(
             "total_cost delta unavailable: the two runs report different or unknown "
             "currencies, and costs are never converted."
         )
-    elif covered("total_cost"):
-        cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
+    elif covered("total_cost") and current_cost is not None and baseline_cost is not None:
+        cost_delta = format(Decimal(current_cost) - Decimal(baseline_cost), "f")
+    metric_deltas: dict[str, float | int | str | None] = {
+        field: _delta(getattr(cm, field), getattr(bm, field)) if covered(field) else None
+        for field in ("wall_duration_ms", "prompt_tokens", "completion_tokens", "total_tokens")
+    }
+    metric_deltas["total_cost"] = cost_delta
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
         topology_identical=structural.identical,
         topology_changes=structural.changes,
         behavior_changes=changes,
         pattern_count_deltas=deltas,
-        metric_deltas={
-            field: _delta(getattr(cm, field), getattr(bm, field)) if covered(field) else None
-            for field in ("wall_duration_ms", "prompt_tokens", "completion_tokens", "total_tokens")
-        } | {
-            "total_cost": cost_delta,
-        },
+        metric_deltas=metric_deltas,
     )
 
 
@@ -661,8 +670,8 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             step.name = clean(step.name)
     for step in report.propagated_failures:
         step.name = clean(step.name)
-    for finding in report.patterns:
-        finding.labels = [clean(name) for name in finding.labels]
+    for pattern in report.patterns:
+        pattern.labels = [clean(name) for name in pattern.labels]
     for item in report.metrics.evaluations:
         item.name, item.label = clean(item.name), clean(item.label)
     if report.comparison:

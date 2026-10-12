@@ -283,8 +283,8 @@ class LangGraphCheckpointAdapter:
         for step_id, step in steps.items():
             display_parent_id = display_parent_by_step.get(step_id)
             parent_cp = checkpoints.get(display_parent_id) if display_parent_id else None
-            parent_key = key_by_step_id.get(display_parent_id) if display_parent_id else None
-            branch_target = self._branch_target(parent_key, key_by_step_id[step_id])
+            display_parent_key = key_by_step_id.get(display_parent_id) if display_parent_id else None
+            branch_target = self._branch_target(display_parent_key, key_by_step_id[step_id])
             name = self._producing_node(parent_cp, branch_target)
             if name:
                 step.name = name
