@@ -351,7 +351,8 @@ def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bo
 
     statuses: list[str] = []
     for trace in payload:
-        # px 1.8.1's buildTrace() derives this aggregate from child span statuses. The
+        # px derives this aggregate from child span statuses (scripts/
+        # verify_phoenix_cli_contract.py checks that against the pinned version). The
         # report below independently normalizes those spans, so selection and diagnosis
         # deliberately remain separate checks rather than treating the aggregate as evidence.
         status = trace.get("status")

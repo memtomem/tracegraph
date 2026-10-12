@@ -123,6 +123,8 @@ imports at all. No committed fixture is affected.
 - The optional `[cypher]` extra now accepts LadybugDB `>=0.18,<0.22` (was `<0.19`), and the
   lockfile moves to 0.21.2. The full test suite and every fixture's output are unchanged
   on 0.21.2.
+- CI now tests against Phoenix CLI 1.18.8 (was 1.8.1). The runtime floor stays 1.0.4: this
+  pin is what CI proves, not what tracegraph requires.
 
 ### Added
 
