@@ -396,7 +396,15 @@ class OTLPSpanAdapter:
         # assign seq as a topological order of that DAG so a cause always precedes its
         # effect by construction (validate_raw can never reject our own ordering). A genuine
         # cycle in the declared parent/link edges raises rather than silently lying.
-        causes, origins = self._causes(by_id, attrs, prerank, parent_span)
+        # Spans whose start time is missing or unreadable sort as time 0 in prerank. That is
+        # fine as a tiebreak for ordering, but it is not evidence of which execution came
+        # first, so it must never pick a causal parent.
+        untimed = {
+            sid
+            for sid, span in by_id.items()
+            if _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano")) is None
+        }
+        causes, origins = self._causes(by_id, attrs, prerank, parent_span, untimed)
         seq = self._topo_seq(by_id, causes, prerank)
 
         steps: list[Step] = []
@@ -628,6 +636,7 @@ class OTLPSpanAdapter:
         attrs: dict[str, dict],
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
+        untimed: set[str],
     ) -> tuple[dict[str, list[str]], dict[tuple[str, str], EdgeOrigin]]:
         """Reconstruct ``effect -> [causes]`` from declared signals: one parent + links."""
         node_index: dict[str, list[str]] = {}
@@ -650,7 +659,7 @@ class OTLPSpanAdapter:
 
         for sid in by_id:
             parent, parent_origin = self._resolve_parent(
-                sid, attrs, node_index, prerank, parent_span
+                sid, attrs, node_index, prerank, parent_span, untimed
             )
             if parent is not None:
                 add(sid, parent, parent_origin)
@@ -681,6 +690,7 @@ class OTLPSpanAdapter:
         node_index: dict[str, list[str]],
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
+        untimed: set[str],
     ) -> tuple[str | None, EdgeOrigin]:
         """The single chosen parent cause: the logical graph parent if resolvable, else the
         declared span parent.
@@ -689,7 +699,9 @@ class OTLPSpanAdapter:
         silently drop a real parent under skew or a timestamp tie):
 
         * a single span carries that ``graph.node.id`` → trust it outright (unambiguous);
-        * several do (a loop) → pick the nearest *preceding* execution.
+        * several do (a loop) → pick the nearest *preceding* execution, but only when this
+          span and every candidate have a readable start time; otherwise there is no
+          evidence of order and the parent is ambiguous.
 
         If ``graph.node.parent_id`` is declared but resolves to no in-trace span, or is
         ambiguous (several candidates, none preceding), we fall back to the structural
@@ -703,11 +715,12 @@ class OTLPSpanAdapter:
             pnode = attrs[sid].get(_GRAPH_NODE_PARENT_ID)
             if pnode is not None:
                 candidates = [c for c in node_index.get(str(pnode), []) if c != sid]
-                preceding = [c for c in candidates if prerank[c] < prerank[sid]]
-                if preceding:
-                    return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT
                 if len(candidates) == 1:
                     return candidates[0], EdgeOrigin.GRAPH_PARENT
+                timed = sid not in untimed and not any(c in untimed for c in candidates)
+                preceding = [c for c in candidates if timed and prerank[c] < prerank[sid]]
+                if preceding:
+                    return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT
                 if pid is None:
                     detail = "no in-trace span" if not candidates else "multiple ambiguous spans"
                     raise ValueError(

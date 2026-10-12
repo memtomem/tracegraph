@@ -97,6 +97,12 @@ imports at all. No committed fixture is affected.
   root span.
 - A Phoenix evaluation score too large to represent crashed the import; it is now
   unavailable, like a non-finite score.
+- When several spans carry the `graph.node.parent_id` a span declares (a loop), the importer
+  picks the nearest execution that started earlier. A span with a missing or unreadable
+  start time sorted as time 0 and could win that choice, so a timestamp nobody recorded
+  decided a causal edge. Such spans no longer take part: the choice is treated as
+  ambiguous, and the span falls back to its declared `parentSpanId`, or the import is
+  rejected if it has none.
 - The CLA workflow refused every pull request from the maintainer's own commit-author
   account, which is not the account that owns the repository. Both are allowlisted now.
 - The release documentation asked for a personal access token with *read* access to pull

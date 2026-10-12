@@ -13,7 +13,7 @@ from otlp_agent_trace import sample_otlp_document
 from tracegraph.adapters import OTLPSpanAdapter
 from tracegraph.adapters.otlp_spans import _decimal_attr, _int_attr
 from tracegraph.analysis import explain
-from tracegraph.model import EdgeType, StepKind, StepStatus
+from tracegraph.model import EdgeOrigin, EdgeType, StepKind, StepStatus
 from tracegraph.normalize import normalize
 from tracegraph.store import InMemoryStore
 
@@ -369,3 +369,48 @@ def test_span_without_trace_id_is_rejected_not_silently_dropped():
     }
     with pytest.raises(ValueError, match="no traceId"):
         OTLPSpanAdapter(document).discover()
+
+
+# --- a span with no usable start time never wins "nearest preceding" ----------------------
+
+
+def _loop_doc(p1_start):
+    def span(sid, start, node=None, parent_node=None, parent=None):
+        attrs = []
+        if node:
+            attrs.append({"key": "graph.node.id", "value": {"stringValue": node}})
+        if parent_node:
+            attrs.append({"key": "graph.node.parent_id", "value": {"stringValue": parent_node}})
+        out = {"traceId": "t", "spanId": sid, "name": sid, "attributes": attrs}
+        if start is not None:
+            out["startTimeUnixNano"] = start
+        if parent:
+            out["parentSpanId"] = parent
+        return out
+
+    s = 1_000_000_000
+    spans = [
+        span("root", 0),
+        span("p1", p1_start, node="P", parent="root"),
+        span("p2", 4 * s, node="P", parent="root"),
+        span("child", 2 * s, parent_node="P", parent="root"),
+    ]
+    return {"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}
+
+
+@pytest.mark.parametrize("p1_start", ["1" + "0" * 30, "yesterday", None])
+def test_untimed_candidate_cannot_become_the_nearest_preceding_parent(p1_start):
+    # Several spans carry the declared logical parent id, so the adapter picks the nearest
+    # one that started earlier. A start it cannot read is treated as time 0 for ordering,
+    # which made `p1` look like it preceded `child` and become its cause. Without real
+    # times there is no evidence of which execution came first: fall back to the declared
+    # span parent instead.
+    raw = OTLPSpanAdapter(_loop_doc(p1_start)).ingest("t")
+    causes = {(e.src, e.dst): e.origin for e in raw.causal_edges if e.src == "child"}
+    assert causes == {("child", "root"): EdgeOrigin.SPAN_PARENT_FALLBACK}
+
+
+def test_timed_loop_still_resolves_to_the_nearest_preceding_execution():
+    raw = OTLPSpanAdapter(_loop_doc(1_000_000_000)).ingest("t")
+    causes = {(e.src, e.dst): e.origin for e in raw.causal_edges if e.src == "child"}
+    assert causes == {("child", "p1"): EdgeOrigin.GRAPH_PARENT}
