@@ -62,11 +62,6 @@ def _safe_operation_name(value: Any) -> str | None:
     return clean if _OPERATION_NAME.fullmatch(clean) else None
 
 
-def _safe_evaluation_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    clean = " ".join(str(value).split())
-    return clean[:200] or None
 
 
 def _attrs(span: dict[str, Any]) -> dict[str, Any]:
@@ -91,8 +86,11 @@ def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
         result = annotation.get("result") or {}
         if not isinstance(result, dict):
             result = {}
-        name = annotation.get("name")
-        if not name:
+        # Annotation names and labels obey the same rule as span names: identifier-shaped text
+        # only, because a free-text label is commonly an evaluator's note about the content.
+        # Without a usable name an evaluation has no identity, so it is dropped entirely.
+        name = _safe_operation_name(annotation.get("name"))
+        if name is None:
             continue
         label = _first(result, "label") or annotation.get("label")
         score = _first(result, "score")
@@ -104,13 +102,7 @@ def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
             score = None
         if score is not None and not math.isfinite(score):
             score = None
-        out.append(
-            {
-                "name": _safe_evaluation_text(name),
-                "label": _safe_evaluation_text(label),
-                "score": score,
-            }
-        )
+        out.append({"name": name, "label": _safe_operation_name(label), "score": score})
     return out
 
 

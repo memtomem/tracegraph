@@ -310,7 +310,9 @@ with deterministic SHA-256 aliases, and disclose in `warnings` when an alias act
 the report. Trace/step identifiers remain; this is not anonymization.
 Raw artifact names and bytes are not rewritten for report privacy or matching, so the
 artifact — unlike the report — can still carry whatever the producer put in a span name or
-error message (Phoenix ingestion excepted; it filters at the source).
+error message. Phoenix ingestion is the exception: it filters at the source, keeping span
+names and annotation names and labels only when they are identifier-shaped, and dropping
+status messages. Identifier-shaped is not the same as anonymous: an e-mail address passes.
 `export-review-candidates` output is not passed through the report redactor: its `tool_key`
 is the raw endpoint span name. `export-incident-memo` goes further than `safe-v1`: it writes
 no step names, error messages or evaluation labels at all. Steps appear as kind-based

@@ -153,6 +153,15 @@ imports at all. No committed fixture is affected.
   exports now hash the same on every machine, and differ from any artifact previously built
   where the local timezone applied a nonzero offset to those timestamps. Timestamps that
   carry a `Z` or an offset are unchanged.
+- **Phoenix artifacts no longer carry free-text annotation names or labels.** The Phoenix
+  import is documented as body-free and already kept only identifier-shaped span names, but
+  annotation names and labels were kept as free text (whitespace-collapsed, cut to 200
+  characters), so an evaluator's note such as `user said: my password is hunter2` reached
+  the artifact. They now pass the same identifier filter as span names: an evaluation whose
+  name fails it is dropped, and a label that fails it becomes `null` while the score is
+  kept. **Artifact content change:** a re-import of a Phoenix export with such annotations
+  produces different bytes and digests. Identifier-shaped text, which can still be personal
+  data such as an e-mail address, is kept.
 
 ## 0.2.0 - 2026-09-12
 
