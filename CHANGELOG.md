@@ -63,13 +63,15 @@ explicitly.
   artifact serializes as version 2 or 3, byte for byte as before. **Readers from 0.2.0 and
   older refuse version 4 files** with an explicit unsupported-version error. This build reads
   both projections, and the LadybugDB store re-emits a legacy file unchanged. The derived
-  tree feeds `inspect`, `diff` and the topology part of `analyze --baseline`; raw causal
-  queries (`explain`, `query`) are unaffected.
+  tree feeds `inspect`, `diff`, and `analyze --baseline`, where it decides both the topology
+  changes and how steps are matched between the two runs: a step whose tree parent moved
+  can now appear as one removed and one added behavior change, and its logical step key
+  changes. Raw causal queries (`explain`, `query`) are unaffected.
 - Phoenix timestamps without a timezone are now read as UTC rather than in the local
   timezone of the machine running the import. **Digest impact:** artifacts built from such
   exports now hash the same on every machine, and differ from any artifact previously built
-  from them on a machine whose timezone was not UTC. Timestamps that carry a `Z` or an
-  offset are unchanged.
+  where the local timezone applied a nonzero offset to those timestamps. Timestamps that
+  carry a `Z` or an offset are unchanged.
 
 ## 0.2.0 - 2026-09-12
 

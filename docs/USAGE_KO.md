@@ -288,7 +288,8 @@ uv run tracegraph export-incident-memo A.json -o incident.md
 
 `export-incident-memo`는 `safe-v1` 보고서보다 더 좁습니다. step 이름, 오류 메시지,
 평가 label을 쓰지 않고, step은 `step_<번호>_<종류>` 별칭으로, run id는 잘린 SHA-256
-`run_digest`로만 나타냅니다. 포함 관계만 보여 주는 edge나 출처를 모르는 edge는
+`run_digest`로만 나타냅니다. 나머지는 trace 상태, causal fidelity, step·오류 수, 프리셋
+패턴 id와 버전, edge origin, fidelity 공시 같은 구조 메타데이터입니다. 포함 관계만 보여 주는 edge나 출처를 모르는 edge는
 "caused by"가 아니라 "preceded by"로 적습니다. 메모에는 입력 artifact 파일 바이트의
 SHA-256이 함께 기록됩니다.
 

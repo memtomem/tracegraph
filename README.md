@@ -254,12 +254,13 @@ and any change to them is called out in the [changelog](CHANGELOG.md).
 | Commands | `ingest`, `ingest-otlp`, `ingest-phoenix`, `inspect`, `validate`, `explain`, `diff`, `analyze`, `presets`, `query`, `export-review-candidates`, `export-incident-memo`, `phoenix doctor`, `phoenix diagnose` |
 | Patterns | Versioned presets matched over the raw causal graph; the governance-eligible `tool-retry-failure@v2` requires an explicit producer retry marker, and repetition-only heuristics are query-only |
 | Backends | Pure-Python in-memory store (default); optional LadybugDB/Cypher accelerator (`[cypher]`), whose results must equal the pure-Python matcher's |
-| Ecosystem | SyncMill run correlation (`syncmill.run_id`), Toolgraph preflight evidence as non-causal metadata, a pinned Phoenix + SyncMill end-to-end workflow |
+| Ecosystem | SyncMill run correlation (`syncmill.run_id`), Toolgraph preflight evidence as non-causal metadata, a weekly Phoenix + SyncMill end-to-end workflow (Phoenix CLI and server pinned; SyncMill tracks its default branch) |
 
 Known limits:
 
-- LangGraph tasks that were scheduled but never committed (a run paused by `interrupt()`,
-  stopped by the recursion limit, or killed) are not reported, so such a run reads `ok`.
+- A LangGraph task that was scheduled but left no result and no recorded error (a run
+  paused by `interrupt()`, stopped by the recursion limit, or killed) is not reported, so
+  such a run reads `ok` unless some other step recorded an error.
 - Phoenix exports carry no span links, so their artifacts are parent-only; additional fan-in
   causes may be missing.
 - Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
@@ -312,8 +313,10 @@ artifact — unlike the report — can still carry whatever the producer put in 
 error message (Phoenix ingestion excepted; it filters at the source).
 `export-review-candidates` output is not passed through the report redactor: its `tool_key`
 is the raw endpoint span name. `export-incident-memo` goes further than `safe-v1`: it writes
-no step names, error messages or evaluation labels at all, only kind-based step aliases, a
-truncated run-id digest, preset pattern ids, edge origins and the exact artifact digest. Logical
+no step names, error messages or evaluation labels at all. Steps appear as kind-based
+aliases and the run id as a truncated digest; the rest is structural metadata such as trace
+status, causal fidelity, step and error counts, preset pattern ids and versions, edge
+origins, fidelity disclosures, and the digest of the exact artifact bytes. Logical
 comparison keys are JSON-encoded typed paths; consumers should treat them as opaque strings.
 Containment and unknown edges preserve all error investigation candidates, deeper first.
 Explicit causal ancestry supplies context, not proof that an exception propagated.
