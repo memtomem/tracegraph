@@ -45,6 +45,32 @@ explicitly.
 - It also did not say that a Trusted Publisher's "Environment name" is the GitHub
   environment rather than the index, which failed the first 0.2.0 rehearsal.
 
+### Added
+
+- `tracegraph export-incident-memo <artifact> -o memo.md` writes a Markdown post-mortem
+  intended for long-term memory stores. Its output is a strict allowlist: the run id appears
+  only as a truncated SHA-256 `run_digest`, steps appear as `step_<n>_<kind>` aliases, and
+  no step name, error message, evaluation label or payload is written. Edges that only show
+  containment or have no recorded origin are rendered as "preceded by", never "caused by".
+  The memo carries the SHA-256 of the exact artifact bytes it was built from.
+
+### Changed
+
+- **Artifact schema version 4.** When a step has several causes, its single TREE_PARENT is
+  now chosen by edge origin first — a declared graph or checkpoint parent over span
+  containment, over a span link, over an unknown origin — and only then by time. An artifact
+  whose tree differs from the purely temporal choice is stamped version 4; every other
+  artifact serializes as version 2 or 3, byte for byte as before. **Readers from 0.2.0 and
+  older refuse version 4 files** with an explicit unsupported-version error. This build reads
+  both projections, and the LadybugDB store re-emits a legacy file unchanged. The derived
+  tree feeds `inspect`, `diff` and the topology part of `analyze --baseline`; raw causal
+  queries (`explain`, `query`) are unaffected.
+- Phoenix timestamps without a timezone are now read as UTC rather than in the local
+  timezone of the machine running the import. **Digest impact:** artifacts built from such
+  exports now hash the same on every machine, and differ from any artifact previously built
+  from them on a machine whose timezone was not UTC. Timestamps that carry a `Z` or an
+  offset are unchanged.
+
 ## 0.2.0 - 2026-09-12
 
 First published release. `0.1.0` was tagged but never uploaded.

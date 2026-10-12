@@ -42,7 +42,8 @@ Before you open this:
 - **Contract or schema change?** `contracts/` is consumed by other repositories, the
   review-candidate golden fixture is compared byte for byte, and the artifact envelope sits
   inside the digest consumers bind to. A test that only reads a fixture does not catch
-  producer drift — drive the producer.
+  producer drift — drive the producer. Add a CHANGELOG line under "Unreleased" in this same
+  pull request, saying whose bytes or digests change.
 - **Adapter change?** Pin it against a real run through a real saver. A synthetic fixture
   cannot show a reconstruction is correct, because getting it wrong is what produces a
   plausible-looking fixture.

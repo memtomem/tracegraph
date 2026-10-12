@@ -269,6 +269,29 @@ uv run tracegraph explain --backend ladybug A.json <step_id>
 중요한 점은 JSON artifact가 항상 원본이라는 것입니다. LadybugDB DB는 다시 만들 수 있는
 캐시/가속기이고, 분석 의미는 기본 백엔드와 같아야 합니다.
 
+## 리뷰 후보·인시던트 메모 내보내기
+
+두 명령 모두 artifact를 읽기만 하고, 원본 대신 정해진 필드만 담은 파일을 새로 씁니다.
+
+```bash
+# 거버넌스 검토 후보 (일치하는 경우가 없어도 정상 보고서입니다)
+uv run tracegraph export-review-candidates tool-retry-failure traces/ -o candidates.json
+
+# 장기 기억 저장소용 인시던트 사후 분석 메모 (Markdown)
+uv run tracegraph export-incident-memo A.json -o incident.md
+```
+
+`export-review-candidates`는 후보마다 `run_id`, `pattern_id`, `pattern_version`,
+`tool_key`, `artifact_digest` 다섯 필드만 씁니다. `run_id`가 없거나 도구 이름이
+`server::tool` 형태가 아닌 artifact가 하나라도 일치하면 전체를 실패시키고 기존 출력
+파일을 건드리지 않습니다.
+
+`export-incident-memo`는 `safe-v1` 보고서보다 더 좁습니다. step 이름, 오류 메시지,
+평가 label을 쓰지 않고, step은 `step_<번호>_<종류>` 별칭으로, run id는 잘린 SHA-256
+`run_digest`로만 나타냅니다. 포함 관계만 보여 주는 edge나 출처를 모르는 edge는
+"caused by"가 아니라 "preceded by"로 적습니다. 메모에는 입력 artifact 파일 바이트의
+SHA-256이 함께 기록됩니다.
+
 ## 자주 헷갈리는 개념
 
 ### artifact
