@@ -1443,19 +1443,27 @@ def test_px_read_commands_are_exact(monkeypatch):
     # pin it exactly rather than by substring.
     seen = []
 
-    def fake_json(command, *, action):
+    def failing_json(command, *, action):
         seen.append(command)
         raise cli_mod._PxError("stop")
 
-    monkeypatch.setattr(cli_mod, "_px_json", fake_json)
+    monkeypatch.setattr(cli_mod, "_px_json", failing_json)
     for call in (lambda: cli_mod._px_trace("abc", project="proj"),
                  lambda: cli_mod._px_latest_trace(project=None)):
         with pytest.raises(cli_mod._PxError):
             call()
+
+    def empty_json(command, *, action):
+        seen.append(command)
+        return []
+
+    monkeypatch.setattr(cli_mod, "_px_json", empty_json)
     monkeypatch.setattr(cli_mod, "_px_version", lambda: "1.8.1")
-    runner.invoke(app, ["phoenix", "doctor", "--project", "proj"])
+    result = runner.invoke(app, ["phoenix", "doctor", "--project", "proj"])
+    assert result.exit_code == 0, result.output
     assert seen == [
         ["px", "trace", "get", "abc", "--include-annotations", "--format", "raw", "--no-progress", "--project", "proj"],
         ["px", "trace", "list", "--limit", "20", "--include-annotations", "--format", "raw", "--no-progress"],
         ["px", "project", "list", "--limit", "1", "--format", "raw", "--no-progress"],
+        ["px", "trace", "list", "--limit", "1", "--format", "raw", "--no-progress", "--project", "proj"],
     ]
