@@ -58,7 +58,7 @@ tracegraph = "tracegraph.cli:main"
 # LadybugDB is the actively maintained successor to the archived Kùzu project. The JSON
 # artifact remains authoritative, so an accelerator cache is rebuilt across DB versions.
 [project.optional-dependencies]
-cypher = ["ladybug>=0.18,<0.19"]
+cypher = ["ladybug>=0.18,<0.22"]
 
 [dependency-groups]
 dev = [

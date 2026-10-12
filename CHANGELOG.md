@@ -118,6 +118,12 @@ imports at all. No committed fixture is affected.
 - It also did not say that a Trusted Publisher's "Environment name" is the GitHub
   environment rather than the index, which failed the first 0.2.0 rehearsal.
 
+### Dependencies
+
+- The optional `[cypher]` extra now accepts LadybugDB `>=0.18,<0.22` (was `<0.19`), and the
+  lockfile moves to 0.21.2. The full test suite and every fixture's output are unchanged
+  on 0.21.2.
+
 ### Added
 
 - `tracegraph export-incident-memo <artifact> -o memo.md` writes a Markdown post-mortem
