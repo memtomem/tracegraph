@@ -79,6 +79,10 @@ explicitly.
   different or unknown currencies is now disclosed too; before, `analyze` printed
   `cost=unavailable` with no reason.
 
+- Writing an artifact or an analysis report left a hidden temporary file behind when the
+  write or fsync failed, because the temporary name was recorded only after writing. All
+  four output writers now share one helper that removes it on every failure.
+
 ### Compatibility notes for imports
 
 These change what an input that imported successfully before now produces or whether it

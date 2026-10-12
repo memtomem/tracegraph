@@ -169,11 +169,6 @@ def _incoming_edges_by_step(caused_by: list[Edge]) -> dict[str, list[Edge]]:
     return incoming
 
 
-def _parents_by_step(caused_by: list[Edge]) -> dict[str, list[str]]:
-    """Convenience helper returning destination step IDs per effect step."""
-    return {src: [e.dst for e in edges] for src, edges in _incoming_edges_by_step(caused_by).items()}
-
-
 def _primary_parent(
     incoming_edges: list[Edge],
     steps: dict[str, Step],

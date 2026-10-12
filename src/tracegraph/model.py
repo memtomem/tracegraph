@@ -23,6 +23,7 @@ See ``normalize.py`` for how the derived layer is computed from the raw layer.
 from __future__ import annotations
 
 from enum import Enum
+import re
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -125,6 +126,16 @@ class DecisionEvidence(BaseModel):
     artifact_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     graph_generation: int = Field(ge=0)
     verdict: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
+
+
+#: Edge origins that record a declared cause, as opposed to containment (span nesting) or an
+#: origin nobody recorded. Only these are ever rendered as "caused by".
+EXPLICIT_ORIGINS = frozenset(
+    {EdgeOrigin.CHECKPOINT_PARENT, EdgeOrigin.GRAPH_PARENT, EdgeOrigin.SPAN_LINK}
+)
+
+#: A content digest as tracegraph writes and accepts it.
+SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class EdgeType(str, Enum):

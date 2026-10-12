@@ -635,3 +635,32 @@ def test_envelope_check_does_not_depend_on_the_rest_of_the_trace_being_canonical
     tampered = nt.model_copy(deep=True)
     tampered.trace.status = StepStatus.ERROR
     assert json.loads(artifact.dumps(tampered))["schema_version"] == 4
+
+
+@pytest.mark.parametrize("writer", ["artifact", "report", "candidates", "memo"])
+def test_every_atomic_writer_cleans_up_when_the_write_fails(tmp_path, monkeypatch, writer):
+    # The artifact and report writers recorded the temp file's name only after writing it,
+    # so a failing write or fsync left `.name.*` behind; the memo writer did not. One helper.
+    import os
+
+    from tracegraph.analysis import diagnose, memo
+    from tracegraph import review_candidates
+
+    nt = normalize(_raw(_steps(("a", 0)), []))
+    target = tmp_path / "out.json"
+    save = {
+        "artifact": lambda: artifact.save_atomic(nt, target),
+        "report": lambda: diagnose.save_atomic(diagnose.analyze(nt), target),
+        "candidates": lambda: review_candidates.save_atomic(
+            review_candidates.ReviewCandidateReport(), target
+        ),
+        "memo": lambda: memo.save_incident_memo("x", target),
+    }[writer]
+
+    def failing_fsync(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "fsync", failing_fsync)
+    with pytest.raises(OSError, match="disk full"):
+        save()
+    assert list(tmp_path.iterdir()) == []

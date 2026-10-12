@@ -64,6 +64,7 @@ from tracegraph.model import (
     EdgeType,
     EvaluationSummary,
     RawTrace,
+    SHA256_DIGEST,
     Step,
     StepEvidence,
     StepKind,
@@ -96,9 +97,6 @@ _KIND_MAP = {
     "PROMPT": StepKind.PROMPT,
     "UNKNOWN": StepKind.UNKNOWN,
 }
-
-_ERROR_CODES = {2, "STATUS_CODE_ERROR", "ERROR"}
-
 
 def _first(d: dict, *names: str, default: Any = None) -> Any:
     """Return the first present, non-None key from ``names`` (camelCase/snake_case tolerant)."""
@@ -272,7 +270,7 @@ def _digest_attr(attrs: dict[str, Any], name: str) -> str | None:
     value = attrs.get(name)
     if value is None:
         return None
-    if not isinstance(value, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+    if not isinstance(value, str) or not SHA256_DIGEST.fullmatch(value):
         raise ValueError(f"{name} must be a lowercase sha256 digest")
     return value
 
@@ -520,7 +518,7 @@ class OTLPSpanAdapter:
             digest = span_attrs[_TOOLGRAPH_PREFLIGHT_DIGEST]
             generation = span_attrs[_TOOLGRAPH_GRAPH_GENERATION]
             verdict = span_attrs[_TOOLGRAPH_PREFLIGHT_VERDICT]
-            if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+            if not isinstance(digest, str) or not SHA256_DIGEST.fullmatch(digest):
                 raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph preflight digest")
             if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
                 raise ValueError(f"trace {trace_id!r} has an invalid Toolgraph graph generation")
@@ -678,7 +676,6 @@ class OTLPSpanAdapter:
                         raise ValueError("links[].traceId and spanId must be strings")
                     if link_trace != own_trace:
                         continue
-                    lsid = _first(link, "spanId", "span_id")
                     if lsid in by_id:
                         add(sid, lsid, EdgeOrigin.SPAN_LINK)
         return causes, origins

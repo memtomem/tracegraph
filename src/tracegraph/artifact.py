@@ -12,10 +12,10 @@ import json
 import hashlib
 from collections.abc import Iterable, Mapping
 import re
-import os
 from pathlib import Path
-import tempfile
 
+from tracegraph._atomic_write import write_text_atomic
+from tracegraph.input_validation import loads as json_loads
 from tracegraph.model import NormalizedTrace, StepSource
 
 #: Bump when the on-disk shape changes incompatibly.
@@ -114,16 +114,12 @@ def _migrate_v1(trace_payload: dict) -> dict:
 
 
 def loads(text: str) -> NormalizedTrace:
-    """Parse a trace from a JSON string, validating the schema version."""
-    try:
-        payload = json.loads(text)
-    except RecursionError as exc:
-        # Deeply-nested JSON overflows json's recursive scanner with a RecursionError (a
-        # RuntimeError, *not* a ValueError). Normalize it so the load boundary treats an
-        # over-nested stray as bad input — otherwise it escapes the CLI's (OSError, ValueError)
-        # handler and crashes the whole command with a raw traceback.
-        raise ValueError("JSON nesting too deep") from exc
-    return from_obj(payload)
+    """Parse a trace from a JSON string, validating the schema version.
+
+    Over-nested JSON raises ``ValueError`` (see ``input_validation.loads``), not the
+    ``RecursionError`` json itself raises, so it cannot escape the CLI's load handler.
+    """
+    return from_obj(json_loads(text))
 
 
 def from_obj(payload: object) -> NormalizedTrace:
@@ -187,23 +183,7 @@ def save_atomic(nt: NormalizedTrace, path: str | Path, *, replace: bool = True) 
     # serialized must round-trip through the model. Validates the parsed shape directly —
     # no need to re-parse the JSON string we produced ourselves.
     NormalizedTrace.model_validate(nt.model_dump(mode="json"))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False
-        ) as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp_name = handle.name
-        if replace:
-            os.replace(temp_name, target)
-        else:
-            os.link(temp_name, target)
-    finally:
-        if temp_name is not None:
-            Path(temp_name).unlink(missing_ok=True)
+    write_text_atomic(target, text, replace=replace)
 
 
 def load(path: str | Path) -> NormalizedTrace:

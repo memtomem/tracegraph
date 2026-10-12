@@ -56,7 +56,7 @@ def _children(nt: NormalizedTrace) -> dict[str, list[str]]:
     return out
 
 
-def _roots(nt: NormalizedTrace, children: dict[str, list[str]]) -> list[str]:
+def _roots(nt: NormalizedTrace) -> list[str]:
     has_parent = {e.src for e in nt.edges_of(EdgeType.TREE_PARENT)}
     return [s.step_id for s in nt.steps if s.step_id not in has_parent]
 
@@ -154,7 +154,7 @@ def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
     _require_forest(nt, "trace")
     children = _children(nt)
     steps = nt.steps_by_id()
-    roots = _roots(nt, children)
+    roots = _roots(nt)
     canon = _subtree_canons(steps, children, roots, label)
     return tuple(sorted((canon[r] for r in roots), key=cmp_to_key(_compare)))
 
@@ -164,7 +164,7 @@ def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = defau
     _require_forest(b, "B")
     table = {}
     ca, cb = _children(a), _children(b)
-    ra, rb = _roots(a, ca), _roots(b, cb)
+    ra, rb = _roots(a), _roots(b)
     aa = _intern(a.steps_by_id(), ca, ra, label, table)
     bb = _intern(b.steps_by_id(), cb, rb, label, table)
     return sorted(aa[r] for r in ra) == sorted(bb[r] for r in rb)
@@ -192,7 +192,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
     _require_forest(b, "B")
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
-    ra, rb = _roots(a, ca), _roots(b, cb)
+    ra, rb = _roots(a), _roots(b)
     table = {}
     canA = _intern(sa, ca, ra, label, table)
     canB = _intern(sb, cb, rb, label, table)

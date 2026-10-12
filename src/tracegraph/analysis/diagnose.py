@@ -4,23 +4,50 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-import tempfile
 
 from pydantic import BaseModel, Field
 
 from tracegraph import artifact
+from tracegraph._atomic_write import write_text_atomic
 from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, build_index, find_matches
-from tracegraph.model import CausalFidelity, EdgeOrigin, EdgeType, NormalizedTrace, Step, StepStatus
+from tracegraph.model import (
+    EXPLICIT_ORIGINS,
+    CausalFidelity,
+    EdgeType,
+    NormalizedTrace,
+    Step,
+    StepStatus,
+)
 from tracegraph.normalize import validate_structure
 
 REPORT_SCHEMA_VERSION = 2
+#: Fidelity disclosures shared by analysis reports and incident memos, so the two never drift.
+INCIDENT_FIDELITY_WARNING = (
+    "Failure candidates are investigation leads. Containment/unknown edges do not "
+    "prove propagation; explicit causal ancestry is context, not proof of exception propagation."
+)
+PARENT_ONLY_FIDELITY_WARNING = (
+    "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
+)
+LANGGRAPH_FIDELITY_WARNING = (
+    "LangGraph failure capture covers the configured error channel and task pending writes "
+    "for recognized checkpoint layouts; absence of an observed failure does not prove execution success."
+)
+LINKS_PRESERVED_FIDELITY_WARNING = (
+    "Link preservation covers valid in-trace links only; foreign or unresolved links are omitted."
+)
+
+
+def _clause(sentence: str) -> str:
+    return sentence[:1].lower() + sentence[1:]
+
+
 _AUTO_PRESETS = (
     "tool-retry-failure",
     "repeated-agent-failure",
@@ -173,7 +200,7 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
     explicit = {}
     depth = {}
     for edge in nt.edges_of(EdgeType.CAUSED_BY):
-        if edge.origin in {EdgeOrigin.CHECKPOINT_PARENT, EdgeOrigin.GRAPH_PARENT, EdgeOrigin.SPAN_LINK}:
+        if edge.origin in EXPLICIT_ORIGINS:
             explicit.setdefault(edge.src, []).append(edge.dst)
     for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
         depth[step.step_id] = 1 + max((depth[c] for c in adjacency.get(step.step_id, [])), default=-1)
@@ -273,11 +300,6 @@ def _iso(value: str | None) -> datetime | None:
         return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
-
-
-def _metrics(nt: NormalizedTrace) -> MetricSummary:
-    """Metric summary only; see :func:`_metrics_with_notes` for the disclosure notes."""
-    return _metrics_with_notes(nt)[0]
 
 
 def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], frozenset[str]]:
@@ -583,13 +605,13 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
-            "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
+            PARENT_ONLY_FIDELITY_WARNING
         )
     for label, trace in (("current", nt), ("baseline", baseline)):
         if trace is None:
             continue
         if label == "baseline" and trace.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
-            warnings.append("baseline: Phoenix export preserves parent relationships only; additional fan-in causes may be missing.")
+            warnings.append(f"baseline: {PARENT_ONLY_FIDELITY_WARNING}")
         lossy = sum(step.projection_lossy for step in trace.steps)
         if lossy:
             warnings.append(f"{label}: derived tree drops causes at {lossy} step(s); topology comparison covers TREE_PARENT only.")
@@ -600,11 +622,12 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             # derived failure step and looks identical to a clean run. Absence of a failure
             # is therefore still not evidence of success, and nothing in the artifact says
             # which case applies — so the disclosure cannot be made conditional.
-            warnings.append(f"{label}: LangGraph failure capture covers the configured error channel and task pending writes for recognized checkpoint layouts; absence of an observed failure does not prove execution success.")
+            warnings.append(f"{label}: {LANGGRAPH_FIDELITY_WARNING}")
         if trace.trace.links_preserved:
-            warnings.append(f"{label}: link preservation covers valid in-trace links only; foreign or unresolved links are omitted.")
+            # Mid-sentence after the label, so the shared sentence starts in lower case here.
+            warnings.append(f"{label}: {_clause(LINKS_PRESERVED_FIDELITY_WARNING)}")
     if primary or propagated:
-        warnings.append("Failure candidates are investigation leads. Containment/unknown edges do not prove propagation; explicit causal ancestry is context, not proof of exception propagation.")
+        warnings.append(INCIDENT_FIDELITY_WARNING)
     if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):
         warnings.append("Metrics sum observed span values; coverage may be partial and producer aggregates may double count.")
     # Withheld or partially-covered metrics are disclosed, never silently absorbed. The
@@ -679,17 +702,4 @@ def save_atomic(report: AnalysisReport, path: str | Path) -> None:
     # Round-trip the public model before replacing an existing report (validated on the
     # parsed shape directly — no need to re-parse the JSON we just produced).
     AnalysisReport.model_validate(report.model_dump(mode="json"))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False
-        ) as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp_name = handle.name
-        os.replace(temp_name, target)
-    finally:
-        if temp_name is not None:
-            Path(temp_name).unlink(missing_ok=True)
+    write_text_atomic(target, text)

@@ -456,10 +456,8 @@ class LangGraphCheckpointAdapter:
             digest.update(joined)
             hexed = digest.hexdigest()
         else:
-            try:
-                from xxhash import xxh3_128_hexdigest
-            except ImportError:  # pragma: no cover - xxhash is a declared dependency
-                return None
+            from xxhash import xxh3_128_hexdigest
+
             hexed = xxh3_128_hexdigest(seed + joined)
         return f"{hexed[:8]}-{hexed[8:12]}-{hexed[12:16]}-{hexed[16:20]}-{hexed[20:32]}"
 

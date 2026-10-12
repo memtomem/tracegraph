@@ -8,9 +8,9 @@ from pathlib import Path
 import re
 from typing import Any
 
-from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _span_array
+from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _attributes, _first, _span_array
 from tracegraph.input_validation import loads, object_field
-from tracegraph.model import CausalFidelity, RawTrace
+from tracegraph.model import RawTrace
 
 _SAFE_ATTRIBUTES = {
     "graph.node.id",
@@ -27,14 +27,6 @@ _SAFE_ATTRIBUTES = {
     "llm.cost.output",
     "llm.cost.currency",
 }
-
-
-def _first(mapping: dict[str, Any], *names: str) -> Any:
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None
 
 
 def _nanos(value: Any) -> Any:
@@ -78,7 +70,6 @@ def _safe_evaluation_text(value: Any) -> str | None:
 
 
 def _attrs(span: dict[str, Any]) -> dict[str, Any]:
-    from tracegraph.adapters.otlp_spans import _attributes
     raw = _attributes(span)
     safe = {key: raw[key] for key in _SAFE_ATTRIBUTES if key in raw}
     kind = _first(span, "span_kind", "spanKind") or raw.get("openinference.span.kind")
@@ -177,8 +168,6 @@ class PhoenixExportAdapter:
             links_as_causes=False,
             include_error_messages=False,
             preserve_unset_status=True,
-            causal_fidelity=CausalFidelity.PARENT_ONLY,
-            links_preserved=False,
             evaluation_channel="_tracegraph_evaluations",
         ).ingest(trace_id)
 
@@ -205,8 +194,6 @@ class PhoenixExportAdapter:
 
     @staticmethod
     def _span(trace_id: str, span: Any) -> dict[str, Any]:
-        if not isinstance(span, dict):
-            raise ValueError(f"Phoenix trace {trace_id!r} contains a non-object span")
         context = object_field(span.get("context"), "spans[].context")
         span_id = _first(context, "span_id", "spanId") or _first(span, "id", "span_id", "spanId")
         if not isinstance(span_id, str) or not span_id:
