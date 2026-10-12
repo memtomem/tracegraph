@@ -280,7 +280,7 @@ def _metrics(nt: NormalizedTrace) -> MetricSummary:
     return _metrics_with_notes(nt)[0]
 
 
-def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], bool]:
+def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], frozenset[str]]:
     """Summarize observed metrics and report what had to be withheld.
 
     Every degradation is disclosed rather than absorbed: a wall duration that cannot be
@@ -288,10 +288,10 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
     total (the same posture the mixed-currency path already takes) instead of silently
     summing the remainder into an understated figure. "Unavailable", never a wrong number.
 
-    The third element says whether ``wall_duration_ms`` covers every step. A duration built
-    from a subset is a lower bound, which is honest to publish on its own but cannot be
-    subtracted: the unobserved work has unknown length, so a delta computed from it has
-    unknown magnitude *and* unknown sign.
+    The third element names the metrics that cover every step. A total built from a subset
+    of steps is a lower bound, which is honest to publish on its own but cannot be
+    subtracted: the unobserved work has unknown size, so a delta computed from it has
+    unknown magnitude *and* unknown sign. The same rule holds for duration, tokens and cost.
     """
     notes: list[str] = []
     duration_complete = False
@@ -377,6 +377,12 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
     ambiguous_cost = len(cost_currencies) > 1 or (
         bool(cost_currencies) and has_currencyless_cost
     )
+    if ambiguous_cost:
+        notes.append(
+            "total_cost unavailable: steps report "
+            + ("different currencies" if len(cost_currencies) > 1 else "costs with and without a currency")
+            + ", and costs are never converted or summed across currencies."
+        )
     if unusable_costs:
         # Dropping the bad value and summing the rest would report a confident number that
         # is knowably too low. Withhold the total and say why.
@@ -385,6 +391,15 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
             f"total_cost unavailable: {unusable_costs} step(s) reported a cost that is not a "
             "finite non-negative decimal, so the remaining costs would understate the total."
         )
+    complete = {
+        field
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+        if nt.steps and all(s.evidence and getattr(s.evidence, field) is not None for s in nt.steps)
+    }
+    if duration_complete:
+        complete.add("wall_duration_ms")
+    if nt.steps and len(costs) == len(nt.steps) and not ambiguous_cost:
+        complete.add("total_cost")
     evaluations = [
         EvaluationFinding(
             step_id=step.step_id,
@@ -409,7 +424,7 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
             else None
         ),
         evaluations=evaluations,
-    ), notes, duration_complete
+    ), notes, frozenset(complete)
 
 
 def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, Step]:
@@ -458,7 +473,7 @@ def _comparison(
     *,
     current_patterns: list[PatternFinding],
     current_metrics: MetricSummary,
-    current_duration_complete: bool,
+    current_complete: frozenset[str],
     notes: list[str] | None = None,
 ) -> ComparisonSummary:
     """Compare against a baseline. Appends the baseline's own metric disclosures to ``notes``.
@@ -504,29 +519,38 @@ def _comparison(
         - sum(item.pattern_id == name for item in before_patterns)
         for name in sorted(pattern_ids)
     }
-    bm, baseline_notes, baseline_duration_complete = _metrics_with_notes(baseline)
+    bm, baseline_notes, baseline_complete = _metrics_with_notes(baseline)
     cm = current_metrics
-    cost_delta: str | None = None
-    if (
-        bm.total_cost is not None
-        and cm.total_cost is not None
-        and bm.cost_currency is not None
-        and bm.cost_currency == cm.cost_currency
-    ):
-        cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
-    if notes is not None:
-        notes.extend(f"baseline: {note}" for note in baseline_notes)
+    if notes is None:
+        notes = []
+    notes.extend(f"baseline: {note}" for note in baseline_notes)
     # A delta between two lower bounds is not a lower bound on the delta. If either side
-    # missed a step, the unobserved work could be longer than the difference, so the number
+    # missed a step, the unobserved work could be larger than the difference, so the number
     # would be wrong in magnitude and possibly in sign. Withhold it and say why; disclosing
     # the inputs' incompleteness does not license publishing a confident subtraction of them.
-    durations_comparable = current_duration_complete and baseline_duration_complete
-    if not durations_comparable and None not in (cm.wall_duration_ms, bm.wall_duration_ms):
-        if notes is not None:
+    comparable = current_complete & baseline_complete
+
+    def covered(field: str) -> bool:
+        if field in comparable:
+            return True
+        if getattr(cm, field) is not None and getattr(bm, field) is not None:
+            what = "duration" if field == "wall_duration_ms" else "total"
             notes.append(
-                "wall_duration_ms delta unavailable: at least one side's duration covers "
-                "only part of its trace, so the difference has unknown size and sign."
+                f"{field} delta unavailable: at least one side's {what} covers only part of "
+                "its trace, so the difference has unknown size and sign."
             )
+        return False
+
+    cost_delta: str | None = None
+    if cm.total_cost is not None and bm.total_cost is not None and (
+        bm.cost_currency is None or bm.cost_currency != cm.cost_currency
+    ):
+        notes.append(
+            "total_cost delta unavailable: the two runs report different or unknown "
+            "currencies, and costs are never converted."
+        )
+    elif covered("total_cost"):
+        cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
         topology_identical=structural.identical,
@@ -534,14 +558,9 @@ def _comparison(
         behavior_changes=changes,
         pattern_count_deltas=deltas,
         metric_deltas={
-            "wall_duration_ms": (
-                _delta(cm.wall_duration_ms, bm.wall_duration_ms)
-                if durations_comparable
-                else None
-            ),
-            "prompt_tokens": _delta(cm.prompt_tokens, bm.prompt_tokens),
-            "completion_tokens": _delta(cm.completion_tokens, bm.completion_tokens),
-            "total_tokens": _delta(cm.total_tokens, bm.total_tokens),
+            field: _delta(getattr(cm, field), getattr(bm, field)) if covered(field) else None
+            for field in ("wall_duration_ms", "prompt_tokens", "completion_tokens", "total_tokens")
+        } | {
             "total_cost": cost_delta,
         },
     )
@@ -560,7 +579,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         validate_structure(baseline)
     primary, propagated = _failures(nt)
     patterns = _patterns(nt)
-    metrics, metric_notes, duration_complete = _metrics_with_notes(nt)
+    metrics, metric_notes, complete = _metrics_with_notes(nt)
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
@@ -597,7 +616,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             baseline,
             current_patterns=patterns,
             current_metrics=metrics,
-            current_duration_complete=duration_complete,
+            current_complete=complete,
             notes=metric_notes,
         )
         if baseline

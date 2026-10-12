@@ -70,6 +70,15 @@ explicitly.
 - The Phoenix CLI version-floor message is derived from the floor constant instead of
   repeating it.
 
+- `analyze --baseline` published token deltas, and cost deltas, from totals that covered
+  only some steps on one side: with tokens on 3 of 3 steps in the baseline and 1 of 3 in
+  the current run it reported `-200`, although the silent steps could have used any amount.
+  Like the duration delta, these deltas are now withheld with a note unless every step on
+  both sides reports the metric. In traces where only model calls carry token counts this
+  withholds the token delta. A cost total or delta withheld because steps or runs report
+  different or unknown currencies is now disclosed too; before, `analyze` printed
+  `cost=unavailable` with no reason.
+
 ### Compatibility notes for imports
 
 These change what an input that imported successfully before now produces or whether it
