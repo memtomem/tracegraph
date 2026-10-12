@@ -773,3 +773,40 @@ def test_query_results_are_closed_after_reads_and_after_iteration_errors() -> No
     with pytest.raises(RuntimeError, match="iteration blew up"):
         _collect(Tracked([[1]], fail=True))
     assert closed == ["closed"], "the handle must be released even when iteration raises"
+
+
+def test_fanin_ancestor_order_matches_in_memory_whatever_the_insert_order() -> None:
+    # Cypher gives no row-order guarantee, so LadybugStore re-sorts each node's causes to
+    # reproduce InMemoryStore. Inserting the edges in reverse makes that sort load-bearing.
+    nt = _fanin_trace()
+    expected = [s.step_id for s in InMemoryStore.from_trace(nt).ancestors("C3")]
+    assert expected == ["C1", "C2", "C0"]
+    store = LadybugStore()
+    try:
+        store.init_schema()
+        store.upsert_nodes(nt.steps)
+        store.upsert_edges(list(reversed(nt.edges_of(EdgeType.CAUSED_BY))))
+        assert [s.step_id for s in store.ancestors("C3")] == expected
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("seq", [2**63, -(2**63) - 1])
+def test_seq_beyond_int64_is_a_clean_value_error(seq) -> None:
+    nt = _linear("BIG", ("only", StepKind.CHAIN, OK))
+    big = nt.model_copy(deep=True)
+    big.steps[0].seq = seq
+    with pytest.raises(ValueError, match="INT64"):
+        LadybugStore.from_trace(big)
+
+
+def test_cli_ladybug_backend_rejects_out_of_range_seq_cleanly(tmp_path) -> None:
+    nt = _linear("BIG", ("only", StepKind.TOOL, ERR))
+    big = nt.model_copy(deep=True)
+    big.steps[0].seq = 2**63
+    path = tmp_path / "big.json"
+    artifact.save_atomic(big, path)
+    res = CliRunner().invoke(app, ["query", "error", str(path), "--backend", "ladybug"])
+    assert res.exit_code == 2, res.output
+    assert isinstance(res.exception, SystemExit)
+    assert "INT64" in res.output

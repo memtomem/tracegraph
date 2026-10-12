@@ -624,7 +624,15 @@ def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
 
 
 def _store_from_trace(nt: NormalizedTrace, backend: QueryBackend) -> Any:
-    return _store_cls(backend).from_trace(nt)
+    cls = _store_cls(backend)
+    try:
+        return cls.from_trace(nt)
+    except _LOAD_ERRORS as exc:
+        # A trace another backend accepts can still exceed this one (e.g. INT64 seq).
+        raise typer.BadParameter(
+            f"cannot load trace {nt.trace.trace_id} into the {backend.value} backend: "
+            f"{_load_reason(exc)}"
+        ) from exc
 
 
 def _close_store(store: Any) -> None:
@@ -1246,7 +1254,7 @@ def _save_artifact(nt: NormalizedTrace, target: Path) -> None:
     """Write an artifact to an explicit destination, with the same clean-error contract."""
     try:
         artifact.save_atomic(nt, target)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"cannot save artifact: {_load_reason(exc)}") from exc
 
 
@@ -1255,7 +1263,7 @@ def _save_ingested(nt: NormalizedTrace, target: Path, *, explicit: bool) -> None
         artifact.save_atomic(nt, target, replace=explicit)
     except FileExistsError as exc:
         raise typer.BadParameter("default output exists; pass --out to explicitly replace a file") from exc
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"cannot save artifact: {_load_reason(exc)}") from exc
 
 

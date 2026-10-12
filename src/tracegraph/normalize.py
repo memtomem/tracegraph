@@ -291,15 +291,27 @@ def validate_tree(nt: NormalizedTrace) -> None:
 
 
 def requires_origin_priority_projection(nt: NormalizedTrace) -> bool:
-    """True iff this trace's TREE_PARENT projection differs from legacy temporal-only selection."""
+    """True iff ``nt``'s TREE_PARENT edges are the origin-priority projection of its raw
+    layer *and* that projection differs from the legacy temporal one.
+
+    Only the TREE_PARENT edges are compared, so a defect elsewhere in the trace (a stored
+    status that disagrees with its steps, missing BELONGS_TO edges) neither earns a v4 stamp
+    nor lets an origin-priority tree pass behind a lower envelope in ``artifact.from_obj``.
+    """
     try:
         raw = RawTrace(
             trace=nt.trace,
             steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
             causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
         )
-        return nt != normalize(raw, origin_priority=False)
+        legacy = _tree_parents(normalize(raw, origin_priority=False))
+        origin = _tree_parents(normalize(raw, origin_priority=True))
     except ValueError:
         # If the trace is malformed, do not fail during serialization stamping.
         # Store loading and validate_normalized remain the validation gate.
         return False
+    return origin != legacy and _tree_parents(nt) == origin
+
+
+def _tree_parents(nt: NormalizedTrace) -> list[tuple[str, str]]:
+    return sorted((e.src, e.dst) for e in nt.edges_of(EdgeType.TREE_PARENT))

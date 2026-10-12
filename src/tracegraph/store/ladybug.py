@@ -438,8 +438,15 @@ class LadybugStore:
 # --- helpers (module-level so they're easy to unit-test if needed) ---
 
 
+_INT64 = range(-(2**63), 2**63)
+
+
 def _step_params(s: Step) -> dict[str, Any]:
     """Bind a Step to the names declared in ``_STEP_FIELDS`` (enums → ``.value`` strings)."""
+    # The model's ``seq`` is an unbounded int; the column is INT64. Out of range, the binding
+    # raised pybind's RuntimeError, which no load boundary translates.
+    if s.seq not in _INT64:
+        raise ValueError(f"step {s.step_id!r} seq {s.seq} exceeds the INT64 range of this backend")
     return {
         "step_id": s.step_id,
         "trace_id": s.trace_id,

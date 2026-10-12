@@ -54,9 +54,14 @@ def _required_version(nt: NormalizedTrace) -> int:
 
 
 def dumps(nt: NormalizedTrace) -> str:
-    """Serialize a trace to a JSON string (stable key order for diff-friendly output)."""
+    """Serialize a trace to a JSON string (stable key order for diff-friendly output).
+
+    Raises ``ValueError`` rather than emitting the non-standard ``NaN``/``Infinity`` tokens,
+    which strict JSON parsers reject. The model refuses non-finite floats on validation, so
+    only a model built around validation (``model_construct``, attribute assignment) gets here.
+    """
     payload = {"schema_version": _required_version(nt), "trace": nt.model_dump(mode="json")}
-    return json.dumps(payload, indent=2, sort_keys=True)
+    return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
 
 
 def _migrate_v1(trace_payload: dict) -> dict:
@@ -137,7 +142,9 @@ def from_obj(payload: object) -> NormalizedTrace:
             f"artifact JSON must be a top-level object, got {type(payload).__name__}"
         )
     version = payload.get("schema_version")
-    if version not in _READABLE_VERSIONS:
+    # Exact int, not equality: `True == 1` and `2.0 == 2`, and `true` used to take the v1
+    # migration path. `dumps` only ever writes an int.
+    if type(version) is not int or version not in _READABLE_VERSIONS:
         readable = ", ".join(str(v) for v in _READABLE_VERSIONS)
         raise ValueError(
             f"unsupported artifact schema_version {version!r} (this build reads {readable})"
@@ -154,7 +161,18 @@ def from_obj(payload: object) -> NormalizedTrace:
         raise ValueError('artifact "trace" must be an object')
     if version == 1:
         trace_payload = _migrate_v1(trace_payload)
-    return NormalizedTrace.model_validate(trace_payload)
+    nt = NormalizedTrace.model_validate(trace_payload)
+    # The envelope is the signal an older reader acts on, so it may overstate what the content
+    # needs (a v3 file without task steps loads today) but never understate it: a v2 envelope
+    # around an origin-priority projection would be read under the wrong projection by every
+    # reader that trusts it, and a re-save would quietly become a different file. A v1
+    # envelope is migrated to v2 semantics, hence the floor of 2.
+    required = _required_version(nt)
+    if required > max(version, 2):
+        raise ValueError(
+            f"artifact declares schema_version {version} but its content requires {required}"
+        )
+    return nt
 
 
 def save(nt: NormalizedTrace, path: str | Path) -> None:

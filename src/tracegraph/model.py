@@ -95,14 +95,14 @@ class EvaluationSummary(BaseModel):
 
     name: str
     label: str | None = None
-    score: float | None = None
+    score: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class StepEvidence(BaseModel):
     """Allowlisted operational telemetry; never prompt/output bodies."""
 
     end_ts: str | None = None
-    duration_ms: float | None = None
+    duration_ms: float | None = Field(default=None, allow_inf_nan=False)
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None

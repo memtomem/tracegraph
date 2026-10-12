@@ -113,11 +113,12 @@ def test_normalize_is_deterministic():
 
 
 def test_ancestors_raises_on_dangling_edge():
-    # Bypass the validating constructors to simulate a corrupted store.
+    # A dangling edge can no longer be inserted (upsert_edges rejects it), so simulate the
+    # corrupted adjacency directly: ancestors() must still surface it rather than drop it.
     store = InMemoryStore()
     store.init_schema()
     store.upsert_nodes(_steps(("b", 1)))
-    store.upsert_edges([Edge(type=EdgeType.CAUSED_BY, src="b", dst="ghost")])
+    store._caused_by["b"] = ["ghost"]
     with pytest.raises(KeyError, match="unknown step"):
         store.ancestors("b")
 
@@ -510,3 +511,127 @@ def test_unknown_future_version_is_refused_by_name():
     payload["schema_version"] = 99
     with pytest.raises(ValueError, match="unsupported artifact schema_version"):
         artifact.from_obj(payload)
+
+
+# --- artifact load boundary: version envelope and store edge endpoints -------------------
+
+
+@pytest.mark.parametrize("version", [True, 1.0, 2.0, 4.0, "2"])
+def test_schema_version_must_be_an_integer(version):
+    # `True == 1` and `2.0 == 2`, so an equality check let these through; `true` even took
+    # the v1 migration path. The envelope is written by `dumps` as an int, always.
+    payload = json.loads(artifact.dumps(normalize(_raw(_steps(("a", 0)), []))))
+    payload["schema_version"] = version
+    with pytest.raises(ValueError, match="unsupported artifact schema_version"):
+        artifact.from_obj(payload)
+
+
+def _origin_priority_trace() -> NormalizedTrace:
+    from tracegraph.model import EdgeOrigin
+
+    raw = _raw(
+        _steps(("a", 0), ("b", 1), ("c", 2), ("d", 3)),
+        [
+            Edge(type=EdgeType.CAUSED_BY, src="b", dst="a", origin=EdgeOrigin.GRAPH_PARENT),
+            Edge(type=EdgeType.CAUSED_BY, src="c", dst="a", origin=EdgeOrigin.GRAPH_PARENT),
+            Edge(type=EdgeType.CAUSED_BY, src="d", dst="b", origin=EdgeOrigin.SPAN_LINK),
+            Edge(type=EdgeType.CAUSED_BY, src="d", dst="c", origin=EdgeOrigin.GRAPH_PARENT),
+        ],
+    )
+    return normalize(raw, origin_priority=True)
+
+
+def test_envelope_cannot_understate_an_origin_priority_projection():
+    # An older reader trusts the envelope: if it says 2, the reader applies the temporal
+    # projection and either rejects the file with a confusing canonical-form error or, worse,
+    # a re-save silently rewrites it as a different (v4) file with a different digest.
+    payload = json.loads(artifact.dumps(_origin_priority_trace()))
+    assert payload["schema_version"] == 4
+    payload["schema_version"] = 2
+    with pytest.raises(ValueError, match="declares schema_version 2 but its content requires 4"):
+        artifact.from_obj(payload)
+
+
+def test_envelope_cannot_understate_task_steps():
+    from tracegraph.model import StepSource
+
+    nt = normalize(
+        _raw([Step(step_id="a", trace_id="t", seq=0, source=StepSource.TASK)], [])
+    )
+    payload = json.loads(artifact.dumps(nt))
+    assert payload["schema_version"] == 3
+    payload["schema_version"] = 2
+    with pytest.raises(ValueError, match="content requires 3"):
+        artifact.from_obj(payload)
+
+
+def test_overstated_envelope_still_loads():
+    # Floor semantics: an envelope may claim more than its content needs (a v3 file with no
+    # task steps exists in the wild); it may never claim less.
+    payload = json.loads(artifact.dumps(normalize(_raw(_steps(("a", 0)), []))))
+    payload["schema_version"] = 4
+    assert artifact.from_obj(payload).steps[0].step_id == "a"
+
+
+def test_non_canonical_trace_without_origins_is_not_stamped_v4():
+    # The v4 stamp means "TREE_PARENT was chosen by origin priority". A trace with no edge
+    # origins at all cannot need that, whatever else is wrong with it.
+    nt = normalize(_raw(_steps(("a", 0), ("b", 1)), [Edge(type=EdgeType.CAUSED_BY, src="b", dst="a")]))
+    tampered = nt.model_copy(deep=True)
+    tampered.trace.status = StepStatus.ERROR  # disagrees with the all-ok steps
+    assert json.loads(artifact.dumps(nt))["schema_version"] == 2
+    assert json.loads(artifact.dumps(tampered))["schema_version"] == 2
+    # Same for a trace missing its derived edges entirely (a deliberate digest change for
+    # non-canonical traces only; see CHANGELOG).
+    bare = NormalizedTrace(trace=nt.trace, steps=nt.steps, edges=[])
+    assert json.loads(artifact.dumps(bare))["schema_version"] == 2
+
+
+def test_in_memory_store_rejects_dangling_edge_without_partial_write():
+    store = InMemoryStore()
+    store.init_schema()
+    store.upsert_nodes(_steps(("a", 0), ("b", 1)))
+    good = Edge(type=EdgeType.CAUSED_BY, src="b", dst="a")
+    with pytest.raises(ValueError, match="ghost"):
+        store.upsert_edges([good, Edge(type=EdgeType.CAUSED_BY, src="b", dst="ghost")])
+    with pytest.raises(ValueError, match="ghost"):
+        store.upsert_edges([good, Edge(type=EdgeType.TREE_PARENT, src="ghost", dst="a")])
+    # All or nothing, like LadybugStore: the valid edge in the failed batch did not land.
+    assert store.ancestors("b") == []
+
+
+def test_in_memory_store_checks_belongs_to_against_the_trace_id():
+    nt = normalize(_raw(_steps(("a", 0)), []))
+    store = InMemoryStore.from_trace(nt)  # a one-step trace's BELONGS_TO must be accepted
+    with pytest.raises(ValueError, match="other"):
+        store.upsert_edges([Edge(type=EdgeType.BELONGS_TO, src="a", dst="other")])
+
+
+def test_in_memory_node_upsert_still_replaces_by_id():
+    # Documented contract (README): InMemory node upsert replaces by ID.
+    store = InMemoryStore.from_trace(normalize(_raw(_steps(("a", 0)), [])))
+    store.upsert_nodes([Step(step_id="a", trace_id="t", seq=0, name="renamed")])
+    assert [s.name for s in store.trace().steps] == ["renamed"]
+
+
+@pytest.mark.parametrize("edge_type", [EdgeType.WROTE, EdgeType.READ])
+def test_in_memory_store_still_accepts_channel_edges(edge_type):
+    # WROTE/READ point at a channel, not a step; the endpoint check must not apply to them.
+    store = InMemoryStore.from_trace(normalize(_raw(_steps(("a", 0)), [])))
+    store.upsert_edges([Edge(type=edge_type, src="a", dst="messages")])
+    assert any(e.type is edge_type for e in store.trace().edges)
+
+
+def test_envelope_check_does_not_depend_on_the_rest_of_the_trace_being_canonical():
+    # An unrelated defect (here a stored status that disagrees with the steps) must not let
+    # an origin-priority tree hide behind a v2 envelope; the check reads TREE_PARENT only.
+    nt = _origin_priority_trace()
+    payload = json.loads(artifact.dumps(nt))
+    payload["trace"]["trace"]["status"] = "error"
+    payload["schema_version"] = 2
+    with pytest.raises(ValueError, match="content requires 4"):
+        artifact.from_obj(payload)
+    # And the writer stamps it by its tree, not by its other defects.
+    tampered = nt.model_copy(deep=True)
+    tampered.trace.status = StepStatus.ERROR
+    assert json.loads(artifact.dumps(tampered))["schema_version"] == 4

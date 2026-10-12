@@ -10,6 +10,30 @@ explicitly.
 
 ### Fixed
 
+- An artifact whose content was not canonical (for example a stored trace status that
+  disagreed with its steps) was stamped `schema_version` 4 even when it carried no edge
+  origins. Version 4 is now stamped only when the file's TREE_PARENT edges are the
+  origin-priority projection of its causal edges and that differs from the temporal one; the
+  rest of the trace does not affect the stamp. **Digest impact:** canonical artifacts are
+  unchanged, but re-serializing a non-canonical trace (one `validate` rejects) whose tree is
+  not the origin-priority one, such as a trace with its derived edges missing, now writes
+  version 2 or 3 instead of 4. Any digest computed from that re-serialization changes,
+  including the `artifact_digest` that `analyze` reports for such a trace.
+- Loading now rejects an envelope that understates its content: a `schema_version` 2 file
+  holding an origin-priority projection or derived task steps. Every reader that trusts the
+  envelope would have read such a file under the wrong rules, and a re-save rewrote it as a
+  different file. An envelope may still overstate what its content needs.
+- `schema_version` must be an integer. `true`, `1.0`, `2.0` and `4.0` were accepted because
+  they compare equal, and `true` was migrated as a version 1 file.
+- Evidence floats (`duration_ms`, evaluation `score`) must be finite, and the writer refuses
+  to emit `NaN`/`Infinity`, which are not JSON.
+- `--backend ladybug` crashed with a raw traceback on a step `seq` outside the INT64 range
+  the backend stores. It now exits with a usage error naming the limit.
+- `InMemoryStore.upsert_edges` accepted a `CAUSED_BY`/`TREE_PARENT` edge whose endpoint was
+  not a stored step, or a `BELONGS_TO` edge pointing at another trace; the failure surfaced
+  later as a `KeyError` from `ancestors`. It now raises `ValueError` and inserts nothing from
+  that batch, matching the LadybugDB store. `WROTE`/`READ` channel edges are unchecked as
+  before, and node upsert still replaces by ID.
 - The CLA workflow refused every pull request from the maintainer's own commit-author
   account, which is not the account that owns the repository. Both are allowlisted now.
 - The release documentation asked for a personal access token with *read* access to pull
