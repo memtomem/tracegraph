@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 import hashlib
 from pathlib import Path
 
@@ -12,19 +11,18 @@ from tracegraph.analysis.diagnose import (
     LANGGRAPH_FIDELITY_WARNING,
     LINKS_PRESERVED_FIDELITY_WARNING,
     PARENT_ONLY_FIDELITY_WARNING,
-    _patterns,
+    pattern_findings,
 )
 from tracegraph.model import (
     EXPLICIT_ORIGINS,
     SHA256_DIGEST,
     CausalFidelity,
-    Edge,
     EdgeOrigin,
     EdgeType,
     NormalizedTrace,
     StepStatus,
 )
-from tracegraph.normalize import validate_structure
+from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
 def compute_run_digest(run_id: str | None) -> str | None:
     """Deterministic, one-way hash alias for run_id; raw string is never exported."""
@@ -72,7 +70,7 @@ def build_incident_memo(
         )
 
     validate_structure(nt)
-    patterns = _patterns(nt)
+    patterns = pattern_findings(nt)
 
     run_digest = compute_run_digest(nt.trace.run_id)
     short_digest = artifact_digest.removeprefix("sha256:")[:12]
@@ -88,9 +86,7 @@ def build_incident_memo(
 
     # Collect raw CAUSED_BY edges grouped by effect
     caused_by_edges = nt.edges_of(EdgeType.CAUSED_BY)
-    incoming_edges: dict[str, list[Edge]] = {}
-    for edge in caused_by_edges:
-        incoming_edges.setdefault(edge.src, []).append(edge)
+    incoming_edges = incoming_edges_by_step(caused_by_edges)
 
     error_steps = [s for s in steps_sorted if s.status is StepStatus.ERROR]
     preserved = nt.trace.links_preserved
@@ -154,15 +150,8 @@ def build_incident_memo(
 
         # Collect unique upstream causal edges reachable from any failure step
         error_step_ids = {s.step_id for s in error_steps}
-        reachable_step_ids: set[str] = set(error_step_ids)
-        queue: deque[str] = deque(error_step_ids)
-
-        while queue:
-            curr_id = queue.popleft()
-            for edge in incoming_edges.get(curr_id, []):
-                if edge.dst not in reachable_step_ids:
-                    reachable_step_ids.add(edge.dst)
-                    queue.append(edge.dst)
+        causes = {sid: [e.dst for e in edges] for sid, edges in incoming_edges.items()}
+        reachable_step_ids = error_step_ids | ancestor_ids(error_step_ids, causes)
 
         ancestry_edges = [
             edge for edge in caused_by_edges

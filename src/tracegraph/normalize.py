@@ -21,6 +21,10 @@ than letting it become a malformed artifact downstream.
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Iterable, Mapping
+from enum import Enum
+
 from tracegraph.model import (
     Edge,
     EdgeOrigin,
@@ -98,7 +102,27 @@ def validate_structure(nt: NormalizedTrace) -> None:
     validate_tree(nt)
 
 
-def validate_normalized(nt: NormalizedTrace) -> None:
+class ProjectionRule(Enum):
+    """Which TREE_PARENT rule produced an artifact's derived layer."""
+
+    ORIGIN_PRIORITY = "origin_priority"  # current writers
+    TEMPORAL = "temporal"  # artifacts written before origin priority existed
+
+
+def raw_layer(nt: NormalizedTrace) -> RawTrace:
+    """The raw layer ``nt`` was derived from, with ``projection_lossy`` reset.
+
+    Clearing the flag matters: a corrupt flag in ``nt`` would otherwise survive into any
+    re-derivation and make a comparison against ``nt`` pass tautologically.
+    """
+    return RawTrace(
+        trace=nt.trace,
+        steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
+        causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
+    )
+
+
+def validate_normalized(nt: NormalizedTrace) -> ProjectionRule:
     """Validate a :class:`NormalizedTrace` end to end: raw layer **and** that the whole
     artifact is *exactly* what :func:`normalize` would produce from its raw layer.
 
@@ -124,27 +148,20 @@ def validate_normalized(nt: NormalizedTrace) -> None:
             f"{expected_status.value!r}: {'a' if any_error else 'no'} step has status=error)"
         )
 
-    # Reconstruct what the canonical form should look like from the raw layer alone. We
-    # strip projection_lossy from the steps so normalize() resets it from scratch —
-    # otherwise a corrupt input flag would survive into the "expected" side and the
-    # check would tautologically pass.
-    raw = RawTrace(
-        trace=nt.trace,
-        steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
-        causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
-    )
-    expected = normalize(raw, origin_priority=True)
-    if expected != nt:
+    # Reconstruct what the canonical form should look like from the raw layer alone.
+    raw = raw_layer(nt)
+    if normalize(raw, origin_priority=True) != nt:
         # Backward compatibility: accept authentic legacy artifacts produced under
         # the previous temporal-only parent selection rule.
-        legacy_expected = normalize(raw, origin_priority=False)
-        if legacy_expected != nt:
+        if normalize(raw, origin_priority=False) != nt:
             raise ValueError(
                 "normalized trace is not in canonical form: derived edges, projection_lossy "
                 "flags, or step/edge ordering do not match what normalize() produces from "
                 "the raw CAUSED_BY layer. The JSON artifact must be the output of normalize() "
                 "verbatim — anything else would drift on the next save."
             )
+        return ProjectionRule.TEMPORAL
+    return ProjectionRule.ORIGIN_PRIORITY
 
 
 _ORIGIN_PRIORITY: dict[EdgeOrigin | None, int] = {
@@ -157,7 +174,7 @@ _ORIGIN_PRIORITY: dict[EdgeOrigin | None, int] = {
 }
 
 
-def _incoming_edges_by_step(caused_by: list[Edge]) -> dict[str, list[Edge]]:
+def incoming_edges_by_step(caused_by: list[Edge]) -> dict[str, list[Edge]]:
     """Raw causes per effect step (CAUSED_BY points effect → cause), built in one pass.
 
     Preserves the order of ``caused_by``, so feeding it the canonically sorted edge
@@ -226,7 +243,7 @@ def normalize(raw: RawTrace, *, origin_priority: bool = True) -> NormalizedTrace
     )
 
     edges: list[Edge] = list(caused_by)  # carry the raw layer through unchanged
-    incoming_by_step = _incoming_edges_by_step(caused_by)
+    incoming_by_step = incoming_edges_by_step(caused_by)
     new_steps: list[Step] = []
     for step in steps_canonical:
         incoming = incoming_by_step.get(step.step_id, [])
@@ -294,11 +311,7 @@ def requires_origin_priority_projection(nt: NormalizedTrace) -> bool:
     nor lets an origin-priority tree pass behind a lower envelope in ``artifact.from_obj``.
     """
     try:
-        raw = RawTrace(
-            trace=nt.trace,
-            steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
-            causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
-        )
+        raw = raw_layer(nt)
         legacy = _tree_parents(normalize(raw, origin_priority=False))
         origin = _tree_parents(normalize(raw, origin_priority=True))
     except ValueError:
@@ -310,3 +323,20 @@ def requires_origin_priority_projection(nt: NormalizedTrace) -> bool:
 
 def _tree_parents(nt: NormalizedTrace) -> list[tuple[str, str]]:
     return sorted((e.src, e.dst) for e in nt.edges_of(EdgeType.TREE_PARENT))
+
+
+def ancestor_ids(starts: Iterable[str], causes: Mapping[str, list[str]]) -> set[str]:
+    """Every step reachable from ``starts`` through ``causes`` (effect -> [cause, ...]).
+
+    Iterative, because LangGraph traces are deep and linear. A start is included only if it
+    is also another start's ancestor.
+    """
+    seen: set[str] = set()
+    queue = deque(cause for start in starts for cause in causes.get(start, []))
+    while queue:
+        current = queue.popleft()
+        if current in seen:
+            continue
+        seen.add(current)
+        queue.extend(causes.get(current, []))
+    return seen

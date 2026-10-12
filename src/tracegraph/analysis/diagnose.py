@@ -24,7 +24,7 @@ from tracegraph.model import (
     Step,
     StepStatus,
 )
-from tracegraph.normalize import validate_structure
+from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
 REPORT_SCHEMA_VERSION = 2
 #: Fidelity disclosures shared by analysis reports and incident memos, so the two never drift.
@@ -181,18 +181,6 @@ def _cause_adjacency(nt: NormalizedTrace) -> dict[str, list[str]]:
     return out
 
 
-def _ancestors(start: str, adjacency: dict[str, list[str]]) -> set[str]:
-    seen: set[str] = set()
-    queue = deque(adjacency.get(start, []))
-    while queue:
-        current = queue.popleft()
-        if current in seen:
-            continue
-        seen.add(current)
-        queue.extend(adjacency.get(current, []))
-    return seen
-
-
 def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[DiagnosticStep]]:
     steps = nt.steps_by_id()
     errors = {step.step_id for step in nt.steps if step.status is StepStatus.ERROR}
@@ -222,17 +210,15 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
 
     # Edges indexed by effect: each finding then touches only its own nodes' edges
     # (output-proportional) instead of re-scanning the whole edge list per finding.
-    edges_by_effect: dict[str, list] = {}
-    for edge in nt.edges_of(EdgeType.CAUSED_BY):
-        edges_by_effect.setdefault(edge.src, []).append(edge)
+    edges_by_effect = incoming_edges_by_step(nt.edges_of(EdgeType.CAUSED_BY))
 
     findings: list[FailureFinding] = []
     for step_id in primary_ids:
         # Full ancestor sets are materialized only for primary failures (the findings
         # need them); propagated errors never pay a BFS.
-        ancestor_ids = _ancestors(step_id, adjacency)
-        ordered = sorted(ancestor_ids, key=lambda sid: (steps[sid].seq, sid))
-        relevant = ancestor_ids | {step_id}
+        ancestors = ancestor_ids([step_id], adjacency)
+        ordered = sorted(ancestors, key=lambda sid: (steps[sid].seq, sid))
+        relevant = ancestors | {step_id}
         selected = [
             edge
             for sid in relevant
@@ -260,7 +246,7 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
     return findings, [_shown(steps[sid]) for sid in propagated_ids]
 
 
-def _patterns(nt: NormalizedTrace) -> list[PatternFinding]:
+def pattern_findings(nt: NormalizedTrace) -> list[PatternFinding]:
     """Every auto preset's matches, de-duplicated *within* a preset only.
 
     The key is ``(pattern_id, match)``: two different presets legitimately describe the same
@@ -533,7 +519,7 @@ def _comparison(
                 )
             )
 
-    before_patterns = _patterns(baseline)
+    before_patterns = pattern_findings(baseline)
     after_patterns = current_patterns
     pattern_ids = set(_AUTO_PRESETS)
     deltas = {
@@ -600,7 +586,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
     if baseline is not None:
         validate_structure(baseline)
     primary, propagated = _failures(nt)
-    patterns = _patterns(nt)
+    patterns = pattern_findings(nt)
     metrics, metric_notes, complete = _metrics_with_notes(nt)
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
