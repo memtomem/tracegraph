@@ -117,10 +117,13 @@ def _attr_value(v: Any) -> Any:
             return v[key]
     for key in ("intValue", "int_value"):
         if key in v:  # protobuf-JSON encodes int64 as a string
+            raw = v[key]
+            if isinstance(raw, bool):
+                return raw  # `int(True) == 1` would hide that the value was a boolean
             try:
-                return int(v[key])
-            except (TypeError, ValueError):
-                return v[key]
+                return int(raw)
+            except (TypeError, ValueError, OverflowError):
+                return raw
     for key in ("boolValue", "bool_value", "doubleValue", "double_value"):
         if key in v:
             return v[key]
@@ -191,6 +194,9 @@ def _exception_message(span: dict) -> str | None:
 def _status(span: dict) -> tuple[StepStatus, str | None]:
     st = object_field(span.get("status"), "status")
     code = st.get("code")
+    if isinstance(code, bool):
+        # `True == 1` would otherwise read as OK.
+        raise ValueError("status.code must be OK, ERROR, or UNSET")
     exception = _exception_message(span)
     if code in (1, "STATUS_CODE_OK", "OK"):
         return StepStatus.OK, None
@@ -203,10 +209,24 @@ def _status(span: dict) -> tuple[StepStatus, str | None]:
     return StepStatus.UNSET, None
 
 
-def _iso_ts(start_nano: Any) -> str | None:
+def _parse_nanos(value: Any) -> int | None:
+    """Nanoseconds since the epoch, or None when ``value`` is missing or cannot be a time.
+
+    Garbage text and non-finite or out-of-range numbers are all "unavailable" rather than an
+    error: timestamps order and time a trace but never decide its causality. The caller
+    discloses how many it could not read.
+    """
     try:
-        nanos = int(start_nano)
-    except (TypeError, ValueError):
+        nanos = int(value)
+        datetime.fromtimestamp(nanos / 1e9, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    return nanos
+
+
+def _iso_ts(start_nano: Any) -> str | None:
+    nanos = _parse_nanos(start_nano)
+    if nanos is None:
         return None
     return datetime.fromtimestamp(nanos / 1e9, tz=timezone.utc).isoformat()
 
@@ -214,11 +234,11 @@ def _iso_ts(start_nano: Any) -> str | None:
 def _int_attr(attrs: dict[str, Any], *names: str) -> int | None:
     for name in names:
         value = attrs.get(name)
-        if value is None:
+        if value is None or isinstance(value, bool):
             continue
         try:
             parsed = int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
         if parsed < 0 or (isinstance(value, float) and not value.is_integer()):
             continue
@@ -257,19 +277,19 @@ def _digest_attr(attrs: dict[str, Any], name: str) -> str | None:
     return value
 
 
-def _evidence(span: dict, attrs: dict[str, Any]) -> StepEvidence | None:
-    start = _first(span, "startTimeUnixNano", "start_time_unix_nano")
+def _evidence(
+    span: dict, attrs: dict[str, Any], evaluation_channel: str | None = None
+) -> StepEvidence | None:
+    start = _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano"))
     end = _first(span, "endTimeUnixNano", "end_time_unix_nano")
+    end_nanos = _parse_nanos(end)
     duration_ms: float | None = None
-    try:
-        if start is not None and end is not None:
-            duration_ms = round((int(end) - int(start)) / 1_000_000, 6)
-    except (TypeError, ValueError):
-        duration_ms = None
+    if start is not None and end_nanos is not None:
+        duration_ms = round((end_nanos - start) / 1_000_000, 6)
 
     evaluations = [
         EvaluationSummary.model_validate(item)
-        for item in span.get("_tracegraph_evaluations", [])
+        for item in ((span.get(evaluation_channel) or []) if evaluation_channel else [])
         if isinstance(item, dict) and item.get("name")
     ]
     evaluations.sort(key=lambda item: (item.name, item.label or "", item.score or 0.0))
@@ -306,8 +326,12 @@ class OTLPSpanAdapter:
         preserve_unset_status: bool = False,
         causal_fidelity: CausalFidelity | None = None,
         links_preserved: bool | None = None,
+        evaluation_channel: str | None = None,
     ) -> None:
         self._doc = document
+        #: Span key carrying pre-sanitized evaluation summaries. Only an adapter that builds
+        #: the span dicts itself (Phoenix) sets it; raw OTLP input never supplies evaluations.
+        self._evaluation_channel = evaluation_channel
         self._source_kind = source_kind
         #: Prefer ``graph.node.parent_id`` (logical agent graph) over ``parentSpanId``.
         self._prefer_graph_parent = prefer_graph_parent
@@ -392,7 +416,7 @@ class OTLPSpanAdapter:
                     name=span.get("name"),
                     status=status,
                     error_msg=err if self._include_error_messages else None,
-                    evidence=_evidence(span, attrs[sid]),
+                    evidence=_evidence(span, attrs[sid], self._evaluation_channel),
                 )
             )
         steps.sort(key=lambda s: s.seq)
@@ -418,7 +442,27 @@ class OTLPSpanAdapter:
             links_preserved=self._links_preserved,
             decision_evidence=self._decision_evidence(trace_id, attrs),
         )
-        return RawTrace(trace=trace, steps=steps, causal_edges=edges)
+        unreadable = sum(
+            1
+            for span in by_id.values()
+            if any(
+                value is not None and _parse_nanos(value) is None
+                for value in (
+                    _first(span, "startTimeUnixNano", "start_time_unix_nano"),
+                    _first(span, "endTimeUnixNano", "end_time_unix_nano"),
+                )
+            )
+        )
+        warnings = (
+            [
+                f"{unreadable} span(s) carry a start or end timestamp that cannot be read as a "
+                "time; that timestamp, and any duration derived from it, is reported as "
+                "unavailable."
+            ]
+            if unreadable
+            else []
+        )
+        return RawTrace(trace=trace, steps=steps, causal_edges=edges, ingest_warnings=warnings)
 
     # --- helpers ---
 
@@ -492,10 +536,8 @@ class OTLPSpanAdapter:
 
     @staticmethod
     def _start_nano(span: dict) -> int:
-        try:
-            return int(_first(span, "startTimeUnixNano", "start_time_unix_nano"))
-        except (TypeError, ValueError):
-            return 0
+        nanos = _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano"))
+        return 0 if nanos is None else nanos
 
     def _grouped(self) -> dict[str, list[dict]]:
         """Spans grouped by ``traceId`` in first-seen order, built once per adapter.
@@ -519,6 +561,8 @@ class OTLPSpanAdapter:
                         if sid is not None
                         else "a span has neither traceId nor spanId; the export is corrupt"
                     )
+                if not isinstance(tid, str) or not tid:
+                    raise ValueError(f"traceId must be a non-empty string, got {tid!r}")
                 grouped.setdefault(tid, []).append(span)
             self._spans_by_trace = grouped
         return self._spans_by_trace
@@ -529,6 +573,8 @@ class OTLPSpanAdapter:
             sid = _first(span, "spanId", "span_id")
             if sid is None:
                 raise ValueError(f"trace {trace_id!r} has a span with no spanId")
+            if not isinstance(sid, str) or not sid:
+                raise ValueError(f"trace {trace_id!r} has a spanId that is not a non-empty string")
             if sid in by_id:
                 raise ValueError(f"duplicate spanId {sid!r} in trace {trace_id!r}")
             by_id[sid] = span
@@ -541,7 +587,13 @@ class OTLPSpanAdapter:
         """``spanId -> parentSpanId`` (None for roots), refusing dangling parents."""
         parents: dict[str, str | None] = {}
         for sid, span in by_id.items():
-            pid = _first(span, "parentSpanId", "parent_span_id") or None
+            pid = _first(span, "parentSpanId", "parent_span_id")
+            if pid == "":
+                pid = None  # protobuf-JSON writes an absent parent as the empty string
+            if pid is not None and not isinstance(pid, str):
+                # `0`, `[]` or `false` used to read as "no parent", fabricating a root for a
+                # span whose declared parent is merely malformed.
+                raise ValueError(f"span {sid!r} has a parentSpanId that is not a string")
             if pid is not None and pid not in by_id:
                 raise ValueError(
                     f"span {sid!r} has parentSpanId {pid!r} not in trace {trace_id!r}; the "

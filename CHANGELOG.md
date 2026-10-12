@@ -34,6 +34,40 @@ explicitly.
   later as a `KeyError` from `ancestors`. It now raises `ValueError` and inserts nothing from
   that batch, matching the LadybugDB store. `WROTE`/`READ` channel edges are unchecked as
   before, and node upsert still replaces by ID.
+- OTLP and Phoenix imports crashed with a raw traceback on a timestamp of `Infinity`, `NaN`
+  or a number beyond the representable date range, on a `spanId`/`parentSpanId` given as a
+  list, and on Phoenix `annotations` that were not an array. A timestamp that cannot be read
+  — including garbage text, which was silently dropped before — is now reported as
+  unavailable and disclosed on stderr by `ingest-otlp`, `ingest-phoenix`, `analyze` and
+  `phoenix diagnose`. Malformed ids and annotations are rejected with a usage error.
+- An OTLP `status.code` of `true` was read as OK because `true == 1`, and `false` as UNSET
+  because `false == 0`; both are now rejected, for OTLP and Phoenix imports alike.
+- LangGraph: two derived task steps could receive the same id (checkpoint `A` with task
+  `x#task:y`, checkpoint `A#task:x` with task `y`); the second silently replaced the first
+  and gained a second cause it never had. The collision is now rejected like a collision
+  with a checkpoint.
+- LangGraph: a failed task that no candidate node reproduces is still reported unnamed, and
+  the read now says so on stderr. An unnamed failure is also what a change in LangGraph's
+  task-id algorithm would look like, so it is no longer silent.
+
+### Compatibility notes for imports
+
+These change what an input that imported successfully before now produces or whether it
+imports at all. No committed fixture is affected.
+
+- An OTLP token count given as a boolean (`true`, or `{"intValue": true}`) was stored as `1`;
+  it is now unavailable, matching how an unusable cost is already treated. A non-finite
+  token count is unavailable too instead of crashing the import. An `intValue` holding a
+  boolean is no longer converted to `0`/`1` for any attribute.
+- Raw OTLP input could inject evaluation summaries through the private
+  `_tracegraph_evaluations` span key, bypassing the length limit the Phoenix importer
+  applies. Only the Phoenix importer reads that key now.
+- An empty-string `traceId` or `spanId` is rejected. A `parentSpanId` of `0`, `false` or
+  `[]` used to be read as "no parent", which made a span with a malformed declared parent a
+  root; it is now rejected. A missing, `null` or empty-string `parentSpanId` still marks a
+  root span.
+- A Phoenix evaluation score too large to represent crashed the import; it is now
+  unavailable, like a non-finite score.
 - The CLA workflow refused every pull request from the maintainer's own commit-author
   account, which is not the account that owns the repository. Both are allowlisted now.
 - The release documentation asked for a personal access token with *read* access to pull

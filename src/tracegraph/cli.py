@@ -35,7 +35,7 @@ from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
 from tracegraph import __version__
 from tracegraph.analysis import structure_only
-from tracegraph.model import EdgeType, NormalizedTrace, StepStatus
+from tracegraph.model import EdgeType, NormalizedTrace, RawTrace, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
 from tracegraph.review_candidates import build_report as build_candidate_report
 from tracegraph.review_candidates import is_review_exportable
@@ -225,7 +225,7 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
                         f"Found: {', '.join(ids) or 'none'}"
                     )
                 selected = ids[0]
-            nt = normalize(adapter.ingest(selected))
+            nt = _normalize_read(adapter.ingest(selected))
         validate_normalized(nt)
         return nt
     except (*_LOAD_ERRORS, KeyError) as exc:
@@ -282,12 +282,23 @@ def _px_project_args(project: str | None) -> list[str]:
     return ["--project", project] if project else []
 
 
+def _normalize_read(raw: RawTrace) -> NormalizedTrace:
+    """Normalize adapter output, printing its read disclosures to stderr first.
+
+    They describe evidence this read could not interpret, not the run, so they belong next to
+    the command that read it rather than in the artifact, which records the run itself.
+    """
+    for warning in raw.ingest_warnings:
+        err_console.print(f"[yellow]warning:[/] {escape(warning)}")
+    return normalize(raw)
+
+
 def _px_normalize(payload: Any, trace_id: str) -> NormalizedTrace:
     try:
         from tracegraph.adapters import PhoenixExportAdapter
 
         adapter = PhoenixExportAdapter(payload)
-        nt = normalize(adapter.ingest(trace_id))
+        nt = _normalize_read(adapter.ingest(trace_id))
         validate_normalized(nt)
         return nt
     except (ValueError, KeyError) as exc:
@@ -762,13 +773,7 @@ def ingest(
     target = out or artifact.default_path(thread)
     _distinct_paths([sqlite], [target])
     try:
-        raw = ingest_snapshot(sqlite, thread, error_channel=error_channel)
-        for warning in raw.ingest_warnings:
-            # Disclosures about the *read*, not the run: they describe evidence this ingest
-            # could not interpret, so they belong on stderr next to the command that read it
-            # rather than in the artifact, which records the run itself.
-            err_console.print(f"[yellow]warning:[/] {escape(warning)}")
-        nt = normalize(raw)
+        nt = _normalize_read(ingest_snapshot(sqlite, thread, error_channel=error_channel))
         _save_ingested(nt, target, explicit=out is not None)
     except (OSError, ValueError, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc
@@ -796,7 +801,7 @@ def ingest_otlp(
                     f"file holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
                 )
             trace = ids[0]
-        nt = normalize(adapter.ingest(trace))
+        nt = _normalize_read(adapter.ingest(trace))
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest OTLP export {file}: {_load_reason(exc)}") from exc
     target = out or artifact.default_path(trace)

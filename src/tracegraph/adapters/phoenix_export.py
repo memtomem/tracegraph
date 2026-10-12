@@ -37,9 +37,13 @@ def _first(mapping: dict[str, Any], *names: str) -> Any:
     return None
 
 
-def _nanos(value: Any) -> str | None:
+def _nanos(value: Any) -> Any:
+    """Phoenix's time to OTLP nanoseconds. A value that cannot be converted is passed on
+    unchanged, so the span builder reports it as unavailable *and* discloses it."""
     if value is None:
         return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return value
     if isinstance(value, (int, float)):
         return str(int(value))
     text = str(value)
@@ -48,7 +52,7 @@ def _nanos(value: Any) -> str | None:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return None
+        return value
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return str(int(parsed.timestamp() * 1_000_000_000))
@@ -85,7 +89,12 @@ def _attrs(span: dict[str, Any]) -> dict[str, Any]:
 
 def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for annotation in span.get("annotations") or []:
+    annotations = span.get("annotations")
+    if annotations is None:
+        annotations = []
+    if not isinstance(annotations, list):
+        raise ValueError("Phoenix spans[].annotations must be an array")
+    for annotation in annotations:
         if not isinstance(annotation, dict):
             continue
         result = annotation.get("result") or {}
@@ -100,7 +109,7 @@ def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
             score = annotation.get("score")
         try:
             score = float(score) if score is not None else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             score = None
         if score is not None and not math.isfinite(score):
             score = None
@@ -170,6 +179,7 @@ class PhoenixExportAdapter:
             preserve_unset_status=True,
             causal_fidelity=CausalFidelity.PARENT_ONLY,
             links_preserved=False,
+            evaluation_channel="_tracegraph_evaluations",
         ).ingest(trace_id)
 
     @staticmethod

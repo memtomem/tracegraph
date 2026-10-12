@@ -135,7 +135,10 @@ def test_readonly_live_wal_checkpoint_snapshot(tmp_path):
 
 @pytest.mark.parametrize("fields", [{"attributes":[1]}, {"attributes":[None]}, {"attributes":0},
     {"attributes":[{"key":[]}]}, {"status":"ERROR"}, {"status":{"code":[]}},
-    {"events":[1]}, {"events":{}}, {"events":[{"name":"exception","attributes":[1]}]}, {"links":[1]}])
+    {"events":[1]}, {"events":{}}, {"events":[{"name":"exception","attributes":[1]}]}, {"links":[1]},
+    {"spanId":["x"]}, {"spanId":""}, {"traceId":["t"]}, {"traceId":""}, {"traceId":5},
+    {"parentSpanId":["x"]}, {"parentSpanId":5}, {"parentSpanId":0}, {"parentSpanId":[]},
+    {"parentSpanId":False}, {"status":{"code":True}}, {"status":{"code":False}}])
 def test_malformed_otlp_is_value_error(fields):
     with pytest.raises(ValueError):
         OTLPSpanAdapter(otlp(**fields)).ingest("t")
@@ -353,3 +356,87 @@ def test_phoenix_rejects_non_array_events(events):
         PhoenixExportAdapter({"traceId":"t", "spans":[{
             "context":{"trace_id":"t","span_id":"s"}, "events":events
         }]}).ingest("t")
+
+
+# --- ingest boundary: numbers that cannot be converted, ids, private keys -----------------
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), 1e30, 10**400,
+                                   "9" * 400, "yesterday"])
+def test_unconvertible_timestamp_is_unavailable_and_disclosed(value):
+    # Same rule for every value that cannot become a timestamp: no traceback, no guessed
+    # time, and a disclosure on the read. A non-finite or out-of-range number used to escape
+    # as OverflowError; a garbage string was silently treated as missing.
+    raw = OTLPSpanAdapter(otlp(startTimeUnixNano=value, endTimeUnixNano=value)).ingest("t")
+    step = raw.steps[0]
+    assert step.ts is None
+    assert step.evidence is None or (step.evidence.end_ts is None and step.evidence.duration_ms is None)
+    assert any("timestamp" in w for w in raw.ingest_warnings)
+
+
+def test_convertible_timestamps_raise_no_warning():
+    raw = OTLPSpanAdapter(otlp(startTimeUnixNano="1700000000000000000",
+                               endTimeUnixNano=1700000000500000000)).ingest("t")
+    assert raw.steps[0].ts is not None
+    assert raw.ingest_warnings == []
+
+
+def test_empty_parent_span_id_still_means_root():
+    raw = OTLPSpanAdapter(otlp(parentSpanId="")).ingest("t")
+    assert raw.causal_edges == []
+
+
+@pytest.mark.parametrize("count", [{"doubleValue": float("inf")}, {"intValue": float("inf")},
+                                   {"intValue": float("nan")}, True, {"boolValue": True},
+                                   {"intValue": True}])
+def test_unusable_token_count_is_unavailable(count):
+    # Like an unparseable cost, which is already skipped: the metric is unavailable, not 1.
+    raw = OTLPSpanAdapter(otlp(attributes=[{"key": "llm.token_count.total", "value": count}])
+                          if isinstance(count, dict) else otlp(attributes={"llm.token_count.total": count})
+                          ).ingest("t")
+    assert raw.steps[0].evidence is None or raw.steps[0].evidence.total_tokens is None
+
+
+def test_raw_otlp_cannot_inject_evaluations_through_the_phoenix_channel():
+    span = otlp()
+    span["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["_tracegraph_evaluations"] = [
+        {"name": "quality", "label": "x" * 500}
+    ]
+    assert OTLPSpanAdapter(span).ingest("t").steps[0].evidence is None
+
+
+def _phoenix_span(**fields):
+    return {"traceId": "t", "spans": [{"context": {"trace_id": "t", "span_id": "s"}, **fields}]}
+
+
+@pytest.mark.parametrize("fields", [{"parent_id": ["x"]}, {"parent_id": 5}, {"annotations": 5},
+                                    {"annotations": {"name": "q"}}])
+def test_malformed_phoenix_span(fields):
+    with pytest.raises(ValueError):
+        PhoenixExportAdapter(_phoenix_span(**fields)).ingest("t")
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), "yesterday"])
+def test_phoenix_unconvertible_timestamp_is_disclosed(value):
+    raw = PhoenixExportAdapter(_phoenix_span(start_time=value, end_time=value)).ingest("t")
+    assert raw.steps[0].ts is None
+    assert any("timestamp" in w for w in raw.ingest_warnings)
+
+
+def test_cli_prints_read_disclosures_for_otlp(tmp_path):
+    source = tmp_path / "inf.json"
+    source.write_text(json.dumps(otlp(startTimeUnixNano=1)).replace('"startTimeUnixNano": 1', '"startTimeUnixNano": Infinity'))
+    result = CliRunner().invoke(app, ["ingest-otlp", "--file", str(source), "--out", str(tmp_path / "o.json")])
+    assert result.exit_code == 0, result.output
+    assert result.exception is None
+    assert "timestamp" in result.stderr
+
+
+def test_int64_string_token_count_is_still_read():
+    raw = OTLPSpanAdapter(otlp(attributes=[{"key": "llm.token_count.total", "value": {"intValue": "42"}}])).ingest("t")
+    assert raw.steps[0].evidence.total_tokens == 42
+
+
+def test_phoenix_unrepresentable_score_is_unavailable():
+    raw = PhoenixExportAdapter(_phoenix_span(annotations=[{"name": "q", "score": 10**400}])).ingest("t")
+    assert [e.score for e in raw.steps[0].evidence.evaluations] == [None]
