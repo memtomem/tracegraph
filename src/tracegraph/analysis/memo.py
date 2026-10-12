@@ -108,6 +108,8 @@ def build_incident_memo(
         incoming_edges.setdefault(edge.src, []).append(edge)
 
     error_steps = [s for s in steps_sorted if s.status is StepStatus.ERROR]
+    preserved = nt.trace.links_preserved
+    links_preserved = "null" if preserved is None else str(preserved).lower()
 
     lines: list[str] = [
         "---",
@@ -119,7 +121,7 @@ def build_incident_memo(
         "  type: incident",
         f"  artifact_digest: {artifact_digest}",
         f"  causal_fidelity: {nt.trace.causal_fidelity.value}",
-        f"  links_preserved: {str(nt.trace.links_preserved).lower() if nt.trace.links_preserved is not None else 'null'}",
+        f"  links_preserved: {links_preserved}",
     ]
     if run_digest is not None:
         lines.append(f"  run_digest: {run_digest}")
@@ -132,7 +134,7 @@ def build_incident_memo(
         f"- **Trace Status**: `{nt.trace.status.value}`",
         f"- **Artifact Digest**: `{artifact_digest}`",
         f"- **Causal Fidelity**: `{nt.trace.causal_fidelity.value}`",
-        f"- **Links Preserved**: `{nt.trace.links_preserved}`",
+        f"- **Links Preserved**: `{links_preserved}`",
     ])
     if run_digest is not None:
         lines.append(f"- **Run Digest**: `{run_digest}`")

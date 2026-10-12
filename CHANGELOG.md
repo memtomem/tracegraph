@@ -50,6 +50,26 @@ explicitly.
   the read now says so on stderr. An unnamed failure is also what a change in LangGraph's
   task-id algorithm would look like, so it is no longer silent.
 
+- `diff` and `validate` printed producer text through Rich markup: a step named
+  `tool[bold]` showed as `tool`, and an invalid edge naming `ghost[red]X[/red]` showed as
+  `ghostX`. Both now print the text literally, as `inspect`, `explain` and `query` already
+  did. Output paths are printed literally too: an `--out` path containing `[/]` used to
+  raise a markup error after the file had been written, so the command exited 1 for work
+  it had completed.
+- `diff --structure` paired any two leftover subtrees because every label is empty under
+  that option, then reported them under an empty path (`only in B under  > : subtree ·`).
+  An empty label is no longer treated as evidence of correspondence, and the reported
+  subtrees now show step names so they can be found, while the comparison still ignores
+  them. The identical/not-identical verdict and exit code are unchanged.
+- `explain` and `query --explain` labeled a nameless step by its `source`, which for
+  OTLP and Phoenix spans is always `loop` and for LangGraph is checkpoint metadata
+  (`input`, `loop`), not what the step was. They now use the step kind, like every other
+  view.
+- `export-incident-memo` wrote `links_preserved` as `true`/`false`/`null` in its front
+  matter but as `True`/`False`/`None` in its summary. Both now use the front-matter form.
+- The Phoenix CLI version-floor message is derived from the floor constant instead of
+  repeating it.
+
 ### Compatibility notes for imports
 
 These change what an input that imported successfully before now produces or whether it

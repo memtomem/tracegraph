@@ -292,7 +292,9 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
             lambda k: child_canons(canA, ca, k),
             lambda k: child_canons(canB, cb, k),
         )
-        greedy(lambda k: label(sa[k]), lambda k: label(sb[k]))  # same label, changed kids
+        # Same label, changed kids. An empty label (every node under --structure) is shared
+        # by everything, so it is no evidence of correspondence.
+        greedy(lambda k: label(sa[k]) or None, lambda k: label(sb[k]) or None)
         return pairs, a_left, b_left
 
     def localize(

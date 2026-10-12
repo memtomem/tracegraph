@@ -434,3 +434,13 @@ def test_build_incident_memo_disclosures_for_langgraph_and_links_preserved():
     # No error steps, so incident candidate warning is omitted
     assert INCIDENT_FIDELITY_WARNING not in memo
     assert PARENT_ONLY_FIDELITY_WARNING not in memo
+
+
+@pytest.mark.parametrize("preserved,text", [(True, "true"), (False, "false"), (None, "null")])
+def test_links_preserved_is_written_the_same_way_in_both_places(preserved, text):
+    nt = normalize(RawTrace(
+        trace=Trace(trace_id="t", source_kind="x", links_preserved=preserved),
+        steps=[Step(step_id="a", trace_id="t", seq=0)], causal_edges=[]))
+    memo = build_incident_memo(nt, "sha256:" + "c" * 64)
+    assert f"links_preserved: {text}" in memo
+    assert f"**Links Preserved**: `{text}`" in memo

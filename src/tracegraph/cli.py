@@ -34,7 +34,7 @@ from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
 from tracegraph import __version__
-from tracegraph.analysis import structure_only
+from tracegraph.analysis import default_label, structure_only
 from tracegraph.model import EdgeType, NormalizedTrace, RawTrace, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
 from tracegraph.review_candidates import build_report as build_candidate_report
@@ -256,15 +256,19 @@ def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECON
     return result.stdout
 
 
+def _px_floor() -> str:
+    return ".".join(map(str, _PX_MIN_VERSION))
+
+
 def _px_version() -> str:
     text = _px_run(["px", "--version"], action="px version check", timeout=10).strip()
     match = _PX_VERSION_RE.search(text)
     if match is None:
-        raise _PxError("could not determine the Phoenix CLI version; install px >= 1.0.4")
+        raise _PxError(f"could not determine the Phoenix CLI version; install px >= {_px_floor()}")
     parsed = tuple(int(part) for part in match.groups())
     if parsed < _PX_MIN_VERSION:
         raise _PxError(
-            f"Phoenix CLI {match.group(0)} is too old; install px >= 1.0.4 with "
+            f"Phoenix CLI {match.group(0)} is too old; install px >= {_px_floor()} with "
             "`npm install -g @arizeai/phoenix-cli@latest`"
         )
     return match.group(0)
@@ -777,7 +781,7 @@ def ingest(
         _save_ingested(nt, target, explicit=out is not None)
     except (OSError, ValueError, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc
-    console.print(f"[green]ingested {len(nt.steps)} steps[/] → {target}")
+    console.print(f"[green]ingested {len(nt.steps)} steps[/] → {escape(str(target))}")
 
 
 @app.command(name="ingest-otlp")
@@ -807,7 +811,7 @@ def ingest_otlp(
     target = out or artifact.default_path(trace)
     _distinct_paths([file], [target])
     _save_ingested(nt, target, explicit=out is not None)
-    console.print(f"[green]ingested {len(nt.steps)} spans[/] → {target}")
+    console.print(f"[green]ingested {len(nt.steps)} spans[/] → {escape(str(target))}")
 
 
 @app.command(name="ingest-phoenix")
@@ -823,7 +827,7 @@ def ingest_phoenix(
     target = out or artifact.default_path(nt.trace.trace_id)
     _distinct_paths([Path(file)] if file != "-" else [], [target])
     _save_ingested(nt, target, explicit=out is not None)
-    console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {target}")
+    console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {escape(str(target))}")
 
 
 @app.command(name="analyze")
@@ -845,7 +849,7 @@ def analyze_command(
     _render_analysis(report, limit=limit)
     if json_out:
         _save_report(report, json_out)
-        console.print(f"\n[green]report[/] → {json_out}")
+        console.print(f"\n[green]report[/] → {escape(str(json_out))}")
 
 
 @phoenix_app.command(name="diagnose")
@@ -886,10 +890,10 @@ def phoenix_diagnose(
     _render_analysis(report, limit=limit)
     if save_artifact:
         _save_artifact(nt, save_artifact)
-        console.print(f"\n[green]artifact[/] → {save_artifact}")
+        console.print(f"\n[green]artifact[/] → {escape(str(save_artifact))}")
     if json_out:
         _save_report(report, json_out)
-        console.print(f"[green]report[/] → {json_out}")
+        console.print(f"[green]report[/] → {escape(str(json_out))}")
 
 
 @phoenix_app.command(name="doctor")
@@ -973,7 +977,7 @@ def validate(
             # _load already narrowed to load-shaped failures (_LOAD_ERRORS); anything else
             # is a real tracegraph bug and must propagate, not print as "INVALID".
             failures += 1
-            console.print(f"[bold red]INVALID[/] {path}: {exc}")
+            console.print(f"[bold red]INVALID[/] {escape(str(path))}: {escape(str(exc))}")
             continue
         console.print(
             f"[green]OK[/] {escape(str(path))}  [dim]{escape(nt.trace.trace_id)} · {len(nt.steps)} steps[/]"
@@ -1023,7 +1027,7 @@ def explain(
         console.print("[dim]no causes (this is a root step)[/]")
     for s in result.chain:
         flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
-        console.print(f"  ← {escape(s.name or s.source.value)} (step {s.seq}){flag}")
+        console.print(f"  ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
     if result.is_lossy:
         console.print(
             "\n[yellow]Some steps had multiple real causes; the single-parent tree view "
@@ -1043,14 +1047,18 @@ def diff(
     """
     nt_a, nt_b = _load(a), _load(b)
     console.print(f"[dim]Derived TREE_PARENT comparison; lossy steps: A={sum(s.projection_lossy for s in nt_a.steps)}, B={sum(s.projection_lossy for s in nt_b.steps)}[/]")
-    label = structure_only if structure else None
-    result = tree_diff(nt_a, nt_b, label) if label else tree_diff(nt_a, nt_b)
+    # --structure ignores names when comparing but still prints them, so the reported
+    # subtrees can be found in the runs.
+    if structure:
+        result = tree_diff(nt_a, nt_b, structure_only, display_label=default_label)
+    else:
+        result = tree_diff(nt_a, nt_b)
     if result.identical:
         console.print("[green]IDENTICAL[/] — the two runs are structurally isomorphic.")
         raise typer.Exit(0)
     console.print("[bold yellow]NOT IDENTICAL[/]")
     for line in result.changes:
-        console.print(f"  • {line}")
+        console.print(f"  • {escape(line)}")
     console.print("[dim](divergence localization is heuristic; the identical/not verdict is exact)[/]")
     raise typer.Exit(1)
 
@@ -1146,9 +1154,8 @@ def query(
                     console.print("    [dim]← (no causes — matched effect is a root step)[/]")
                 for s in result.chain:
                     flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
-                    # Fallback label matches `tracegraph explain` (s.name or s.source.value)
-                    # so the two renderings agree for nameless LangGraph checkpoints.
-                    console.print(f"    ← {escape(s.name or s.source.value)} (step {s.seq}){flag}")
+                    # Same fallback label as `tracegraph explain` and the tree renderers.
+                    console.print(f"    ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
                 # Causal-honesty signal: when the matched effect (or anything in the chain)
                 # has more than one real cause, the single-parent tree projection dropped
                 # at least one. `tracegraph explain` surfaces this same warning — `query
@@ -1203,7 +1210,7 @@ def export_review_candidates(
         raise typer.BadParameter(f"cannot export review candidates: {exc}") from exc
     console.print(
         f"[green]exported {len(report.candidates)} review candidate(s)[/] "
-        f"from {len(matches)} match(es) → {out}"
+        f"from {len(matches)} match(es) → {escape(str(out))}"
     )
 
 
@@ -1225,7 +1232,7 @@ def export_incident_memo(
         save_incident_memo(memo_content, out)
     except OSError as exc:
         raise typer.BadParameter(f"cannot save incident memo: {_load_reason(exc)}") from exc
-    console.print(f"[green]exported incident memo[/] → {out}")
+    console.print(f"[green]exported incident memo[/] → {escape(str(out))}")
 
 
 def main() -> None:
