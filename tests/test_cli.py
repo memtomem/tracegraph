@@ -1436,3 +1436,26 @@ def test_output_paths_are_printed_literally(tmp_path, name):
     for result in results:
         assert result.exit_code == 0, result.output
         assert name in result.output.replace("\n", "")
+
+
+def test_px_read_commands_are_exact(monkeypatch):
+    # The argv tracegraph hands to px is part of the read-only contract with that CLI;
+    # pin it exactly rather than by substring.
+    seen = []
+
+    def fake_json(command, *, action):
+        seen.append(command)
+        raise cli_mod._PxError("stop")
+
+    monkeypatch.setattr(cli_mod, "_px_json", fake_json)
+    for call in (lambda: cli_mod._px_trace("abc", project="proj"),
+                 lambda: cli_mod._px_latest_trace(project=None)):
+        with pytest.raises(cli_mod._PxError):
+            call()
+    monkeypatch.setattr(cli_mod, "_px_version", lambda: "1.8.1")
+    runner.invoke(app, ["phoenix", "doctor", "--project", "proj"])
+    assert seen == [
+        ["px", "trace", "get", "abc", "--include-annotations", "--format", "raw", "--no-progress", "--project", "proj"],
+        ["px", "trace", "list", "--limit", "20", "--include-annotations", "--format", "raw", "--no-progress"],
+        ["px", "project", "list", "--limit", "1", "--format", "raw", "--no-progress"],
+    ]

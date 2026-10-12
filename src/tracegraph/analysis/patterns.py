@@ -378,9 +378,17 @@ def search(traces: list[NormalizedTrace], pattern: PathPattern) -> list[Match]:
         index = build_index(nt)
         steps = index[0]
         for path in find_matches(nt, pattern, index=index):
-            labels = [steps[i].name or steps[i].kind.value for i in path]
-            matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
+            matches.append(match_for(nt.trace.trace_id, steps, path))
     return matches
+
+
+def match_for(trace_id: str, steps: dict[str, Step], path: list[str]) -> Match:
+    """A :class:`Match` with display labels: each step's name, else its kind."""
+    return Match(
+        trace_id=trace_id,
+        step_ids=path,
+        labels=[steps[i].name or steps[i].kind.value for i in path],
+    )
 
 
 @dataclass(frozen=True)

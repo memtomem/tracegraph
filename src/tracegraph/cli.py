@@ -30,6 +30,7 @@ from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
 from tracegraph.analysis import Match
+from tracegraph.analysis.patterns import match_for
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
@@ -134,6 +135,10 @@ class _PxError(RuntimeError):
 # corrupt or hand-edited file) and — in the rare case it surfaces a normalize() regression —
 # the original message is preserved verbatim (see _load_reason) rather than masked.
 _LOAD_ERRORS = (OSError, ValueError)
+
+
+def _load_error(path: Path | str, exc: Exception) -> typer.BadParameter:
+    return typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}")
 
 
 def _load_reason(exc: Exception) -> str:
@@ -286,6 +291,11 @@ def _px_project_args(project: str | None) -> list[str]:
     return ["--project", project] if project else []
 
 
+def _px_read_command(*args: str, project: str | None = None) -> list[str]:
+    """A read-only ``px`` command that prints machine-readable JSON and no progress UI."""
+    return ["px", *args, "--format", "raw", "--no-progress", *_px_project_args(project)]
+
+
 def _normalize_read(raw: RawTrace) -> NormalizedTrace:
     """Normalize adapter output, printing its read disclosures to stderr first.
 
@@ -313,35 +323,16 @@ def _px_normalize(payload: Any, trace_id: str) -> NormalizedTrace:
 
 def _px_trace(trace_id: str, *, project: str | None = None) -> NormalizedTrace:
     """Read one annotated trace through ``px`` without persisting its raw body."""
-    command = [
-        "px",
-        "trace",
-        "get",
-        trace_id,
-        "--include-annotations",
-        "--format",
-        "raw",
-        "--no-progress",
-        *_px_project_args(project),
-    ]
+    command = _px_read_command("trace", "get", trace_id, "--include-annotations", project=project)
     payload = _px_json(command, action="px trace get")
     return _px_normalize(payload, trace_id)
 
 
 def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bool, int]:
     """Select the newest error, or the newest trace when the scan contains no error."""
-    command = [
-        "px",
-        "trace",
-        "list",
-        "--limit",
-        str(_PX_SCAN_LIMIT),
-        "--include-annotations",
-        "--format",
-        "raw",
-        "--no-progress",
-        *_px_project_args(project),
-    ]
+    command = _px_read_command(
+        "trace", "list", "--limit", str(_PX_SCAN_LIMIT), "--include-annotations", project=project
+    )
     payload = _px_json(command, action="px trace list")
     if not isinstance(payload, list):
         raise _PxError("px trace list returned an unsupported response; expected a JSON array")
@@ -520,7 +511,7 @@ def _load(path: Path) -> NormalizedTrace:
     try:
         return _load_validated(path)
     except _LOAD_ERRORS as exc:
-        raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
+        raise _load_error(path, exc) from exc
 
 
 def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
@@ -579,9 +570,7 @@ def _load_many_evidence(
                 # Flush what we've already skipped before aborting, so strays discovered
                 # earlier in the argument list aren't silently dropped by the fatal error.
                 _warn_skipped(skipped)
-                raise typer.BadParameter(
-                    f"cannot load artifact {f}: {_load_reason(exc)}"
-                ) from exc
+                raise _load_error(f, exc) from exc
             continue
         try:
             loaded.append(_load_artifact_evidence(f))
@@ -635,7 +624,7 @@ def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
         nt = artifact.loads(_read_artifact_bytes(path).decode("utf-8"))
         return cls.from_trace(nt)
     except _LOAD_ERRORS as exc:
-        raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
+        raise _load_error(path, exc) from exc
 
 
 def _store_from_trace(nt: NormalizedTrace, backend: QueryBackend) -> Any:
@@ -692,10 +681,7 @@ def _search_with_backend(
         try:
             steps = nt.steps_by_id()
             for path in store.find_matches(pattern):
-                labels = [steps[i].name or steps[i].kind.value for i in path]
-                matches.append(
-                    Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels)
-                )
+                matches.append(match_for(nt.trace.trace_id, steps, path))
             fell_back = fell_back or getattr(store, "fell_back_to_python", False)
         finally:
             _close_store(store)
@@ -904,32 +890,12 @@ def phoenix_doctor(
     try:
         version = _px_version()
         projects = _px_json(
-            [
-                "px",
-                "project",
-                "list",
-                "--limit",
-                "1",
-                "--format",
-                "raw",
-                "--no-progress",
-            ],
-            action="px project list",
+            _px_read_command("project", "list", "--limit", "1"), action="px project list"
         )
         if not isinstance(projects, list):
             raise _PxError("px project list returned an unsupported response; expected a JSON array")
         traces = _px_json(
-            [
-                "px",
-                "trace",
-                "list",
-                "--limit",
-                "1",
-                "--format",
-                "raw",
-                "--no-progress",
-                *_px_project_args(project),
-            ],
+            _px_read_command("trace", "list", "--limit", "1", project=project),
             action="px trace list",
         )
         if not isinstance(traces, list):
@@ -1224,7 +1190,7 @@ def export_incident_memo(
     try:
         loaded = _load_artifact_evidence(artifact_path)
     except _LOAD_ERRORS as exc:
-        raise typer.BadParameter(f"cannot load artifact {artifact_path}: {_load_reason(exc)}") from exc
+        raise _load_error(artifact_path, exc) from exc
     from tracegraph.analysis.memo import build_incident_memo, save_incident_memo
 
     memo_content = build_incident_memo(loaded.trace, loaded.digest)
