@@ -54,10 +54,15 @@ class StepKind(str, Enum):
 class StepSource(str, Enum):
     """How the step entered the trace (mirrors LangGraph ``metadata.source``).
 
-    ``TASK`` is the one value that does *not* come from ``metadata.source``: it marks a step
+    ``TASK`` and ``INTERRUPT`` do *not* come from ``metadata.source``. ``TASK`` marks a step
     derived from a checkpoint's **pending writes** (one LangGraph task) rather than from a
     checkpoint itself. It is explicit provenance, not a naming convention — ``step_id`` is an
     unrestricted string, so nothing about an id may be read as evidence of how a step was made.
+
+    ``INTERRUPT`` is likewise derived from pending writes: a LangGraph task that called ``interrupt()`` and
+    for which the recorded history holds no resume and no result. It states what the
+    checkpoints record, not that LangGraph would resume the task today — a thread re-run under
+    a revised graph can finish without writing a checkpoint, leaving the record unchanged.
     """
 
     INPUT = "input"
@@ -65,6 +70,7 @@ class StepSource(str, Enum):
     UPDATE = "update"
     FORK = "fork"
     TASK = "task"
+    INTERRUPT = "interrupt"
 
 
 class StepStatus(str, Enum):

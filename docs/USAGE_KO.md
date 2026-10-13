@@ -322,6 +322,17 @@ SHA-256이 함께 기록됩니다.
 하나의 부모만 고르므로 정보가 줄어들 수 있습니다. 이런 step에는
 `projection_lossy=True`가 붙습니다.
 
+### interrupt step
+
+LangGraph 노드가 `interrupt()`로 멈춘 뒤 resume도 결과도 기록되지 않았다면, thread의 가장
+최근 root checkpoint 아래에 source가 `interrupt`이고 status가 `unset`인 step이 생깁니다.
+이 step은 "기록된 이력 안에서 멈춘 채 끝났다"는 뜻이며, 지금 LangGraph가 이 task를 재개할
+것이라는 뜻은 아닙니다. interrupt와 함께 resume이나 오류가 기록되었는데 결과가 없으면
+checkpoint만으로는 아직 멈춰 있는지 알 수 없으므로 step을 만들지 않고 ingest 때 공시합니다.
+recursion limit, 프로세스 종료, `interrupt_before`/`interrupt_after` breakpoint처럼 task가
+시작조차 하지 않은 경우는 기록이 남지 않아 보고되지 않습니다. interrupt step이 있는
+artifact는 `schema_version` 5를 선언하므로 0.3.1 이하 버전은 이 파일을 읽지 않습니다.
+
 ### step id
 
 각 실행 단계의 고유 id입니다. `explain`에는 전체 id 또는 유일하게 구분되는 suffix를
