@@ -118,6 +118,8 @@ def _attr_value(v: Any) -> Any:
             raw = v[key]
             if isinstance(raw, bool):
                 return raw  # `int(True) == 1` would hide that the value was a boolean
+            if isinstance(raw, float) and not raw.is_integer():
+                return raw  # `int(1.5) == 1` would hand validation a plausible count
             try:
                 return int(raw)
             except (TypeError, ValueError, OverflowError):
@@ -229,41 +231,81 @@ def _iso_ts(start_nano: Any) -> str | None:
     return datetime.fromtimestamp(nanos / 1e9, tz=timezone.utc).isoformat()
 
 
-def _int_attr(attrs: dict[str, Any], *names: str) -> int | None:
-    for name in names:
-        value = attrs.get(name)
-        if value is None or isinstance(value, bool):
-            continue
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if parsed < 0 or (isinstance(value, float) and not value.is_integer()):
-            continue
-        return parsed
-    return None
+def _as_count(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed < 0 or (isinstance(value, float) and not value.is_integer()):
+        return None
+    return parsed
 
 
-def _decimal_attr(attrs: dict[str, Any], *names: str) -> str | None:
-    for name in names:
-        value = attrs.get(name)
-        if value is None or not isinstance(value, (int, float, str)):
-            continue
-        try:
-            parsed = Decimal(str(value))
-        except InvalidOperation:
-            continue
-        if parsed.is_finite() and parsed >= 0:
-            return format(parsed, "f")
-    return None
+def _as_decimal(value: Any) -> str | None:
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return format(parsed, "f") if parsed.is_finite() and parsed >= 0 else None
 
 
-def _currency_attr(attrs: dict[str, Any]) -> str | None:
-    value = attrs.get("llm.cost.currency")
+def _as_currency(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = value.upper()
     return normalized if re.fullmatch(r"[A-Z]{3,8}", normalized) else None
+
+
+def _first_readable(attrs: dict[str, Any], read: Any, *names: str) -> Any:
+    for name in names:
+        parsed = read(attrs.get(name))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _unreadable(attrs: dict[str, Any], read: Any, *names: str) -> bool:
+    """The producer sent a value under one of ``names`` and none of them can be read."""
+    return _first_readable(attrs, read, *names) is None and any(
+        attrs.get(name) is not None for name in names
+    )
+
+
+_TOKEN_ATTRS = (
+    ("llm.token_count.prompt", "llm.token_count.input"),
+    ("llm.token_count.completion", "llm.token_count.output"),
+    ("llm.token_count.total",),
+)
+_COST_ATTRS = (
+    ("llm.cost.prompt", "llm.cost.input"),
+    ("llm.cost.completion", "llm.cost.output"),
+    ("llm.cost.total",),
+)
+_CURRENCY_ATTR = "llm.cost.currency"
+#: Stored in ``total_cost`` when the producer sent a total cost that cannot be read. It is not a
+#: decimal, so analysis withholds the run's total instead of summing the rest into a figure that
+#: is knowably too low. Fixed text: the producer's own value never reaches the artifact.
+UNREADABLE_COST = "unreadable"
+
+
+def _unreadable_telemetry(attrs: dict[str, Any]) -> dict[str, set[str]]:
+    """Which kinds of telemetry this span sent but tracegraph cannot read, and under which of
+    our fixed attribute names (never the producer's value)."""
+    groups = (
+        [("token count", _as_count, names) for names in _TOKEN_ATTRS]
+        + [("prompt or completion cost", _as_decimal, names) for names in _COST_ATTRS[:2]]
+        + [("total cost", _as_decimal, _COST_ATTRS[2])]
+        + [("cost currency", _as_currency, (_CURRENCY_ATTR,))]
+    )
+    found: dict[str, set[str]] = {}
+    for kind, read, names in groups:
+        if _unreadable(attrs, read, *names):
+            found.setdefault(kind, set()).update(n for n in names if attrs.get(n) is not None)
+    return found
 
 
 def _digest_attr(attrs: dict[str, Any], name: str) -> str | None:
@@ -294,15 +336,16 @@ def _evidence(
     evidence = StepEvidence(
         end_ts=_iso_ts(end),
         duration_ms=duration_ms,
-        prompt_tokens=_int_attr(attrs, "llm.token_count.prompt", "llm.token_count.input"),
-        completion_tokens=_int_attr(
-            attrs, "llm.token_count.completion", "llm.token_count.output"
+        prompt_tokens=_first_readable(attrs, _as_count, *_TOKEN_ATTRS[0]),
+        completion_tokens=_first_readable(attrs, _as_count, *_TOKEN_ATTRS[1]),
+        total_tokens=_first_readable(attrs, _as_count, *_TOKEN_ATTRS[2]),
+        prompt_cost=_first_readable(attrs, _as_decimal, *_COST_ATTRS[0]),
+        completion_cost=_first_readable(attrs, _as_decimal, *_COST_ATTRS[1]),
+        total_cost=(
+            _first_readable(attrs, _as_decimal, *_COST_ATTRS[2])
+            or (UNREADABLE_COST if _unreadable(attrs, _as_decimal, *_COST_ATTRS[2]) else None)
         ),
-        total_tokens=_int_attr(attrs, "llm.token_count.total"),
-        prompt_cost=_decimal_attr(attrs, "llm.cost.prompt", "llm.cost.input"),
-        completion_cost=_decimal_attr(attrs, "llm.cost.completion", "llm.cost.output"),
-        total_cost=_decimal_attr(attrs, "llm.cost.total"),
-        cost_currency=_currency_attr(attrs),
+        cost_currency=_as_currency(attrs.get(_CURRENCY_ATTR)),
         artifact_digest=_digest_attr(attrs, "syncmill.artifact_digest"),
         evaluations=evaluations,
     )
@@ -471,6 +514,19 @@ class OTLPSpanAdapter:
             if unreadable
             else []
         )
+        dropped = [_unreadable_telemetry(attrs[sid]) for sid in by_id]
+        for kind, consequence in (
+            ("token count", "that count is reported as unavailable"),
+            ("prompt or completion cost", "that cost is reported as unavailable"),
+            ("total cost", "the run's total cost is withheld rather than understated"),
+            ("cost currency", "that cost is reported without a currency"),
+        ):
+            count = sum(1 for found in dropped if kind in found)
+            if count:
+                names = ", ".join(sorted(set().union(*(found.get(kind, set()) for found in dropped))))
+                warnings.append(
+                    f"{count} span(s) carry a {kind} that cannot be read ({names}); {consequence}."
+                )
         return RawTrace(trace=trace, steps=steps, causal_edges=edges, ingest_warnings=warnings)
 
     # --- helpers ---

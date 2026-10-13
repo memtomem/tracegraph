@@ -73,7 +73,19 @@ def _attrs(span: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _as_score(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return score if math.isfinite(score) else None
+
+
 def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
+    """The span's evaluations, each with ``unreadable_score`` set when a score was sent but
+    cannot be represented; the caller strips that key and discloses the count."""
     out: list[dict[str, Any]] = []
     annotations = span.get("annotations")
     if annotations is None:
@@ -93,16 +105,12 @@ def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
         if name is None:
             continue
         label = _first(result, "label") or annotation.get("label")
-        score = _first(result, "score")
-        if score is None:
-            score = annotation.get("score")
-        try:
-            score = float(score) if score is not None else None
-        except (TypeError, ValueError, OverflowError):
-            score = None
-        if score is not None and not math.isfinite(score):
-            score = None
-        out.append({"name": name, "label": _safe_operation_name(label), "score": score})
+        sent = _first(result, "score")
+        if sent is None:
+            sent = annotation.get("score")
+        score = _as_score(sent)
+        out.append({"name": name, "label": _safe_operation_name(label), "score": score,
+                    "unreadable_score": sent is not None and score is None})
     return out
 
 
@@ -153,8 +161,11 @@ class PhoenixExportAdapter:
         except KeyError as exc:
             raise KeyError(f"no Phoenix trace {trace_id!r}") from exc
         spans = [self._span(trace_id, span) for span in trace["spans"]]
+        unreadable_scores = sum(
+            item.pop("unreadable_score") for span in spans for item in span["_tracegraph_evaluations"]
+        )
         document = {"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}
-        return OTLPSpanAdapter(
+        raw = OTLPSpanAdapter(
             document,
             source_kind="phoenix_cli",
             links_as_causes=False,
@@ -162,6 +173,12 @@ class PhoenixExportAdapter:
             preserve_unset_status=True,
             evaluation_channel="_tracegraph_evaluations",
         ).ingest(trace_id)
+        if unreadable_scores:
+            raw.ingest_warnings.append(
+                f"{unreadable_scores} evaluation score(s) cannot be read as a finite number; "
+                "each is reported as null."
+            )
+        return raw
 
     @staticmethod
     def _trace_id(trace: dict[str, Any]) -> str:

@@ -356,7 +356,10 @@ means valid in-trace links only. Structural diff compares the derived tree and d
 lossy step counts. Metrics sum available span observations: partial coverage and producer
 aggregation can undercount or double count. Coverage gaps are disclosed rather than absorbed
 — a wall duration derived from a subset of steps says so, one whose end precedes its start is
-withheld, and a single unparseable cost withholds the whole total instead of understating it. File input has a size limit, but stdin/Phoenix
+withheld, and a single unparseable cost withholds the whole total instead of understating it.
+An OTLP or Phoenix import records an unreadable total cost as `unreadable` for that reason, and
+reports token counts, other costs, currencies and evaluation scores it cannot read as
+unavailable, disclosing each on stderr; the producer's value is never kept. File input has a size limit, but stdin/Phoenix
 subprocess output and query materialization are not streaming memory guarantees.
 
 Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;

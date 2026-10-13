@@ -96,8 +96,16 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    trace다. 그때의 선택지는 구조 조상 확인, origin 강등, `parentSpanId`로 되돌림이다. origin
    강등은 새 origin 값을 만들면 artifact 스키마 버전이 필요하고, 기존 값을 재사용하면 그 값의
    의미와 projection 호환성을 먼저 확인해야 한다.
-3. **부분 커버리지 합계와 거부된 텔레메트리 값.** 토큰·비용 합계는 일부 step만 덮어도 단독
-   수치로 표시되고(문서화된 lower bound), bool 토큰 수나 표현 불가 점수는 경고 없이 버려진다.
+3. **부분 커버리지 합계와 거부된 텔레메트리 값: 해결(브랜치 `fix/unreadable-telemetry`).**
+   - 부분 합계는 이미 공시되고 있었다. 토큰·비용 합계가 하나라도 있으면 보고서에 "coverage
+     may be partial" 경고가 붙고, delta는 모든 step이 값을 보고할 때만 낸다. 바꾸지 않았다.
+   - 버려지던 값은 실제 버그였다. importer가 읽을 수 없는 `llm.cost.total`을 버려서 보고서가
+     나머지 비용만 더한 과소 합계를 경고 없이 냈다. 이제 고정 표식 `"unreadable"`을 저장해 합계를
+     보류한다. 토큰 수, 개별 비용, 통화, Phoenix 점수는 그대로 unavailable이지만 stderr로
+     공시한다. `intValue` 소수의 절삭(`1.5`→`1`)도 고쳤다.
+   - 커밋된 fixture 전체의 artifact·보고서·메모·후보·CLI stdout은 `fe6aefb`와 바이트가 같다.
+     Phoenix fixture의 `llm.cost.prompt = "SECRET COST TEXT"` 때문에 그 fixture를 읽는 명령의
+     stderr에 공시 한 줄이 추가됐다(값은 출력하지 않는다).
 4. **LangGraph checkpoint 형태 검증.** 조작된 checkpoint DB에서 `metadata.parents`가 객체가
    아니면 선언된 부모를 버려 root가 되고, 다른 형태 4가지는 traceback을 낸다.
 5. **보류된 계획 항목.** Phoenix 서버 핀 20.21.0(E2E 필요), Python 3.13/3.14 matrix(branch

@@ -6,6 +6,38 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Fixed
+
+- **An unreadable cost no longer understates the run's total.** The importers dropped a
+  `llm.cost.total` that was not a finite non-negative decimal (`"abc"`, `-1`, a boolean), so
+  `analyze` summed the remaining costs and printed a total that was knowably too low, with no
+  warning. The documented rule that a single unparseable cost withholds the whole total only
+  applied to artifacts built by hand. An unreadable total cost is now stored as the fixed
+  marker `"unreadable"`, never the producer's value, and the report withholds `total_cost`
+  and its delta with the existing note.
+- Token counts, prompt and completion costs, cost currencies and Phoenix evaluation scores
+  that cannot be read were dropped without a trace. They are still reported as unavailable,
+  and `ingest-otlp`, `ingest-phoenix`, `analyze` and `phoenix diagnose` now say so on stderr,
+  naming the kind of value and how many spans (for scores, evaluations) carried it, never
+  the value itself. A boolean score still reads as `1.0` or `0.0`, as before.
+- An OTLP `intValue` sent as a fractional JSON number was truncated before validation:
+  `1.5` became `1` and `-0.5` became `0`, so an invalid token count looked valid. It is now
+  validated as sent.
+
+### Compatibility notes for imports
+
+- An artifact imported from a span with an unreadable total cost now carries
+  `"total_cost": "unreadable"` instead of no cost, and its reports withhold the run's
+  total cost. No schema change: 0.3.0 reads such an artifact and withholds the same way.
+- Because `intValue` is no longer truncated, `llm.cost.total = {"intValue": 1.5}` is stored as
+  `"1.5"` instead of `"1"`, and a `toolgraph.graph_generation` of `{"intValue": 1.5}` is
+  rejected like any other invalid generation instead of being read as `1`.
+- The committed Phoenix fixture carries an unreadable `llm.cost.prompt`; reading it now prints
+  one stderr disclosure. Every committed fixture's artifact, report, memo, candidate file and
+  CLI stdout is unchanged.
+
 ## 0.3.0 - 2026-10-13
 
 ### Fixed

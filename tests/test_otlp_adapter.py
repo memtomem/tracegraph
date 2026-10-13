@@ -11,7 +11,7 @@ import pytest
 from otlp_agent_trace import sample_otlp_document
 
 from tracegraph.adapters import OTLPSpanAdapter
-from tracegraph.adapters.otlp_spans import _decimal_attr, _int_attr
+from tracegraph.adapters.otlp_spans import _as_count, _as_decimal, _first_readable
 from tracegraph.analysis import explain
 from tracegraph.model import EdgeOrigin, EdgeType, StepKind, StepStatus
 from tracegraph.normalize import normalize
@@ -115,13 +115,15 @@ def test_invalid_syncmill_artifact_digest_is_rejected():
 
 
 def test_numeric_attribute_aliases_fall_through_invalid_primary_values():
-    assert _int_attr(
+    assert _first_readable(
         {"llm.token_count.prompt": "invalid", "llm.token_count.input": 7},
+        _as_count,
         "llm.token_count.prompt",
         "llm.token_count.input",
     ) == 7
-    assert _decimal_attr(
+    assert _first_readable(
         {"llm.cost.prompt": "invalid", "llm.cost.input": "0.25"},
+        _as_decimal,
         "llm.cost.prompt",
         "llm.cost.input",
     ) == "0.25"
