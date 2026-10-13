@@ -390,7 +390,7 @@ def test_empty_parent_span_id_still_means_root():
                                    {"intValue": float("nan")}, True, {"boolValue": True},
                                    {"intValue": True}])
 def test_unusable_token_count_is_unavailable(count):
-    # Like an unparseable cost, which is already skipped: the metric is unavailable, not 1.
+    # The metric is unavailable, not 1, and the read discloses it (test_unreadable_telemetry).
     raw = OTLPSpanAdapter(otlp(attributes=[{"key": "llm.token_count.total", "value": count}])
                           if isinstance(count, dict) else otlp(attributes={"llm.token_count.total": count})
                           ).ingest("t")
