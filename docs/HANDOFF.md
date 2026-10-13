@@ -10,15 +10,17 @@
   `v0.3.0`이 모두 이 커밋을 가리킨다. 아래 7번 항목에 검증 결과를 적었다.
 - **0.3.0 이후 착지(미릴리스):** [PR #31](https://github.com/memtomem/tracegraph/pull/31)(merge
   `be1930c`, 후속 3번)과 [PR #32](https://github.com/memtomem/tracegraph/pull/32)(merge `f325e82`,
-  후속 4번). 둘 다 사용자 출력이 바뀌는 수정이라 `CHANGELOG.md`의 Unreleased에 있고, 다음
-  릴리스(0.3.1)에 들어간다. 두 merge commit의 `tests` run은 통과했다.
+  후속 4번). 둘 다 사용자 출력이 바뀌는 수정이라 0.3.1로 낸다. `CHANGELOG.md`의
+  `0.3.1 - 2026-10-13`에 있고, 준비 커밋은 브랜치 `release/0.3.1`에 있다. 남은 순서는 병합 →
+  `test-v0.3.1` 예행 → `v0.3.1`이다. 두 merge commit의 `tests` run은 통과했다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
 - **공개 계약:** 커밋된 모든 fixture에서 canonical artifact, 분석 보고서, review 후보의 바이트는
   그대로다. 그 밖의 입력에서는 바뀔 수 있다. 예를 들어 자유 텍스트 annotation이 있는 Phoenix
   export를 다시 가져오면 artifact 바이트와 digest가 달라진다(D2). PR #28의 바뀐 출력과 호환성
-  영향은 `CHANGELOG.md`의 `0.3.0 - 2026-10-13`에, 그 뒤 PR #31·#32의 것은 Unreleased에 있다.
+  영향은 `CHANGELOG.md`의 `0.3.0 - 2026-10-13`에, 그 뒤 PR #31·#32의 것은 `0.3.1 - 2026-10-13`에
+  있다.
 
 ### 브랜치와 범위
 
