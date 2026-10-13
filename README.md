@@ -258,9 +258,11 @@ and any change to them is called out in the [changelog](CHANGELOG.md).
 
 Known limits:
 
-- A LangGraph task that was scheduled but left no result and no recorded error (a run
-  paused by `interrupt()`, stopped by the recursion limit, or killed) is not reported, so
-  such a run reads `ok` unless some other step recorded an error.
+- A LangGraph task that was scheduled but never started (a run stopped by the recursion
+  limit, killed, or held at an `interrupt_before`/`interrupt_after` breakpoint) leaves no
+  write and is not reported, so such a run reads `ok` unless some other step recorded an
+  error. A task paused by `interrupt()` *is* reported (below), but only at the root graph:
+  the subgraph node is named, not the node inside it that paused.
 - Phoenix exports carry no span links, so their artifacts are parent-only; additional fan-in
   causes may be missing.
 - Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
@@ -345,9 +347,16 @@ cancels its siblings and records that through the same channel; a cancelled task
 as an `unset` step with no message, because it was torn down rather than at fault. Only the
 latest persisted error survives per task, so repeated attempts are not reconstructed, and
 `Send` packets are nameable only where `langgraph.types` is importable — an ordinary install
-discloses them instead. An artifact whose derived tree relies on EdgeOrigin precedence declares
-artifact `schema_version` 4; otherwise, an artifact carrying derived task steps declares
-`schema_version` 3, and artifacts without them still serialize as version 2, byte for byte.
+discloses them instead. A task that called `interrupt()` and whose only write on the thread's
+newest root checkpoint is that interrupt becomes an `unset` step with source `interrupt` under
+that checkpoint: the recorded history holds no resume and no result for it. That describes the
+history, not whether LangGraph would resume the task today. An interrupt recorded together with
+a resume or an error and no result is ambiguous in the checkpoint itself — under LangGraph 1.2.2
+a task resumed with nothing to write looks exactly like one paused a second time — so it is
+disclosed at ingest, not reported. An artifact carrying interrupt steps declares artifact `schema_version` 5; one
+whose derived tree relies on EdgeOrigin precedence declares 4; otherwise, an artifact carrying
+derived task steps declares `schema_version` 3, and artifacts without them still serialize as
+version 2, byte for byte.
 Missing observed errors still do not
 prove success: an artifact ingested by an older build, or one using an unrecognized checkpoint
 layout, carries no derived step and looks exactly like a clean run, which is why the capture

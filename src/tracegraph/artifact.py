@@ -19,13 +19,13 @@ from tracegraph.input_validation import loads as json_loads
 from tracegraph.model import NormalizedTrace, StepSource
 
 #: Bump when the on-disk shape changes incompatibly.
-ARTIFACT_SCHEMA_VERSION = 4
+ARTIFACT_SCHEMA_VERSION = 5
 
 #: Versions this build can read. 1 needs a migration (see ``_migrate_v1``); 2 -> 3 is the
 #: identity, because 3 adds only a new ``Step.source`` value and changes nothing existing.
 #: 4 signals that TREE_PARENT was derived under EdgeOrigin precedence rather than
-#: legacy temporal-only selection.
-_READABLE_VERSIONS = (1, 2, 3, ARTIFACT_SCHEMA_VERSION)
+#: legacy temporal-only selection. 5 adds only the ``interrupt`` ``Step.source`` value.
+_READABLE_VERSIONS = (1, 2, 3, 4, ARTIFACT_SCHEMA_VERSION)
 
 
 def _required_version(nt: NormalizedTrace) -> int:
@@ -38,6 +38,9 @@ def _required_version(nt: NormalizedTrace) -> int:
     bump would invalidate digests already exported in review-candidate reports for artifacts
     whose content did not change at all.
 
+    * An artifact that carries an interrupt step is stamped 5, whatever its projection: a
+      v5 reader also reads the v4 projection, and an older reader would otherwise fail on
+      the unknown enum value instead of refusing the version by name.
     * An artifact whose derived TREE_PARENT relies on EdgeOrigin priority is stamped 4,
       so older readers (which used temporal-only parent selection) refuse it with an
       explicit "unsupported artifact schema_version 4" rather than failing canonical
@@ -47,6 +50,9 @@ def _required_version(nt: NormalizedTrace) -> int:
     """
     from tracegraph.normalize import requires_origin_priority_projection
 
+    interrupt = StepSource.INTERRUPT
+    if any(step.source is interrupt for step in nt.steps):
+        return 5
     if requires_origin_priority_projection(nt):
         return 4
     task = StepSource.TASK

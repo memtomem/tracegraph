@@ -54,6 +54,17 @@ steps carrying no message, and only the task that actually raised is an ``ERROR`
 Only the *latest* persisted error survives per task id — a fail/fail/succeed sequence leaves
 one record — so attempts are never reconstructed. Errors are recorded wherever they appear;
 this module does not infer anything from their *absence*.
+
+Interrupted tasks
+-----------------
+A node that calls ``interrupt()`` leaves an ``__interrupt__`` pending write on the checkpoint
+that scheduled it, and LangGraph resumes from the thread's newest root checkpoint. A task whose
+*only* write on that checkpoint is ``__interrupt__`` therefore never received a resume or
+produced a result, and becomes an ``UNSET`` step with ``source=INTERRUPT``. That is a statement
+about the recorded history, not a prediction that LangGraph would resume it now. Tasks that were
+scheduled but never started (the recursion limit, a killed process, a static breakpoint) leave no
+write at all and are not reported: telling them apart from finished work needs the compiled
+graph, which this adapter does not have.
 """
 
 from __future__ import annotations
@@ -108,6 +119,11 @@ _CONFIG_FIELDS = {name: TypeAdapter(str) for name in ("thread_id", "checkpoint_n
 # them — so copying them is safer than importing a private module that may move.
 _ERROR = "__error__"
 _ERROR_SOURCE_NODE = "__error_source_node__"
+_INTERRUPT = "__interrupt__"
+_RESUME = "__resume__"
+#: Writes that can sit beside an ``__interrupt__`` without recording whether the task is still
+#: paused. Any other write is a result, and the task is no longer waiting.
+_UNDECIDED_WITH_INTERRUPT = frozenset({_INTERRUPT, _RESUME, _ERROR, _ERROR_SOURCE_NODE})
 _START = "__start__"
 _TASKS = "__pregel_tasks"
 _PULL = "__pregel_pull"
@@ -320,6 +336,11 @@ class LangGraphCheckpointAdapter:
         ingest_warnings = self._derive_task_steps(
             trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
         )
+        ingest_warnings.extend(
+            self._derive_interrupt_steps(
+                trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
+            )
+        )
         if malformed_writes:
             ingest_warnings.append(
                 f"{malformed_writes} pending write(s) are not a (task id, channel, value) "
@@ -436,6 +457,92 @@ class LangGraphCheckpointAdapter:
                     # link is declared, not inferred from timing or namespace membership.
                     origin=EdgeOrigin.CHECKPOINT_PARENT,
                 )
+            )
+        return warnings
+
+    @classmethod
+    def _derive_interrupt_steps(
+        cls,
+        trace_id: str,
+        steps: dict[str, Step],
+        checkpoints: dict[str, dict],
+        key_by_step_id: dict[str, _CheckpointKey],
+        original_seq: dict[str, int],
+        writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]],
+        edges: list[Edge],
+    ) -> list[str]:
+        """Add one UNSET step per task the head checkpoint records as interrupted, never resumed.
+
+        Only the thread's head — the newest root checkpoint, which is what LangGraph itself
+        resumes from — is read. An ``__interrupt__`` write on any earlier checkpoint was resumed,
+        forked past, or abandoned, and is history rather than an open pause.
+
+        A task is reported only when ``__interrupt__`` is its *only* write. Anything else that
+        accompanies it leaves the task's state unrecorded, and it is disclosed rather than
+        guessed: under LangGraph 1.2.2 a resumed task that returned nothing leaves
+        ``{__interrupt__, __resume__}``, exactly like one that reached a second ``interrupt()``
+        (LangGraph overwrites the interrupt in place; 1.2.15 adds ``__no_writes__`` to the
+        first, which then reads as finished); a failure followed by a retry that interrupts leaves the same
+        ``{__error__, __interrupt__}`` as the reverse order, because savers keep no order.
+        """
+        root_ids = [sid for sid, (ns, _) in key_by_step_id.items() if ns == _ROOT_NS]
+        if not root_ids:
+            return []
+        head_id = max(root_ids, key=lambda sid: checkpoints[sid]["id"])
+        head = steps[head_id]
+        cp = checkpoints[head_id]
+        _, cid = key_by_step_id[head_id]
+        warnings: list[str] = []
+        undecided = 0
+        for task_id, task_writes in (writes_by_step.get(head_id) or {}).items():
+            if task_id == _NULL_TASK_ID:
+                continue
+            channels = {channel for channel, _ in task_writes}
+            if _INTERRUPT not in channels:
+                continue
+            if channels != {_INTERRUPT}:
+                if channels <= _UNDECIDED_WITH_INTERRUPT:
+                    undecided += 1
+                continue
+            name = cls._resolve_task_name(cp, _ROOT_NS, original_seq[head_id], task_id, task_writes)
+            if name is None:
+                warnings.append(
+                    f"checkpoint {cid}: interrupted task {task_id} could not be attributed to a "
+                    "node; no candidate reproduced its task id, which is also what a change in "
+                    "LangGraph's task-id algorithm would look like."
+                )
+            derived_id = f"{head_id}#interrupt:{task_id}"
+            if derived_id in steps:
+                raise ValueError(
+                    f"derived interrupt step id {derived_id!r} collides with a checkpoint id "
+                    "or another derived step"
+                )
+            steps[derived_id] = Step(
+                step_id=derived_id,
+                trace_id=trace_id,
+                seq=head.seq + 1,
+                ts=head.ts,
+                kind=StepKind.TOOL if name and _looks_like_tool_node(name) else StepKind.CHAIN,
+                source=StepSource.INTERRUPT,
+                name=name,
+                # The task has no outcome yet. The interrupt's value is whatever the node asked
+                # its caller, which is user content, so it is not carried as a message.
+                status=StepStatus.UNSET,
+            )
+            edges.append(
+                Edge(
+                    type=EdgeType.CAUSED_BY,
+                    src=derived_id,
+                    dst=head_id,
+                    # LangGraph keys the write to the head checkpoint itself.
+                    origin=EdgeOrigin.CHECKPOINT_PARENT,
+                )
+            )
+        if undecided:
+            warnings.append(
+                f"checkpoint {cid}: {undecided} task(s) recorded an interrupt together with a "
+                "resume or an error and no result; the checkpoint does not record whether each "
+                "is still paused, so none is reported as interrupted."
             )
         return warnings
 

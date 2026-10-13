@@ -6,6 +6,31 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Added
+
+- **LangGraph tasks paused by `interrupt()` are reported.** A task whose only write on the
+  thread's newest root checkpoint is `__interrupt__` — it paused and the history holds no
+  resume and no result — becomes an `unset` step with the new source value `interrupt`,
+  linked by `CAUSED_BY` to that checkpoint and named by the same task-id reconstruction as
+  failed tasks. The step describes the recorded history, not whether LangGraph would resume
+  the task now. An interrupt recorded beside a resume or an error and no result is ambiguous
+  in the checkpoint (under LangGraph 1.2.2 a resumed task that wrote nothing looks exactly
+  like one paused twice; 1.2.15 marks it finished), so it is disclosed at ingest instead. Trace `status` is unchanged: a pause is not an error.
+- **Artifact schema version 5**, stamped by content: only an artifact carrying an
+  `interrupt` step declares it, so every other artifact serializes byte for byte as before.
+  0.3.1 and earlier refuse a version 5 artifact by name; this build reads versions 1 to 5,
+  and still rejects an envelope that declares less than its content needs.
+
+### Known limitations
+
+- Tasks scheduled but never started — the recursion limit, a killed process, an
+  `interrupt_before`/`interrupt_after` breakpoint — leave no write and are still not
+  reported. Telling them apart from finished work needs the compiled graph.
+- An interrupt inside a subgraph is reported as the subgraph's node at the root, not as the
+  node inside the subgraph that paused.
+
 ## 0.3.1 - 2026-10-13
 
 ### Fixed
