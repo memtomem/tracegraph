@@ -208,7 +208,8 @@ Phoenix raw export에는 prompt와 output이 포함될 수 있지만 `phoenix di
 read-only `px trace list/get`만 사용하고 Phoenix 데이터를 수정하는 annotate, note,
 delete 명령은 호출하지 않습니다. artifact와 report에는 구조
 식별자, identifier 형태의 step 이름, kind/status/time, token, 명시적 cost, 평가의 name/label/score만
-남습니다. prompt, message, tool 인자/결과, 검색 문서, raw error, 평가 explanation,
+남습니다. 평가 name과 label도 step 이름처럼 identifier 형태일 때만 남기고, 자유 텍스트 label은
+버립니다. name이 identifier 형태가 아닌 평가는 통째로 버립니다. prompt, message, tool 인자/결과, 검색 문서, raw error, 평가 explanation,
 사용자·세션·프로젝트 식별자는 저장하지 않습니다.
 
 Phoenix export는 parent 관계를 제공하지만 원래 OTLP span link는 복원하지 못합니다.

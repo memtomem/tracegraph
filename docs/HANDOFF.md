@@ -2,15 +2,16 @@
 
 ## 현재 전달 상태 — 2026-10-13 (Asia/Seoul)
 
-- **상태:** 로컬 커밋 19개, **미푸시**. 기준 커밋은 `e5d86c1`(PR #27 병합)이다.
-  브랜치 16개가 한 줄로 쌓여 있어 각 브랜치는 바로 앞 브랜치를 base로 한다. PR은 아래 표
-  순서대로 열거나, 최상단 브랜치 `docs/unset-status-by-source` 하나로
-  묶어 열어야 한다.
+- **상태:** [PR #28](https://github.com/memtomem/tracegraph/pull/28)로 착지했다(merge `23e94697`, 2026-10-13). 기준 커밋은 `e5d86c1`(PR #27 병합)이고, 그 위 커밋 19개다.
+  브랜치 16개를 한 줄로 쌓아 최상단 `docs/unset-status-by-source` 하나로 PR을 열었고, merge
+  commit으로 합쳐 아래 표의 커밋이 그대로 남아 있다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
-- **공개 계약:** canonical artifact, 분석 보고서, review 후보의 바이트는 그대로다. 바뀐 출력과
-  호환성 영향은 모두 `CHANGELOG.md`의 Unreleased에 적었다.
+- **공개 계약:** 커밋된 모든 fixture에서 canonical artifact, 분석 보고서, review 후보의 바이트는
+  그대로다. 그 밖의 입력에서는 바뀔 수 있다. 예를 들어 자유 텍스트 annotation이 있는 Phoenix
+  export를 다시 가져오면 artifact 바이트와 digest가 달라진다(D2). 바뀐 출력과 호환성 영향은
+  모두 `CHANGELOG.md`의 `0.3.0 - 2026-10-13`에 적었다.
 
 ### 브랜치와 범위
 
@@ -31,7 +32,7 @@
 | 13 | `ci/upstream-drift` | `613e764` | 최신 langgraph·langgraph-checkpoint·ladybug·px로 주간 실행하는 별도 workflow |
 | 14 | `fix/phoenix-annotation-body-free` | `72770a5` | Phoenix artifact에서 자유 텍스트 annotation name/label 제거(D2) |
 | 15 | `docs/handoff-2026-10-13` | `23b3571` | 이 인계 기록. 코드 변경 없음 |
-| 16 | `docs/unset-status-by-source` | 이 문서의 최종 커밋 | D3 (a): OTLP와 Phoenix의 UNSET 해석 차이를 README·`USAGE_KO.md`·adapter 주석에 기록, 이 문서의 D3 항목 갱신. 동작 변경 없음 |
+| 16 | `docs/unset-status-by-source` | `c89315a` | D3 (a): OTLP와 Phoenix의 UNSET 해석 차이를 README·`USAGE_KO.md`·adapter 주석에 기록, 이 문서의 D3 항목 갱신. 동작 변경 없음 |
 
 ### 검증 증거
 
@@ -52,8 +53,17 @@
 | 회귀 테스트 판별력 | 새 테스트는 수정 전 소스에서 실패, 경계·인과 가드는 하나씩 제거해 해당 테스트가 실패함을 확인 |
 | 리뷰 게이트 | 계획 2라운드, 브랜치마다 diff 1~3라운드. 모든 지적을 반영하거나 아래 후속 항목으로 보류. 브랜치 7·8·9는 SHIP |
 
-골든 하네스는 저장소 밖 임시 스크립트로 돌렸고 커밋하지 않았다. 원격 증거는 **없다**: 원격
-CI, 설치 wheel 검증, Phoenix + SyncMill E2E(특히 CLI 1.18.8 핀)는 push 뒤 확인해야 한다.
+골든 하네스는 저장소 밖 임시 스크립트로 돌렸고 커밋하지 않았다.
+
+원격 증거(PR #28 head `c89315a`와 merge `23e94697`):
+
+- PR·push CI 전체 job 통과: lint(mypy 포함), core, Cypher, perf, 설치 wheel core·Cypher,
+  Phoenix CLI 1.18.8 계약. drift workflow의 최신 업스트림·최신 px job, CLA도 통과.
+- [Phoenix + SyncMill E2E](https://github.com/memtomem/tracegraph/actions/runs/38359701650)
+  attempt 3 통과(Phoenix CLI 1.18.8, server 18.0.0). attempt 1·2는 SyncMill checkout에서
+  `could not read Username`으로 실패했다. 원인은 2026-07-14에 설정한 `SYNCMILL_REPO_TOKEN`의
+  만료였고, 소유자가 갱신한 뒤 통과했다. 이 token은 만료 주기마다 갱신해야 한다.
+- merge `23e94697`의 [tests](https://github.com/memtomem/tracegraph/actions/runs/38377765113) 7개 job 통과.
 
 editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPATH=src`가 필요하다.
 그렇지 않으면 다른 checkout의 소스를 import한다.
@@ -82,8 +92,9 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    protection의 required check 이름 변경 필요), 토큰·비용 집계 범위 축소, adapter
    `from_file`의 크기 제한.
 6. **기존 보류 결정**(아래 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
-7. **0.3.0 릴리스.** push → 원격 CI와 E2E 확인 → CHANGELOG 날짜와 `pyproject.toml` 버전 →
-   `test-v0.3.0` 예행 → `v0.3.0`. 절차는 [릴리스 런북](releasing.md).
+7. **0.3.0 릴리스.** push, 원격 CI, E2E는 끝났다. 준비 커밋(CHANGELOG 날짜, `pyproject.toml`
+   버전)은 브랜치 `release/0.3.0`에 있다. 남은 순서는 병합 → `test-v0.3.0` 예행 → `v0.3.0`이고,
+   절차는 [릴리스 런북](releasing.md)을 따른다.
 
 ---
 

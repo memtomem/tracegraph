@@ -4,7 +4,7 @@
 # the schema `kind` constants and the TRACEGRAPH_* environment variables — those are package
 # identity, not distribution identity, and renaming them would break published contracts.
 name = "agent-tracegraph"
-version = "0.2.0"
+version = "0.3.0"
 description = "Time-travel debugging and causal RCA for LangGraph agent traces, on a causal graph."
 readme = "README.md"
 requires-python = ">=3.12"
