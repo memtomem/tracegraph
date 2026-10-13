@@ -86,7 +86,16 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    `route-success`에서 `syncmill.run` 1건 측정) 문서는 같은 경로끼리 비교하라고 적었다. 같은 실행을 Phoenix로 읽으면
    이 preset이 나오지 않는 것은 그대로이며, 이를 바꾸려면 (b)나 (c)를 다시 열어야 한다.
 2. **반복 `graph.node.parent_id`의 시간 기반 선택.** 리뷰어가 두 번 "timing으로 인과를 정한다"고
-   지적했다. 기존 설계 결정으로 유지했고, 시각 없는 span만 제외했다(브랜치 6).
+   지적했다. 기존 설계 결정으로 유지했고, 시각 없는 span만 제외했다(브랜치 6). 2026-10-13
+   소유자 결정: 실제 루프 trace로 측정하기 전까지 현행 유지. 지금까지 측정한 trace 중 이 분기를
+   탄 것은 없다. 다른 producer나 설정까지 배제하는 근거는 아니다. 커밋된 OTLP fixture 11개의 `graph.node.parent_id` span 42개는 모두
+   후보가 하나였고, SyncMill 계약은 `graph.node.id`를 trace 안에서 유일하게 정한다.
+   저장소 밖 scratch 환경에서 `openinference-instrumentation-langchain` 0.1.79로 LangGraph
+   1.2.15의 agent↔tool 루프와 `Send` fan-out 하나씩을 계측한 trace에는 `graph.node.*` 속성이 아예 없어, 모든 edge가
+   `SPAN_PARENT_FALLBACK`이었다. 다시 열 조건은 node id를 반복해서 내보내는 producer의 실제
+   trace다. 그때의 선택지는 구조 조상 확인, origin 강등, `parentSpanId`로 되돌림이다. origin
+   강등은 새 origin 값을 만들면 artifact 스키마 버전이 필요하고, 기존 값을 재사용하면 그 값의
+   의미와 projection 호환성을 먼저 확인해야 한다.
 3. **부분 커버리지 합계와 거부된 텔레메트리 값.** 토큰·비용 합계는 일부 step만 덮어도 단독
    수치로 표시되고(문서화된 lower bound), bool 토큰 수나 표현 불가 점수는 경고 없이 버려진다.
 4. **LangGraph checkpoint 형태 검증.** 조작된 checkpoint DB에서 `metadata.parents`가 객체가
