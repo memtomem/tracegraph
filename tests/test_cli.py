@@ -24,6 +24,7 @@ from tracegraph.model import (
     Step,
     StepEvidence,
     StepKind,
+    StepSource,
     StepStatus,
     Trace,
 )
@@ -102,6 +103,111 @@ def test_inspect_renders_error_step(artifacts):
     assert res.exit_code == 0, res.output
     assert "call_tool" in res.output
     assert "error" in res.output.lower()
+
+
+def _paused_artifact(tmp_path):
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import interrupt
+
+    from tracegraph.adapters import LangGraphCheckpointAdapter
+
+    def ask(state):
+        interrupt("approve?")
+        return {"x": 1}
+
+    graph = StateGraph(dict)
+    graph.add_node("plan", lambda state: {"x": 0})
+    graph.add_node("approve", ask)
+    graph.add_edge(START, "plan")
+    graph.add_edge("plan", "approve")
+    graph.add_edge("approve", END)
+    with SqliteSaver.from_conn_string(":memory:") as saver:
+        graph.compile(checkpointer=saver).invoke({"x": 0}, {"configurable": {"thread_id": "t"}})
+        nt = normalize(LangGraphCheckpointAdapter(saver).ingest("t"))
+    path = tmp_path / "paused.json"
+    artifact.save(nt, path)
+    return nt, path
+
+
+def _inspect_at_width(monkeypatch, path, width):
+    """Rich wraps at the console width, which otherwise follows the caller's terminal."""
+    from rich.console import Console
+
+    monkeypatch.setattr(cli_mod, "console", Console(width=width))
+    res = runner.invoke(app, ["inspect", str(path)])
+    assert res.exit_code == 0, res.output
+    return res.output
+
+
+def test_inspect_marks_an_interrupted_step_and_counts_it(tmp_path, monkeypatch):
+    _, path = _paused_artifact(tmp_path)
+    out = _inspect_at_width(monkeypatch, path, 200)
+    assert "2: approve  ⏸ interrupted\n" in out
+    assert out.rstrip().endswith("4 steps · 0 tool · 0 error · 0 lossy-projection · 1 interrupted")
+
+    # Narrow terminals wrap and indent; the content must survive that.
+    narrow = " ".join(_inspect_at_width(monkeypatch, path, 40).split())
+    assert "2: approve ⏸ interrupted" in narrow
+    assert "0 lossy-projection · 1 interrupted" in narrow
+
+
+def test_interrupted_label_is_not_styled_as_success(tmp_path):
+    nt, _ = _paused_artifact(tmp_path)
+    [step] = [s for s in nt.steps if s.source is StepSource.INTERRUPT]
+    assert cli_mod._label(step) == "[yellow]2: approve  ⏸ interrupted[/]"
+
+
+def test_interrupted_label_escapes_the_name_and_keeps_the_lossy_suffix():
+    step = Step(
+        step_id="s",
+        trace_id="t",
+        seq=3,
+        name="[bold]plan",
+        source=StepSource.INTERRUPT,
+        status=StepStatus.UNSET,
+        projection_lossy=True,
+    )
+    # "[bold]" is a real Rich tag, so an unescaped name would be restyled and lose its text.
+    assert cli_mod._label(step) == r"[yellow]3: \[bold]plan  ⏸ interrupted[/]  ⚠ lossy-projection"
+
+
+def test_inspect_counts_every_interrupted_task(tmp_path, monkeypatch):
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.types import interrupt
+
+    from tracegraph.adapters import LangGraphCheckpointAdapter
+
+    def asks(name):
+        def body(state):
+            interrupt(name)
+            return {}
+
+        return body
+
+    graph = StateGraph(dict)
+    graph.add_node("a", lambda state: {"x": 0})
+    graph.add_node("x", asks("x"))
+    graph.add_node("y", asks("y"))
+    graph.add_edge(START, "a")
+    graph.add_edge("a", "x")
+    graph.add_edge("a", "y")
+    graph.add_edge("x", END)
+    graph.add_edge("y", END)
+    with SqliteSaver.from_conn_string(":memory:") as saver:
+        graph.compile(checkpointer=saver).invoke({"x": 0}, {"configurable": {"thread_id": "t"}})
+        nt = normalize(LangGraphCheckpointAdapter(saver).ingest("t"))
+    path = tmp_path / "two.json"
+    artifact.save(nt, path)
+    out = _inspect_at_width(monkeypatch, path, 200)
+    assert out.count("⏸ interrupted") == 2
+    assert out.rstrip().endswith("· 2 interrupted")
+
+
+def test_inspect_summary_omits_interrupts_when_there_are_none(artifacts, monkeypatch):
+    a_json, _ = artifacts
+    out = _inspect_at_width(monkeypatch, a_json, 200)
+    assert "interrupted" not in out
+    assert out.rstrip().endswith("lossy-projection")
 
 
 def test_validate_accepts_artifact_files_and_directories(artifacts):

@@ -6,6 +6,14 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Changed
+
+- `inspect` marks a step paused by `interrupt()` as `⏸ interrupted`, in yellow rather than
+  the green used for finished steps, and the summary line gains `· N interrupted` when there
+  is one. The output for every trace without interrupt steps is unchanged.
+
 ## 0.4.0 - 2026-10-14
 
 ### Added

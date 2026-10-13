@@ -36,7 +36,7 @@ from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
 from tracegraph import __version__
 from tracegraph.analysis import default_label, structure_only
-from tracegraph.model import EdgeType, NormalizedTrace, RawTrace, StepStatus
+from tracegraph.model import EdgeType, NormalizedTrace, RawTrace, StepSource, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
 from tracegraph.review_candidates import build_report as build_candidate_report
 from tracegraph.review_candidates import is_review_exportable
@@ -706,6 +706,10 @@ def _label(step) -> str:
     suffix = "  ⚠ lossy-projection" if step.projection_lossy else ""
     if step.status is StepStatus.ERROR:
         return f"[bold red]{step.seq}: {base}  ✗ {escape(step.error_msg or 'error')}[/]{suffix}"
+    if step.source is StepSource.INTERRUPT:
+        # Paused, not finished: green would read as success, which is the misreading the
+        # interrupt step exists to prevent.
+        return f"[yellow]{step.seq}: {base}  ⏸ interrupted[/]{suffix}"
     return f"[green]{step.seq}: {base}[/]{suffix}"
 
 
@@ -745,9 +749,13 @@ def _render_tree(nt: NormalizedTrace) -> None:
     n_err = sum(1 for s in nt.steps if s.status is StepStatus.ERROR)
     n_tool = sum(1 for s in nt.steps if s.kind.value == "TOOL")
     n_lossy = sum(1 for s in nt.steps if s.projection_lossy)
+    n_paused = sum(1 for s in nt.steps if s.source is StepSource.INTERRUPT)
+    # Appended only when present, so the summary of every trace without interrupt steps
+    # stays byte-identical to what earlier releases printed.
+    paused = f" · {n_paused} interrupted" if n_paused else ""
     console.print(
         f"\n[dim]{len(nt.steps)} steps · {n_tool} tool · "
-        f"{n_err} error · {n_lossy} lossy-projection[/]"
+        f"{n_err} error · {n_lossy} lossy-projection{paused}[/]"
     )
 
 
