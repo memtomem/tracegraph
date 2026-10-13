@@ -1,6 +1,6 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-13 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-14 (Asia/Seoul)
 
 - **상태:** [PR #28](https://github.com/memtomem/tracegraph/pull/28)로 착지했다(merge `23e94697`, 2026-10-13). 기준 커밋은 `e5d86c1`(PR #27 병합)이고, 그 위 커밋 19개다.
   브랜치 16개를 한 줄로 쌓아 최상단 `docs/unset-status-by-source` 하나로 PR을 열었고, merge
@@ -13,6 +13,10 @@
   0.3.1로 PyPI에 공개했다(2026-10-13). 준비 커밋은
   [PR #34](https://github.com/memtomem/tracegraph/pull/34)(merge `54ab5e1`, PR #33 포함)이고,
   `test-v0.3.1`과 `v0.3.1`이 모두 이 커밋을 가리킨다. 아래 8번 항목에 검증 결과를 적었다.
+- **미공개 변경:** [PR #36](https://github.com/memtomem/tracegraph/pull/36)(merge `b248954`,
+  2026-10-14)이 `interrupt()`로 멈춘 LangGraph task 보고와 artifact `schema_version` 5를 더했다.
+  아직 릴리스하지 않았다. 0.3.1은 v5 artifact를 읽지 못하므로 다음 릴리스는 0.4.0이 맞다.
+  아래 9번 항목에 범위와 검증 결과를 적었다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
@@ -149,6 +153,28 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
      이미 있었고 약 15초 뒤 재시도에서 설치됐다. simple index 반영 지연이다.
    - [GitHub Release v0.3.1](https://github.com/memtomem/tracegraph/releases/tag/v0.3.1)은
      prerelease로 만들었다.
+9. **P1b — `interrupt()`로 멈춘 task 보고: 범위를 좁혀 착지(PR #36, merge `b248954`, 2026-10-14).**
+   - thread의 가장 최근 root checkpoint에서 pending write가 정확히 `{__interrupt__}`인 task만
+     `unset` step(`source=interrupt`)으로 보고한다. 이 step은 "기록된 이력 안에서 멈춘 채 resume도
+     결과도 없다"는 뜻이며, 지금 LangGraph가 재개할 task라는 주장이 아니다. 다른 그래프로 다시
+     실행한 thread가 checkpoint를 남기지 않고 끝나는 경우를 재현했다.
+   - interrupt가 resume·오류와 함께 기록되고 결과가 없으면 checkpoint만으로는 판정할 수 없어
+     ingest 때 공시만 한다. LangGraph 1.2.2에서는 resume 뒤 아무것도 쓰지 않은 task와 두 번째
+     `interrupt()`에 걸린 task가 같은 write를 남긴다. 1.2.15는 앞의 경우에 `__no_writes__`를 남겨
+     완료로 읽힌다.
+   - 소유자 결정: 새 `StepSource.INTERRUPT`와 내용 기준 artifact v5(D-A), trace status 유지(D-B).
+     다른 artifact의 바이트는 그대로이고, 0.3.1은 v5를 이름으로 거부한다.
+   - 처음 계획은 그래프 없이 trigger 채널로 예약된 task를 추론했는데, 리뷰 2라운드가 같은
+     단위에서 완료된 실행을 미완료로 읽는 경우를 계속 찾았다(직렬화된 barrier, 예약 채널 이름의
+     user state key, 같은 thread의 그래프 교체, 반복 subgraph namespace). 시작하지 않은 task
+     (recursion limit, kill, `interrupt_before`/`after`)는 컴파일된 그래프가 필요해
+     [이슈 #37](https://github.com/memtomem/tracegraph/issues/37)로 남겼다. subgraph 안의 interrupt는
+     root의 subgraph 노드로만 보고한다.
+   - 검증: 테스트 928개(신규 35개, InMemorySaver·SqliteSaver), 의도적 회귀 6개 모두 검출, 커밋된
+     fixture 출력 121개가 `b05d919`와 바이트 단위로 같다. 최신 LangGraph 1.2.15·checkpoint 4.3.0에서도
+     전체 테스트가 통과한다. 리뷰 게이트는 좁힌 계획 2라운드, 구현 2라운드(SHIP, SHIP).
+   - 원래 P1b 계획 파일(`2-tracegraph-transient-bonbon.md`)은 사라져 복구하지 못했다. 다시 세운
+     계획과 재현 스크립트는 저장소 밖 `~/.claude/plans/p1b-pending-tasks.md`, `p1b-probes/`에 있다.
 
 ---
 
@@ -419,7 +445,7 @@ PR #22(native 실패 수집)와 PR #23(license·CLA·PyPI 메타데이터)에 �
 | 우선순위 | 후속 범위 | 설계·수용 기준 |
 | --- | --- | --- |
 | ~~P1~~ (완료) | LangGraph native 예외 관측 | **해결.** `pending_writes.__error__`를 읽어 실패한 task마다 파생 `task` step을 만든다. task id를 checkpoint 데이터에서 재계산해 실패 노드를 지목하므로 이전 정상 checkpoint에 잘못 귀속하지 않는다. 증거가 없으면 이름을 비워 둔다. **중단·재개 구분은 이 범위에 없다**: 미완료 작업(interrupt·recursion limit·crash) 보고는 후속 작업으로 남아 있다. |
-| P1b | 미완료(pending) task 보고 | 최종 checkpoint에 예약되었으나 커밋되지 않은 task를 `unset` step으로 보고. 완료된 실행을 미완료로 표시하지 않는 것이 수용 기준이다(barrier 채널 직렬화, replay 분기, 미확인 trigger 대상 주의). |
+| ~~P1b~~ (일부 완료) | 미완료(pending) task 보고 | **`interrupt()`로 멈춘 task는 해결**(PR #36, 위 9번). 시작하지 않은 task(recursion limit, kill, static breakpoint)는 [이슈 #37](https://github.com/memtomem/tracegraph/issues/37)의 opt-in 컴파일 그래프가 필요하다. 수용 기준은 그대로다: 완료된 실행을 미완료로 표시하지 않는다. |
 | P2 | 관측 범위 구조화 | 외부/누락 링크의 수·사유와 지표별 coverage를 보존한다. 현재 일반 경고는 이미 있으므로 경고 추가만으로 완료 처리하지 않는다. |
 | P3 | 자원 제한 | stdin·px stdout/stderr byte cap 및 batch·매치 계산 예산. `query --limit`의 표시량 제한과 계산량 제한을 구분한다. |
 | P4 | U1 사후 분석 예제 | 정상·state-channel 오류·native 예외·복구/중단·fan-in을 다룬다. 상위 8월 handoff의 "문서·예제만으로 즉시 가능"은 native 예외 감지 공백을 고려해 조정한다. |
