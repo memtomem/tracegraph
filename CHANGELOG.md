@@ -16,8 +16,8 @@ explicitly.
   linked by `CAUSED_BY` to that checkpoint and named by the same task-id reconstruction as
   failed tasks. The step describes the recorded history, not whether LangGraph would resume
   the task now. An interrupt recorded beside a resume or an error and no result is ambiguous
-  in the checkpoint (a resumed task that wrote nothing looks exactly like one paused twice),
-  so it is disclosed at ingest instead. Trace `status` is unchanged: a pause is not an error.
+  in the checkpoint (under LangGraph 1.2.2 a resumed task that wrote nothing looks exactly
+  like one paused twice; 1.2.15 marks it finished), so it is disclosed at ingest instead. Trace `status` is unchanged: a pause is not an error.
 - **Artifact schema version 5**, stamped by content: only an artifact carrying an
   `interrupt` step declares it, so every other artifact serializes byte for byte as before.
   0.3.1 and earlier refuse a version 5 artifact by name; this build reads versions 1 to 5,

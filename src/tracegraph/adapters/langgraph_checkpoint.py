@@ -479,9 +479,10 @@ class LangGraphCheckpointAdapter:
 
         A task is reported only when ``__interrupt__`` is its *only* write. Anything else that
         accompanies it leaves the task's state unrecorded, and it is disclosed rather than
-        guessed: a resumed task that returned nothing leaves ``{__interrupt__, __resume__}``,
-        exactly like one that reached a second ``interrupt()`` (LangGraph overwrites the
-        interrupt in place); a failure followed by a retry that interrupts leaves the same
+        guessed: under LangGraph 1.2.2 a resumed task that returned nothing leaves
+        ``{__interrupt__, __resume__}``, exactly like one that reached a second ``interrupt()``
+        (LangGraph overwrites the interrupt in place; 1.2.15 adds ``__no_writes__`` to the
+        first, which then reads as finished); a failure followed by a retry that interrupts leaves the same
         ``{__error__, __interrupt__}`` as the reverse order, because savers keep no order.
         """
         root_ids = [sid for sid, (ns, _) in key_by_step_id.items() if ns == _ROOT_NS]

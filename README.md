@@ -351,9 +351,9 @@ discloses them instead. A task that called `interrupt()` and whose only write on
 newest root checkpoint is that interrupt becomes an `unset` step with source `interrupt` under
 that checkpoint: the recorded history holds no resume and no result for it. That describes the
 history, not whether LangGraph would resume the task today. An interrupt recorded together with
-a resume or an error and no result is ambiguous in the checkpoint itself — a task resumed with
-nothing to write looks exactly like one paused a second time — so it is disclosed at ingest,
-not reported. An artifact carrying interrupt steps declares artifact `schema_version` 5; one
+a resume or an error and no result is ambiguous in the checkpoint itself — under LangGraph 1.2.2
+a task resumed with nothing to write looks exactly like one paused a second time — so it is
+disclosed at ingest, not reported. An artifact carrying interrupt steps declares artifact `schema_version` 5; one
 whose derived tree relies on EdgeOrigin precedence declares 4; otherwise, an artifact carrying
 derived task steps declares `schema_version` 3, and artifacts without them still serialize as
 version 2, byte for byte.

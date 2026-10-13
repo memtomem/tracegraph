@@ -6,9 +6,11 @@ write is its *only* write on the thread's head checkpoint, because every other c
 ambiguous in the checkpoint itself. The acceptance rule these tests pin: a run that finished,
 was resumed, or was forked past is never reported as paused.
 
-Expectations are checked against what ``invoke`` returned, not against ``get_state``: after a
-node's second ``interrupt()`` LangGraph's own snapshot reports the task as finished while
-``invoke`` hands back the pending interrupt.
+Expectations are checked against what ``invoke`` returned, not against ``get_state``: under
+LangGraph 1.2.2, after a node's second ``interrupt()`` its own snapshot reports the task as
+finished while ``invoke`` hands back the pending interrupt. The drift workflow runs these tests
+against the newest LangGraph too, so a claim that holds for one producer version only is
+asserted from the record the head actually carries.
 """
 
 import json
@@ -152,9 +154,11 @@ def test_only_unresumed_siblings_stay_paused(saver):
     assert _paused(_ingest(saver)) == []
 
 
-def test_resumed_task_without_a_result_is_disclosed_not_reported(saver):
-    """x resumes and returns ``{}``: it leaves only ``__interrupt__`` and ``__resume__``, the
-    same record a second ``interrupt()`` leaves, so its state is unknown and only disclosed."""
+def test_resumed_task_without_a_result_is_never_reported(saver):
+    """x resumes and returns ``{}``. Whether that is recorded depends on the producer:
+    LangGraph 1.2.2 leaves only ``__interrupt__`` and ``__resume__`` (the same record a second
+    ``interrupt()`` leaves, so the state is unknown and only disclosed); 1.2.15 adds
+    ``__no_writes__``, which reads as finished. Either way x is never reported as paused."""
     app = _fan_out(_asks("x", result={}), _asks("y")).compile(checkpointer=saver)
     app.invoke({"log": []}, CONFIG)
     out = app.invoke(Command(resume={_interrupt_ids(app)["x"]: 1}), CONFIG)
@@ -162,7 +166,9 @@ def test_resumed_task_without_a_result_is_disclosed_not_reported(saver):
 
     raw = _ingest(saver)
     assert _paused(raw) == ["y"]
-    assert any("1 task(s) recorded an interrupt" in w and UNDECIDED in w for w in raw.ingest_warnings)
+    finished_marker = any(w[1] == "__no_writes__" for w in saver.get_tuple(CONFIG).pending_writes)
+    disclosed = any("1 task(s) recorded an interrupt" in w and UNDECIDED in w for w in raw.ingest_warnings)
+    assert disclosed is not finished_marker
 
 
 def test_second_interrupt_in_one_node_is_disclosed_not_reported(saver):
