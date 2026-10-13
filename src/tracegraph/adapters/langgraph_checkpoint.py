@@ -62,8 +62,12 @@ from binascii import Error as BinasciiError, unhexlify
 from hashlib import sha1
 import heapq
 import re
-from typing import Any
+from typing import Any, Iterable, Iterator, get_type_hints
 
+from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
+from pydantic import TypeAdapter, ValidationError
+
+from tracegraph.input_validation import object_field
 from tracegraph.model import (
     CausalFidelity,
     Edge,
@@ -81,6 +85,22 @@ _ROOT_NS = ""
 _BRANCH_PREFIX = "branch:to:"
 _JOIN_PREFIX = "join:"
 _TOOL_TOKENS = {"tool", "tools"}
+
+# The shape of every field this adapter reads, taken from the types LangGraph itself declares
+# rather than restated here, so a LangGraph type change surfaces (in the upstream drift
+# workflow) instead of hiding behind a stale copy. Only fields the adapter reads are checked:
+# LangGraph declares ``counters_since_delta_snapshot`` as tuples, but both savers hand it back
+# as lists, so checking everything would reject histories LangGraph itself wrote. ``source``
+# is any string, not LangGraph's Literal, because an unknown source still reads as a loop.
+_CHECKPOINT_FIELDS = {
+    name: TypeAdapter(get_type_hints(Checkpoint)[name])
+    for name in ("id", "ts", "v", "channel_values", "channel_versions", "versions_seen")
+}
+_METADATA_FIELDS = {
+    **{name: TypeAdapter(get_type_hints(CheckpointMetadata)[name]) for name in ("step", "parents")},
+    "source": TypeAdapter(str),
+}
+_CONFIG_FIELDS = {name: TypeAdapter(str) for name in ("thread_id", "checkpoint_ns", "checkpoint_id")}
 
 # LangGraph's reserved pending-write channels and task-path markers, spelled out rather than
 # imported: they live under ``langgraph._internal``, which is private and not a dependency of
@@ -165,18 +185,18 @@ class LangGraphCheckpointAdapter:
                 "this checkpointer does not support listing all threads"
             )
         try:
-            tuples = list(list_fn(None))
+            listing = list_fn(None)
         except NotImplementedError as exc:
-            # Only the documented capability signal becomes "unsupported"; any other
-            # failure (sqlite corruption, I/O error, a saver bug) must propagate, not
-            # masquerade as a missing capability.
+            # Only the documented capability signal becomes "unsupported", and only when the
+            # call itself raises it. The same exception raised while iterating is the
+            # serializer failing to decode a row, which `_decoded` reports as corrupt input.
             raise NotImplementedError(
                 "this checkpointer does not support listing all threads"
             ) from exc
         seen: set[str] = set()
         ordered: list[str] = []
-        for t in tuples:
-            tid = (t.config.get("configurable") or {}).get("thread_id")
+        for t in _decoded(listing):
+            tid = _checked(t)[0]["thread_id"]
             if tid is not None and tid not in seen:
                 seen.add(tid)
                 ordered.append(tid)
@@ -186,8 +206,8 @@ class LangGraphCheckpointAdapter:
         config = {"configurable": {"thread_id": trace_id}}
         tuples = [
             t
-            for t in self._saver.list(config)
-            if (t.config.get("configurable") or {}).get("thread_id") == trace_id
+            for t in _decoded(self._saver.list(config))
+            if _checked(t)[0]["thread_id"] == trace_id
         ]
         if not tuples:
             raise KeyError(f"no checkpoints for thread_id {trace_id!r}")
@@ -199,12 +219,11 @@ class LangGraphCheckpointAdapter:
         original_seq: dict[str, int] = {}
         steps: dict[str, Step] = {}
         writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]] = {}
+        malformed_writes = 0
         for t in tuples:
-            cfg = t.config.get("configurable") or {}
-            cp = t.checkpoint
-            md = t.metadata or {}
+            cfg, cp, md, parent_cfg = _checked(t)
             ns = cfg.get("checkpoint_ns", _ROOT_NS) or _ROOT_NS
-            cid = cfg.get("checkpoint_id") or cp["id"]
+            cid = cp["id"]
             key = (ns, cid)
             if key in step_id_by_key:
                 raise ValueError(f"duplicate checkpoint {cid!r} in namespace {ns!r}")
@@ -216,15 +235,12 @@ class LangGraphCheckpointAdapter:
             step_id_by_key[key] = step_id
             key_by_step_id[step_id] = key
             checkpoints[step_id] = cp
-            try:
-                original_seq[step_id] = int(md.get("step", 0))
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"checkpoint {cid!r} in thread {trace_id!r} has a non-integer "
-                    f"metadata step: {md.get('step')!r}"
-                ) from exc
-            parent_keys[step_id] = self._declared_parent_keys(t, ns)
-            writes_by_step[step_id] = self._writes_by_task(getattr(t, "pending_writes", None))
+            original_seq[step_id] = md.get("step", 0)
+            parent_keys[step_id] = self._declared_parent_keys(parent_cfg, md, ns)
+            writes_by_step[step_id], malformed = self._writes_by_task(
+                getattr(t, "pending_writes", None)
+            )
+            malformed_writes += malformed
             steps[step_id] = Step(
                 step_id=step_id,
                 trace_id=trace_id,
@@ -304,6 +320,11 @@ class LangGraphCheckpointAdapter:
         ingest_warnings = self._derive_task_steps(
             trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
         )
+        if malformed_writes:
+            ingest_warnings.append(
+                f"{malformed_writes} pending write(s) are not a (task id, channel, value) "
+                "triple and were ignored; a task failure recorded in one would not be reported."
+            )
 
         any_error = any(s.status is StepStatus.ERROR for s in steps.values())
         trace = Trace(
@@ -419,23 +440,28 @@ class LangGraphCheckpointAdapter:
         return warnings
 
     @staticmethod
-    def _writes_by_task(pending_writes: Any) -> dict[str, list[tuple[str, Any]]]:
+    def _writes_by_task(pending_writes: Any) -> tuple[dict[str, list[tuple[str, Any]]], int]:
         """Group a checkpoint's pending writes by task id, in first-seen order.
 
         Savers are free to order writes as they like — the SQLite saver sorts by task id and
         index, the in-memory one keeps insertion order — so nothing here may depend on
         position. ``pending_writes`` is also optional on ``CheckpointTuple``; a third-party
-        saver that omits it reads as "no writes", never as an error.
+        saver that omits it reads as "no writes", never as an error. Returns the grouping and
+        how many entries were not a ``(str, str, value)`` triple: those are not ours to
+        interpret, but the caller discloses them because one could have carried a failure.
         """
         grouped: dict[str, list[tuple[str, Any]]] = {}
+        malformed = 0
         for write in pending_writes or ():
-            try:
-                task_id, channel, value = write
-            except (TypeError, ValueError):
-                continue  # not a (task_id, channel, value) triple; not ours to interpret
+            if not isinstance(write, (tuple, list)) or len(write) != 3:
+                malformed += 1
+                continue
+            task_id, channel, value = write
             if isinstance(task_id, str) and isinstance(channel, str):
                 grouped.setdefault(task_id, []).append((channel, value))
-        return grouped
+            else:
+                malformed += 1
+        return grouped, malformed
 
     @staticmethod
     def _hash_task_id(cid: str, legacy: bool, *parts: str) -> str | None:
@@ -593,22 +619,18 @@ class LangGraphCheckpointAdapter:
         return str(value)
 
     @staticmethod
-    def _declared_parent_keys(t: Any, ns: str) -> list[_CheckpointKey]:
-        parent_cfg = (t.parent_config or {}).get("configurable") or {}
+    def _declared_parent_keys(parent_cfg: dict, md: dict, ns: str) -> list[_CheckpointKey]:
         parent_id = parent_cfg.get("checkpoint_id")
         if parent_id is not None:
             parent_ns = parent_cfg.get("checkpoint_ns", ns) or _ROOT_NS
             return [(parent_ns, parent_id)]
 
-        md = t.metadata or {}
+        # `_checked` has already established `parents` as a str -> str mapping.
         parents = md.get("parents") or {}
-        if not isinstance(parents, dict):
-            return []
         closest = LangGraphCheckpointAdapter._closest_parent_ns(ns, parents)
         if closest is None:
             return []
-        checkpoint_id = parents[closest]
-        return [] if checkpoint_id is None else [(closest or _ROOT_NS, checkpoint_id)]
+        return [(closest or _ROOT_NS, parents[closest])]
 
     @staticmethod
     def _closest_parent_ns(ns: str, parents: dict[str, str]) -> str | None:
@@ -809,3 +831,80 @@ class LangGraphCheckpointAdapter:
         if previous:  # error was already present upstream -> not introduced here
             return None
         return str(current)
+
+
+def _decoded(listing: Iterable[Any]) -> Iterator[Any]:
+    """Iterate a saver's listing, turning a failure to decode a row into a usage error.
+
+    Only saver code runs while the next tuple is produced: the serializer reviving a blob,
+    ``json.loads`` on the metadata column, the database driver. Whatever it raises there
+    (an unknown serialization type, JSON nested past the recursion limit, a non-string column)
+    means the history cannot be read, which is a property of the input, not a crash.
+    """
+    iterator = iter(listing)
+    while True:
+        try:
+            item = next(iterator)
+        except StopIteration:
+            return
+        except Exception as exc:
+            raise ValueError(
+                f"checkpoint history cannot be decoded ({type(exc).__name__})"
+            ) from exc
+        yield item
+
+
+def _checked(t: Any) -> tuple[dict, dict, dict, dict]:
+    """The tuple's ``configurable``, checkpoint and metadata, each checked against the shape
+    LangGraph declares for the fields this adapter reads (strictly: ``True`` is not ``1``).
+
+    A field is checked only when present; ``checkpoint.id`` is required, and when the config
+    also names the checkpoint the two must agree, because step identity comes from one and
+    chronology and task hashing from the other.
+    """
+    # A config without a thread id is not "empty": `ingest` filters on the thread id, so it
+    # would silently drop the checkpoint, and with it any failure it recorded.
+    config = getattr(t, "config", None)
+    if not isinstance(config, dict) or not isinstance(config.get("configurable"), dict):
+        raise ValueError("checkpoint config must be an object with a configurable object")
+    cfg = config["configurable"]
+    if "thread_id" not in cfg:
+        raise ValueError("checkpoint config has no thread_id")
+    cp = getattr(t, "checkpoint", None)
+    if not isinstance(cp, dict):
+        raise ValueError("checkpoint must be an object")
+    cid = cp.get("id")
+    label = f"checkpoint {cid!r}" if isinstance(cid, str) else "a checkpoint"
+    if "id" not in cp:
+        raise ValueError(f"{label} has no id")
+    md = object_field(getattr(t, "metadata", None), f"{label} metadata")
+    # No parent config is legitimate (a thread's first checkpoint). One that is present but
+    # names no checkpoint is not: read as "no parent", it would make this checkpoint a root.
+    parent = getattr(t, "parent_config", None)
+    parent_cfg: dict = {}
+    if parent is not None:
+        if not isinstance(parent, dict) or not isinstance(parent.get("configurable"), dict):
+            raise ValueError(f"{label} parent config must be an object with a configurable object")
+        parent_cfg = parent["configurable"]
+        if "checkpoint_id" not in parent_cfg:
+            raise ValueError(f"{label} parent config has no checkpoint_id")
+    for where, fields, values in (
+        ("checkpoint", _CHECKPOINT_FIELDS, cp),
+        ("metadata", _METADATA_FIELDS, md),
+        ("config", _CONFIG_FIELDS, cfg),
+        ("parent config", _CONFIG_FIELDS, parent_cfg),
+    ):
+        for name, adapter in fields.items():
+            if name not in values:
+                continue
+            try:
+                adapter.validate_python(values[name], strict=True)
+            except ValidationError as exc:
+                reason = exc.errors()[0]["msg"]
+                raise ValueError(f"{label} has a malformed {where} {name}: {reason}") from None
+    if "checkpoint_id" in cfg and cfg["checkpoint_id"] != cid:
+        raise ValueError(f"{label} disagrees with its config checkpoint_id")
+    writes = getattr(t, "pending_writes", None)
+    if writes is not None and not isinstance(writes, (list, tuple)):
+        raise ValueError(f"{label} has pending writes that are not a list")
+    return cfg, cp, md, parent_cfg

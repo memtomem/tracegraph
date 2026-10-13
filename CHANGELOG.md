@@ -25,6 +25,23 @@ explicitly.
 - An OTLP `intValue` sent as a fractional JSON number was truncated before validation:
   `1.5` became `1` and `-0.5` became `0`, so an invalid token count looked valid. It is now
   validated as sent.
+- **A checkpoint history LangGraph could not have written is a usage error, not a
+  traceback or a different trace.** About half of 64 one-field mutations of a real history
+  (a non-object `metadata` or `channel_values`, a numeric `checkpoint_ns`, a boolean `v`, an
+  unhashable parent checkpoint id, ...) crashed `ingest` with a traceback, and several were
+  read silently as something else: a malformed parent config or `metadata.parents` dropped
+  the declared parent and made the checkpoint a root, and `metadata.step` of `true` or `1.5`
+  was read as step 1. Each checkpoint is now checked against the types LangGraph declares
+  for the fields tracegraph reads, strictly, and rejected with a message naming the field.
+  A config `checkpoint_id` that disagrees with the checkpoint's own id is rejected too.
+- A checkpoint row the saver cannot decode (an unknown serialization type, metadata nested
+  past the recursion limit, a non-string metadata column) crashed `ingest` and `discover`
+  with a traceback, except that `discover` reported an unknown serialization type as "does
+  not support listing all threads". Both now report the history as undecodable.
+- Pending writes that are not a `(task id, channel, value)` triple were skipped without a
+  word, and any 3-character string was unpacked as one (`"abc"` became task `a`). They are
+  still ignored, but `ingest` now says how many on stderr, since one could have carried a
+  task failure.
 
 ### Compatibility notes for imports
 
@@ -37,6 +54,12 @@ explicitly.
 - The committed Phoenix fixture carries an unreadable `llm.cost.prompt`; reading it now prints
   one stderr disclosure. Every committed fixture's artifact, report, memo, candidate file and
   CLI stdout is unchanged.
+- LangGraph histories that `ingest` used to accept with a malformed field listed above are
+  now refused. Histories written by LangGraph's own savers are unaffected: the checks cover
+  only fields tracegraph reads (`counters_since_delta_snapshot`, which savers return as
+  lists although it is declared as tuples, is not checked), a missing `updated_channels`
+  and a legacy `pending_sends` are accepted, and an unknown `metadata.source` string still
+  reads as a loop. The committed LangGraph fixture is byte-identical.
 
 ## 0.3.0 - 2026-10-13
 

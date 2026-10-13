@@ -106,8 +106,16 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    - 커밋된 fixture 전체의 artifact·보고서·메모·후보·CLI stdout은 `fe6aefb`와 바이트가 같다.
      Phoenix fixture의 `llm.cost.prompt = "SECRET COST TEXT"` 때문에 그 fixture를 읽는 명령의
      stderr에 공시 한 줄이 추가됐다(값은 출력하지 않는다).
-4. **LangGraph checkpoint 형태 검증.** 조작된 checkpoint DB에서 `metadata.parents`가 객체가
-   아니면 선언된 부모를 버려 root가 되고, 다른 형태 4가지는 traceback을 낸다.
+4. **LangGraph checkpoint 형태 검증: 해결(브랜치 `fix/checkpoint-shape-boundary`).**
+   - fuzz(실제 이력에서 필드 하나씩 바꾼 64가지)로 약 30가지 traceback과 조용한 결과 변경
+     (부모 버림→root, `step` `true`/`1.5`→1, 잘못된 쓰기 무시)을 측정했다.
+   - 계획 리뷰 2라운드가 손으로 짠 형태 검사의 빈틈을 4건씩 더 찾아, 소유자 결정으로
+     LangGraph가 선언한 `Checkpoint`/`CheckpointMetadata` 타입을 pydantic strict로 검증하는
+     방식으로 바꿨다. 어댑터가 읽는 필드만 검사한다(`counters_since_delta_snapshot`은 선언은
+     tuple이지만 saver가 list로 돌려주므로 제외). 디코딩 중 예외는 사용 오류로 바꾸고, 잘못된
+     쓰기는 개수를 stderr로 공시한다.
+   - langgraph-checkpoint 4.1.0(하한)과 4.3.0(최신)에서 동작을 확인했고, golden은 `be1930c`와
+     차이 0건이다.
 5. **보류된 계획 항목.** Phoenix 서버 핀 20.21.0(E2E 필요), Python 3.13/3.14 matrix(branch
    protection의 required check 이름 변경 필요), 토큰·비용 집계 범위 축소, adapter
    `from_file`의 크기 제한.
