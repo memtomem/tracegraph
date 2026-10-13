@@ -6,7 +6,7 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.3.0 - 2026-10-13
 
 ### Fixed
 
