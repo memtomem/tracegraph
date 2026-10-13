@@ -5,6 +5,9 @@
 - **상태:** [PR #28](https://github.com/memtomem/tracegraph/pull/28)로 착지했다(merge `23e94697`, 2026-10-13). 기준 커밋은 `e5d86c1`(PR #27 병합)이고, 그 위 커밋 19개다.
   브랜치 16개를 한 줄로 쌓아 최상단 `docs/unset-status-by-source` 하나로 PR을 열었고, merge
   commit으로 합쳐 아래 표의 커밋이 그대로 남아 있다.
+- **릴리스:** `agent-tracegraph` 0.3.0을 PyPI에 공개했다(2026-10-13). 준비 커밋은
+  [PR #29](https://github.com/memtomem/tracegraph/pull/29)(merge `008502d`)이고, `test-v0.3.0`과
+  `v0.3.0`이 모두 이 커밋을 가리킨다. 아래 7번 항목에 검증 결과를 적었다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
@@ -83,7 +86,16 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    `route-success`에서 `syncmill.run` 1건 측정) 문서는 같은 경로끼리 비교하라고 적었다. 같은 실행을 Phoenix로 읽으면
    이 preset이 나오지 않는 것은 그대로이며, 이를 바꾸려면 (b)나 (c)를 다시 열어야 한다.
 2. **반복 `graph.node.parent_id`의 시간 기반 선택.** 리뷰어가 두 번 "timing으로 인과를 정한다"고
-   지적했다. 기존 설계 결정으로 유지했고, 시각 없는 span만 제외했다(브랜치 6).
+   지적했다. 기존 설계 결정으로 유지했고, 시각 없는 span만 제외했다(브랜치 6). 2026-10-13
+   소유자 결정: 실제 루프 trace로 측정하기 전까지 현행 유지. 지금까지 측정한 trace 중 이 분기를
+   탄 것은 없다. 다른 producer나 설정까지 배제하는 근거는 아니다. 커밋된 OTLP fixture 11개의 `graph.node.parent_id` span 42개는 모두
+   후보가 하나였고, SyncMill 계약은 `graph.node.id`를 trace 안에서 유일하게 정한다.
+   저장소 밖 scratch 환경에서 `openinference-instrumentation-langchain` 0.1.79로 LangGraph
+   1.2.15의 agent↔tool 루프와 `Send` fan-out 하나씩을 계측한 trace에는 `graph.node.*` 속성이 아예 없어, 모든 edge가
+   `SPAN_PARENT_FALLBACK`이었다. 다시 열 조건은 node id를 반복해서 내보내는 producer의 실제
+   trace다. 그때의 선택지는 구조 조상 확인, origin 강등, `parentSpanId`로 되돌림이다. origin
+   강등은 새 origin 값을 만들면 artifact 스키마 버전이 필요하고, 기존 값을 재사용하면 그 값의
+   의미와 projection 호환성을 먼저 확인해야 한다.
 3. **부분 커버리지 합계와 거부된 텔레메트리 값.** 토큰·비용 합계는 일부 step만 덮어도 단독
    수치로 표시되고(문서화된 lower bound), bool 토큰 수나 표현 불가 점수는 경고 없이 버려진다.
 4. **LangGraph checkpoint 형태 검증.** 조작된 checkpoint DB에서 `metadata.parents`가 객체가
@@ -92,9 +104,18 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    protection의 required check 이름 변경 필요), 토큰·비용 집계 범위 축소, adapter
    `from_file`의 크기 제한.
 6. **기존 보류 결정**(아래 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
-7. **0.3.0 릴리스.** push, 원격 CI, E2E는 끝났다. 준비 커밋(CHANGELOG 날짜, `pyproject.toml`
-   버전)은 브랜치 `release/0.3.0`에 있다. 남은 순서는 병합 → `test-v0.3.0` 예행 → `v0.3.0`이고,
-   절차는 [릴리스 런북](releasing.md)을 따른다.
+7. **0.3.0 릴리스: 완료(2026-10-13).** [릴리스 런북](releasing.md)의 절차를 따랐고, 마지막의
+   프로젝트 페이지 확인만 아래처럼 브라우저 없이 했다.
+   - TestPyPI 예행: [run 38380512000](https://github.com/memtomem/tracegraph/actions/runs/38380512000).
+     production: [run 38381060049](https://github.com/memtomem/tracegraph/actions/runs/38381060049).
+   - wheel `03fecb59…6348`, sdist `0c56e110…2a56`. TestPyPI 파일, production build, PyPI 파일이
+     바이트 단위로 같고, 두 파일 모두 `release.yml`·`pypi` environment의 publish attestation이 있다.
+   - PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치에서 `scripts/verify_wheel.py` 통과.
+   - [GitHub Release v0.3.0](https://github.com/memtomem/tracegraph/releases/tag/v0.3.0)은
+     prerelease로 만들었다.
+   - 프로젝트 페이지: PyPI JSON의 description이 `v0.3.0`의 `README.md`와 바이트 단위로 같고
+     (`text/markdown`), project URL 4개와 페이지가 HTTP 200을 돌려준다. 렌더링 결과를 눈으로
+     보는 확인은 하지 않았다.
 
 ---
 
