@@ -8,13 +8,17 @@
 - **릴리스:** `agent-tracegraph` 0.3.0을 PyPI에 공개했다(2026-10-13). 준비 커밋은
   [PR #29](https://github.com/memtomem/tracegraph/pull/29)(merge `008502d`)이고, `test-v0.3.0`과
   `v0.3.0`이 모두 이 커밋을 가리킨다. 아래 7번 항목에 검증 결과를 적었다.
+- **0.3.0 이후 착지(미릴리스):** [PR #31](https://github.com/memtomem/tracegraph/pull/31)(merge
+  `be1930c`, 후속 3번)과 [PR #32](https://github.com/memtomem/tracegraph/pull/32)(merge `f325e82`,
+  후속 4번). 둘 다 사용자 출력이 바뀌는 수정이라 `CHANGELOG.md`의 Unreleased에 있고, 다음
+  릴리스(0.3.1)에 들어간다. 두 merge commit의 `tests` run은 통과했다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
 - **공개 계약:** 커밋된 모든 fixture에서 canonical artifact, 분석 보고서, review 후보의 바이트는
   그대로다. 그 밖의 입력에서는 바뀔 수 있다. 예를 들어 자유 텍스트 annotation이 있는 Phoenix
-  export를 다시 가져오면 artifact 바이트와 digest가 달라진다(D2). 바뀐 출력과 호환성 영향은
-  모두 `CHANGELOG.md`의 `0.3.0 - 2026-10-13`에 적었다.
+  export를 다시 가져오면 artifact 바이트와 digest가 달라진다(D2). PR #28의 바뀐 출력과 호환성
+  영향은 `CHANGELOG.md`의 `0.3.0 - 2026-10-13`에, 그 뒤 PR #31·#32의 것은 Unreleased에 있다.
 
 ### 브랜치와 범위
 
@@ -96,7 +100,7 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    trace다. 그때의 선택지는 구조 조상 확인, origin 강등, `parentSpanId`로 되돌림이다. origin
    강등은 새 origin 값을 만들면 artifact 스키마 버전이 필요하고, 기존 값을 재사용하면 그 값의
    의미와 projection 호환성을 먼저 확인해야 한다.
-3. **부분 커버리지 합계와 거부된 텔레메트리 값: 해결(브랜치 `fix/unreadable-telemetry`).**
+3. **부분 커버리지 합계와 거부된 텔레메트리 값: 해결(PR #31, merge `be1930c`).**
    - 부분 합계는 이미 공시되고 있었다. 토큰·비용 합계가 하나라도 있으면 보고서에 "coverage
      may be partial" 경고가 붙고, delta는 모든 step이 값을 보고할 때만 낸다. 바꾸지 않았다.
    - 버려지던 값은 실제 버그였다. importer가 읽을 수 없는 `llm.cost.total`을 버려서 보고서가
@@ -106,7 +110,7 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    - 커밋된 fixture 전체의 artifact·보고서·메모·후보·CLI stdout은 `fe6aefb`와 바이트가 같다.
      Phoenix fixture의 `llm.cost.prompt = "SECRET COST TEXT"` 때문에 그 fixture를 읽는 명령의
      stderr에 공시 한 줄이 추가됐다(값은 출력하지 않는다).
-4. **LangGraph checkpoint 형태 검증: 해결(브랜치 `fix/checkpoint-shape-boundary`).**
+4. **LangGraph checkpoint 형태 검증: 해결(PR #32, merge `f325e82`).**
    - fuzz(실제 이력에서 필드 하나씩 바꾼 64가지)로 약 30가지 traceback과 조용한 결과 변경
      (부모 버림→root, `step` `true`/`1.5`→1, 잘못된 쓰기 무시)을 측정했다.
    - 계획 리뷰 2라운드가 손으로 짠 형태 검사의 빈틈을 4건씩 더 찾아, 소유자 결정으로
