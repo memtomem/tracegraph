@@ -107,3 +107,27 @@ def test_phoenix_naive_timestamp_normalizes_to_utc_across_timezones(monkeypatch)
             os.environ.pop("TZ", None)
         if hasattr(time, "tzset"):
             time.tzset()
+
+
+def test_phoenix_artifact_drops_free_text_annotations():
+    # The Phoenix import promises a body-free artifact. Span names were already filtered to
+    # identifier-shaped text; annotation names and labels were only whitespace-collapsed and
+    # truncated, so a label like "user said: my password is hunter2" reached the artifact.
+    from tracegraph import artifact
+    from tracegraph.normalize import normalize
+
+    doc = {"traceId": "t", "spans": [{
+        "context": {"trace_id": "t", "span_id": "s"}, "name": "agent", "status_code": "OK",
+        "annotations": [
+            {"name": "Customer Alice Smith complained", "result": {"label": "fail", "score": 0.1}},
+            {"name": "correctness", "result": {"label": "user said: my password is hunter2", "score": 0.2}},
+            {"name": "helpfulness", "result": {"label": "pass", "score": 0.9}},
+        ],
+    }]}
+    nt = normalize(PhoenixExportAdapter(doc).ingest("t"))
+    text = artifact.dumps(nt)
+    assert "Alice" not in text and "hunter2" not in text
+    evaluations = [(e.name, e.label, e.score) for e in nt.steps[0].evidence.evaluations]
+    # A free-text name drops the whole evaluation (the name is its identity); a free-text
+    # label drops only the label and keeps the score.
+    assert evaluations == [("correctness", None, 0.2), ("helpfulness", "pass", 0.9)]

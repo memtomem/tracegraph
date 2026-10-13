@@ -30,12 +30,13 @@ from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
 from tracegraph.analysis import Match
+from tracegraph.analysis.patterns import match_for
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
 from tracegraph.analysis import search as pattern_search
 from tracegraph import __version__
-from tracegraph.analysis import structure_only
-from tracegraph.model import EdgeType, NormalizedTrace, StepStatus
+from tracegraph.analysis import default_label, structure_only
+from tracegraph.model import EdgeType, NormalizedTrace, RawTrace, StepStatus
 from tracegraph.normalize import normalize, validate_normalized
 from tracegraph.review_candidates import build_report as build_candidate_report
 from tracegraph.review_candidates import is_review_exportable
@@ -136,6 +137,10 @@ class _PxError(RuntimeError):
 _LOAD_ERRORS = (OSError, ValueError)
 
 
+def _load_error(path: Path | str, exc: Exception) -> typer.BadParameter:
+    return typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}")
+
+
 def _load_reason(exc: Exception) -> str:
     """A short, single-line reason for a load failure — no traceback, no stack."""
     if isinstance(exc, FileNotFoundError):
@@ -225,7 +230,7 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
                         f"Found: {', '.join(ids) or 'none'}"
                     )
                 selected = ids[0]
-            nt = normalize(adapter.ingest(selected))
+            nt = _normalize_read(adapter.ingest(selected))
         validate_normalized(nt)
         return nt
     except (*_LOAD_ERRORS, KeyError) as exc:
@@ -256,15 +261,19 @@ def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECON
     return result.stdout
 
 
+def _px_floor() -> str:
+    return ".".join(map(str, _PX_MIN_VERSION))
+
+
 def _px_version() -> str:
     text = _px_run(["px", "--version"], action="px version check", timeout=10).strip()
     match = _PX_VERSION_RE.search(text)
     if match is None:
-        raise _PxError("could not determine the Phoenix CLI version; install px >= 1.0.4")
+        raise _PxError(f"could not determine the Phoenix CLI version; install px >= {_px_floor()}")
     parsed = tuple(int(part) for part in match.groups())
     if parsed < _PX_MIN_VERSION:
         raise _PxError(
-            f"Phoenix CLI {match.group(0)} is too old; install px >= 1.0.4 with "
+            f"Phoenix CLI {match.group(0)} is too old; install px >= {_px_floor()} with "
             "`npm install -g @arizeai/phoenix-cli@latest`"
         )
     return match.group(0)
@@ -282,12 +291,28 @@ def _px_project_args(project: str | None) -> list[str]:
     return ["--project", project] if project else []
 
 
+def _px_read_command(*args: str, project: str | None = None) -> list[str]:
+    """A read-only ``px`` command that prints machine-readable JSON and no progress UI."""
+    return ["px", *args, "--format", "raw", "--no-progress", *_px_project_args(project)]
+
+
+def _normalize_read(raw: RawTrace) -> NormalizedTrace:
+    """Normalize adapter output, printing its read disclosures to stderr first.
+
+    They describe evidence this read could not interpret, not the run, so they belong next to
+    the command that read it rather than in the artifact, which records the run itself.
+    """
+    for warning in raw.ingest_warnings:
+        err_console.print(f"[yellow]warning:[/] {escape(warning)}")
+    return normalize(raw)
+
+
 def _px_normalize(payload: Any, trace_id: str) -> NormalizedTrace:
     try:
         from tracegraph.adapters import PhoenixExportAdapter
 
         adapter = PhoenixExportAdapter(payload)
-        nt = normalize(adapter.ingest(trace_id))
+        nt = _normalize_read(adapter.ingest(trace_id))
         validate_normalized(nt)
         return nt
     except (ValueError, KeyError) as exc:
@@ -298,35 +323,16 @@ def _px_normalize(payload: Any, trace_id: str) -> NormalizedTrace:
 
 def _px_trace(trace_id: str, *, project: str | None = None) -> NormalizedTrace:
     """Read one annotated trace through ``px`` without persisting its raw body."""
-    command = [
-        "px",
-        "trace",
-        "get",
-        trace_id,
-        "--include-annotations",
-        "--format",
-        "raw",
-        "--no-progress",
-        *_px_project_args(project),
-    ]
+    command = _px_read_command("trace", "get", trace_id, "--include-annotations", project=project)
     payload = _px_json(command, action="px trace get")
     return _px_normalize(payload, trace_id)
 
 
 def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bool, int]:
     """Select the newest error, or the newest trace when the scan contains no error."""
-    command = [
-        "px",
-        "trace",
-        "list",
-        "--limit",
-        str(_PX_SCAN_LIMIT),
-        "--include-annotations",
-        "--format",
-        "raw",
-        "--no-progress",
-        *_px_project_args(project),
-    ]
+    command = _px_read_command(
+        "trace", "list", "--limit", str(_PX_SCAN_LIMIT), "--include-annotations", project=project
+    )
     payload = _px_json(command, action="px trace list")
     if not isinstance(payload, list):
         raise _PxError("px trace list returned an unsupported response; expected a JSON array")
@@ -345,7 +351,8 @@ def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bo
 
     statuses: list[str] = []
     for trace in payload:
-        # px 1.8.1's buildTrace() derives this aggregate from child span statuses. The
+        # px derives this aggregate from child span statuses (scripts/
+        # verify_phoenix_cli_contract.py checks that against the pinned version). The
         # report below independently normalizes those spans, so selection and diagnosis
         # deliberately remain separate checks rather than treating the aggregate as evidence.
         status = trace.get("status")
@@ -398,9 +405,9 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
 
     console.print("\n[bold]Repeated behavior[/]")
     if report.patterns:
-        for finding in report.patterns:
-            labels = " → ".join(escape(label or "(unnamed)") for label in finding.labels)
-            console.print(f"  • {finding.pattern_id}@v{finding.pattern_version}: {labels}")
+        for pattern in report.patterns:
+            labels = " → ".join(escape(label or "(unnamed)") for label in pattern.labels)
+            console.print(f"  • {pattern.pattern_id}@v{pattern.pattern_version}: {labels}")
     else:
         console.print("  [dim]No high-signal failure pattern found.[/]")
 
@@ -505,7 +512,7 @@ def _load(path: Path) -> NormalizedTrace:
     try:
         return _load_validated(path)
     except _LOAD_ERRORS as exc:
-        raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
+        raise _load_error(path, exc) from exc
 
 
 def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
@@ -564,9 +571,7 @@ def _load_many_evidence(
                 # Flush what we've already skipped before aborting, so strays discovered
                 # earlier in the argument list aren't silently dropped by the fatal error.
                 _warn_skipped(skipped)
-                raise typer.BadParameter(
-                    f"cannot load artifact {f}: {_load_reason(exc)}"
-                ) from exc
+                raise _load_error(f, exc) from exc
             continue
         try:
             loaded.append(_load_artifact_evidence(f))
@@ -620,11 +625,19 @@ def _store_from_artifact(path: Path, backend: QueryBackend) -> Any:
         nt = artifact.loads(_read_artifact_bytes(path).decode("utf-8"))
         return cls.from_trace(nt)
     except _LOAD_ERRORS as exc:
-        raise typer.BadParameter(f"cannot load artifact {path}: {_load_reason(exc)}") from exc
+        raise _load_error(path, exc) from exc
 
 
 def _store_from_trace(nt: NormalizedTrace, backend: QueryBackend) -> Any:
-    return _store_cls(backend).from_trace(nt)
+    cls = _store_cls(backend)
+    try:
+        return cls.from_trace(nt)
+    except _LOAD_ERRORS as exc:
+        # A trace another backend accepts can still exceed this one (e.g. INT64 seq).
+        raise typer.BadParameter(
+            f"cannot load trace {nt.trace.trace_id} into the {backend.value} backend: "
+            f"{_load_reason(exc)}"
+        ) from exc
 
 
 def _close_store(store: Any) -> None:
@@ -669,10 +682,7 @@ def _search_with_backend(
         try:
             steps = nt.steps_by_id()
             for path in store.find_matches(pattern):
-                labels = [steps[i].name or steps[i].kind.value for i in path]
-                matches.append(
-                    Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels)
-                )
+                matches.append(match_for(nt.trace.trace_id, steps, path))
             fell_back = fell_back or getattr(store, "fell_back_to_python", False)
         finally:
             _close_store(store)
@@ -754,17 +764,11 @@ def ingest(
     target = out or artifact.default_path(thread)
     _distinct_paths([sqlite], [target])
     try:
-        raw = ingest_snapshot(sqlite, thread, error_channel=error_channel)
-        for warning in raw.ingest_warnings:
-            # Disclosures about the *read*, not the run: they describe evidence this ingest
-            # could not interpret, so they belong on stderr next to the command that read it
-            # rather than in the artifact, which records the run itself.
-            err_console.print(f"[yellow]warning:[/] {escape(warning)}")
-        nt = normalize(raw)
+        nt = _normalize_read(ingest_snapshot(sqlite, thread, error_channel=error_channel))
         _save_ingested(nt, target, explicit=out is not None)
     except (OSError, ValueError, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc
-    console.print(f"[green]ingested {len(nt.steps)} steps[/] → {target}")
+    console.print(f"[green]ingested {len(nt.steps)} steps[/] → {escape(str(target))}")
 
 
 @app.command(name="ingest-otlp")
@@ -788,13 +792,13 @@ def ingest_otlp(
                     f"file holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
                 )
             trace = ids[0]
-        nt = normalize(adapter.ingest(trace))
+        nt = _normalize_read(adapter.ingest(trace))
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest OTLP export {file}: {_load_reason(exc)}") from exc
     target = out or artifact.default_path(trace)
     _distinct_paths([file], [target])
     _save_ingested(nt, target, explicit=out is not None)
-    console.print(f"[green]ingested {len(nt.steps)} spans[/] → {target}")
+    console.print(f"[green]ingested {len(nt.steps)} spans[/] → {escape(str(target))}")
 
 
 @app.command(name="ingest-phoenix")
@@ -810,7 +814,7 @@ def ingest_phoenix(
     target = out or artifact.default_path(nt.trace.trace_id)
     _distinct_paths([Path(file)] if file != "-" else [], [target])
     _save_ingested(nt, target, explicit=out is not None)
-    console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {target}")
+    console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {escape(str(target))}")
 
 
 @app.command(name="analyze")
@@ -832,7 +836,7 @@ def analyze_command(
     _render_analysis(report, limit=limit)
     if json_out:
         _save_report(report, json_out)
-        console.print(f"\n[green]report[/] → {json_out}")
+        console.print(f"\n[green]report[/] → {escape(str(json_out))}")
 
 
 @phoenix_app.command(name="diagnose")
@@ -873,10 +877,10 @@ def phoenix_diagnose(
     _render_analysis(report, limit=limit)
     if save_artifact:
         _save_artifact(nt, save_artifact)
-        console.print(f"\n[green]artifact[/] → {save_artifact}")
+        console.print(f"\n[green]artifact[/] → {escape(str(save_artifact))}")
     if json_out:
         _save_report(report, json_out)
-        console.print(f"[green]report[/] → {json_out}")
+        console.print(f"[green]report[/] → {escape(str(json_out))}")
 
 
 @phoenix_app.command(name="doctor")
@@ -887,32 +891,12 @@ def phoenix_doctor(
     try:
         version = _px_version()
         projects = _px_json(
-            [
-                "px",
-                "project",
-                "list",
-                "--limit",
-                "1",
-                "--format",
-                "raw",
-                "--no-progress",
-            ],
-            action="px project list",
+            _px_read_command("project", "list", "--limit", "1"), action="px project list"
         )
         if not isinstance(projects, list):
             raise _PxError("px project list returned an unsupported response; expected a JSON array")
         traces = _px_json(
-            [
-                "px",
-                "trace",
-                "list",
-                "--limit",
-                "1",
-                "--format",
-                "raw",
-                "--no-progress",
-                *_px_project_args(project),
-            ],
+            _px_read_command("trace", "list", "--limit", "1", project=project),
             action="px trace list",
         )
         if not isinstance(traces, list):
@@ -960,7 +944,7 @@ def validate(
             # _load already narrowed to load-shaped failures (_LOAD_ERRORS); anything else
             # is a real tracegraph bug and must propagate, not print as "INVALID".
             failures += 1
-            console.print(f"[bold red]INVALID[/] {path}: {exc}")
+            console.print(f"[bold red]INVALID[/] {escape(str(path))}: {escape(str(exc))}")
             continue
         console.print(
             f"[green]OK[/] {escape(str(path))}  [dim]{escape(nt.trace.trace_id)} · {len(nt.steps)} steps[/]"
@@ -1010,7 +994,7 @@ def explain(
         console.print("[dim]no causes (this is a root step)[/]")
     for s in result.chain:
         flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
-        console.print(f"  ← {escape(s.name or s.source.value)} (step {s.seq}){flag}")
+        console.print(f"  ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
     if result.is_lossy:
         console.print(
             "\n[yellow]Some steps had multiple real causes; the single-parent tree view "
@@ -1030,14 +1014,18 @@ def diff(
     """
     nt_a, nt_b = _load(a), _load(b)
     console.print(f"[dim]Derived TREE_PARENT comparison; lossy steps: A={sum(s.projection_lossy for s in nt_a.steps)}, B={sum(s.projection_lossy for s in nt_b.steps)}[/]")
-    label = structure_only if structure else None
-    result = tree_diff(nt_a, nt_b, label) if label else tree_diff(nt_a, nt_b)
+    # --structure ignores names when comparing but still prints them, so the reported
+    # subtrees can be found in the runs.
+    if structure:
+        result = tree_diff(nt_a, nt_b, structure_only, display_label=default_label)
+    else:
+        result = tree_diff(nt_a, nt_b)
     if result.identical:
         console.print("[green]IDENTICAL[/] — the two runs are structurally isomorphic.")
         raise typer.Exit(0)
     console.print("[bold yellow]NOT IDENTICAL[/]")
     for line in result.changes:
-        console.print(f"  • {line}")
+        console.print(f"  • {escape(line)}")
     console.print("[dim](divergence localization is heuristic; the identical/not verdict is exact)[/]")
     raise typer.Exit(1)
 
@@ -1133,9 +1121,8 @@ def query(
                     console.print("    [dim]← (no causes — matched effect is a root step)[/]")
                 for s in result.chain:
                     flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
-                    # Fallback label matches `tracegraph explain` (s.name or s.source.value)
-                    # so the two renderings agree for nameless LangGraph checkpoints.
-                    console.print(f"    ← {escape(s.name or s.source.value)} (step {s.seq}){flag}")
+                    # Same fallback label as `tracegraph explain` and the tree renderers.
+                    console.print(f"    ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
                 # Causal-honesty signal: when the matched effect (or anything in the chain)
                 # has more than one real cause, the single-parent tree projection dropped
                 # at least one. `tracegraph explain` surfaces this same warning — `query
@@ -1190,7 +1177,7 @@ def export_review_candidates(
         raise typer.BadParameter(f"cannot export review candidates: {exc}") from exc
     console.print(
         f"[green]exported {len(report.candidates)} review candidate(s)[/] "
-        f"from {len(matches)} match(es) → {out}"
+        f"from {len(matches)} match(es) → {escape(str(out))}"
     )
 
 
@@ -1204,7 +1191,7 @@ def export_incident_memo(
     try:
         loaded = _load_artifact_evidence(artifact_path)
     except _LOAD_ERRORS as exc:
-        raise typer.BadParameter(f"cannot load artifact {artifact_path}: {_load_reason(exc)}") from exc
+        raise _load_error(artifact_path, exc) from exc
     from tracegraph.analysis.memo import build_incident_memo, save_incident_memo
 
     memo_content = build_incident_memo(loaded.trace, loaded.digest)
@@ -1212,7 +1199,7 @@ def export_incident_memo(
         save_incident_memo(memo_content, out)
     except OSError as exc:
         raise typer.BadParameter(f"cannot save incident memo: {_load_reason(exc)}") from exc
-    console.print(f"[green]exported incident memo[/] → {out}")
+    console.print(f"[green]exported incident memo[/] → {escape(str(out))}")
 
 
 def main() -> None:
@@ -1246,7 +1233,7 @@ def _save_artifact(nt: NormalizedTrace, target: Path) -> None:
     """Write an artifact to an explicit destination, with the same clean-error contract."""
     try:
         artifact.save_atomic(nt, target)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"cannot save artifact: {_load_reason(exc)}") from exc
 
 
@@ -1255,7 +1242,7 @@ def _save_ingested(nt: NormalizedTrace, target: Path, *, explicit: bool) -> None
         artifact.save_atomic(nt, target, replace=explicit)
     except FileExistsError as exc:
         raise typer.BadParameter("default output exists; pass --out to explicitly replace a file") from exc
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"cannot save artifact: {_load_reason(exc)}") from exc
 
 

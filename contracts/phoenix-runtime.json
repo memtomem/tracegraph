@@ -1,5 +1,5 @@
 {
-  "phoenix_cli": "1.8.1",
+  "phoenix_cli": "1.18.8",
   "phoenix_server": {
     "image": "arizephoenix/phoenix",
     "version": "18.0.0",

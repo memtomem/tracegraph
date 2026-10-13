@@ -1364,3 +1364,106 @@ def test_no_args_still_shows_help():
     result = runner.invoke(app, [])
     assert result.exit_code != 0
     assert "Usage:" in result.stdout
+
+
+# --- render paths that print producer text: diff, validate, explain labels ---------------
+
+
+def _named_chain(path, trace_id, *names):
+    steps = [Step(step_id=f"{trace_id}{i}", trace_id=trace_id, seq=i, name=n) for i, n in enumerate(names)]
+    edges = [Edge(type=EdgeType.CAUSED_BY, src=f"{trace_id}{i}", dst=f"{trace_id}{i - 1}") for i in range(1, len(names))]
+    artifact.save_atomic(
+        normalize(RawTrace(trace=Trace(trace_id=trace_id, source_kind="x"), steps=steps, causal_edges=edges)), path
+    )
+    return path
+
+
+def test_diff_prints_bracketed_names_literally(tmp_path):
+    a = _named_chain(tmp_path / "a.json", "A", "root", "tool[bold]", "end")
+    b = _named_chain(tmp_path / "b.json", "B", "root", "x[/]", "end")
+    result = runner.invoke(app, ["diff", str(a), str(b)])
+    assert result.exit_code == 1
+    assert "A='tool[bold]' B='x[/]'" in result.output
+
+
+def test_validate_prints_bracketed_error_text_literally(tmp_path):
+    path = _named_chain(tmp_path / "bad.json", "V", "a", "b")
+    doc = json.loads(path.read_text())
+    edge = next(e for e in doc["trace"]["edges"] if e["type"] == "CAUSED_BY")
+    edge["src"] = "ghost[red]X[/red]"
+    path.write_text(json.dumps(doc))
+    result = runner.invoke(app, ["validate", str(path)])
+    assert result.exit_code == 1
+    assert "ghost[red]X[/red]" in result.output
+
+
+def test_nameless_steps_are_labeled_by_kind_in_explain_and_query(tmp_path):
+    # `source` is LangGraph checkpoint metadata (loop/input/update), not what the step is;
+    # every other renderer labels a nameless step by its kind.
+    steps = [
+        Step(step_id="n0", trace_id="N", seq=0, kind=StepKind.CHAIN),
+        Step(step_id="n1", trace_id="N", seq=1, kind=StepKind.TOOL, status=StepStatus.ERROR),
+    ]
+    nt = normalize(RawTrace(trace=Trace(trace_id="N", source_kind="x"), steps=steps,
+                            causal_edges=[Edge(type=EdgeType.CAUSED_BY, src="n1", dst="n0")]))
+    path = tmp_path / "n.json"
+    artifact.save_atomic(nt, path)
+    explained = runner.invoke(app, ["explain", str(path), "n1"])
+    queried = runner.invoke(app, ["query", "tool-failure", str(path), "--explain"])
+    for result in (explained, queried):
+        assert "← CHAIN (step 0)" in result.output, result.output
+        assert "← loop" not in result.output
+
+
+def test_px_floor_message_follows_the_floor_constant(monkeypatch):
+    monkeypatch.setattr(cli_mod, "_PX_MIN_VERSION", (9, 9, 9))
+    monkeypatch.setattr(cli_mod, "_px_run", lambda *a, **k: "1.8.1\n")
+    with pytest.raises(cli_mod._PxError, match=r"px >= 9\.9\.9"):
+        cli_mod._px_version()
+
+
+@pytest.mark.parametrize("name", ["memo[bold].md", "memo[/].md"])
+def test_output_paths_are_printed_literally(tmp_path, name):
+    # A path is operator text, not markup: `[/]` used to raise MarkupError *after* the file
+    # was written, so the command reported failure for work it had done.
+    source = _named_chain(tmp_path / "a.json", "P", "root", "leaf")
+    out = tmp_path / name
+    results = [
+        runner.invoke(app, ["export-incident-memo", str(source), "--out", str(out)]),
+        runner.invoke(app, ["analyze", str(source), "--json-out", str(tmp_path / ("r" + name))]),
+        runner.invoke(app, ["export-review-candidates", "tool-failure", str(source), "--out", str(tmp_path / ("c" + name))]),
+    ]
+    for result in results:
+        assert result.exit_code == 0, result.output
+        assert name in result.output.replace("\n", "")
+
+
+def test_px_read_commands_are_exact(monkeypatch):
+    # The argv tracegraph hands to px is part of the read-only contract with that CLI;
+    # pin it exactly rather than by substring.
+    seen = []
+
+    def failing_json(command, *, action):
+        seen.append(command)
+        raise cli_mod._PxError("stop")
+
+    monkeypatch.setattr(cli_mod, "_px_json", failing_json)
+    for call in (lambda: cli_mod._px_trace("abc", project="proj"),
+                 lambda: cli_mod._px_latest_trace(project=None)):
+        with pytest.raises(cli_mod._PxError):
+            call()
+
+    def empty_json(command, *, action):
+        seen.append(command)
+        return []
+
+    monkeypatch.setattr(cli_mod, "_px_json", empty_json)
+    monkeypatch.setattr(cli_mod, "_px_version", lambda: "1.8.1")
+    result = runner.invoke(app, ["phoenix", "doctor", "--project", "proj"])
+    assert result.exit_code == 0, result.output
+    assert seen == [
+        ["px", "trace", "get", "abc", "--include-annotations", "--format", "raw", "--no-progress", "--project", "proj"],
+        ["px", "trace", "list", "--limit", "20", "--include-annotations", "--format", "raw", "--no-progress"],
+        ["px", "project", "list", "--limit", "1", "--format", "raw", "--no-progress"],
+        ["px", "trace", "list", "--limit", "1", "--format", "raw", "--no-progress", "--project", "proj"],
+    ]

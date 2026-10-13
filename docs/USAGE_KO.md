@@ -215,6 +215,16 @@ Phoenix export는 parent 관계를 제공하지만 원래 OTLP span link는 복�
 따라서 결과에 `parent_only`가 표시되며, 이는 “fan-in이 없다”가 아니라 “추가 원인이
 export에서 유실됐을 수 있다”는 뜻입니다.
 
+status가 UNSET이고 exception event가 없는 span도 경로마다 다르게 읽습니다(message나 type이
+있는 exception event가 붙으면 두 경로 모두 `error`). `ingest-otlp`는 이를 `ok`로
+기록합니다. UNSET은 OpenTelemetry의 기본 status이고 SyncMill도 성공 span을 UNSET으로 남기기
+때문입니다. Phoenix 경로는 `unset`을 그대로 둡니다. trace status는 같지만 step status는
+표시되는 곳마다 다르고, `ok` step을 요구하는 preset은 `unset` step에 맞지 않습니다. 그래서
+UNSET으로 남은 agent 시도가 실패한 `gate:` tool의 직접 원인인 SyncMill 실행은
+`ingest-otlp`에서는 `gate-failure-after-success`로 보고되고 Phoenix에서는 보고되지 않습니다.
+baseline은 같은 경로로 읽은 실행과 비교하십시오. 섞으면 경로 때문에만 status가 다른 step이
+behavior change(`ok`→`unset` 또는 그 반대)로 보고될 수 있습니다.
+
 Phoenix에서 직접 내려받은 JSON도 사용할 수 있습니다.
 
 ```bash
@@ -268,6 +278,30 @@ uv run tracegraph explain --backend ladybug A.json <step_id>
 
 중요한 점은 JSON artifact가 항상 원본이라는 것입니다. LadybugDB DB는 다시 만들 수 있는
 캐시/가속기이고, 분석 의미는 기본 백엔드와 같아야 합니다.
+
+## 리뷰 후보·인시던트 메모 내보내기
+
+두 명령 모두 artifact를 읽기만 하고, 원본 대신 정해진 필드만 담은 파일을 새로 씁니다.
+
+```bash
+# 거버넌스 검토 후보 (일치하는 경우가 없어도 정상 보고서입니다)
+uv run tracegraph export-review-candidates tool-retry-failure traces/ -o candidates.json
+
+# 장기 기억 저장소용 인시던트 사후 분석 메모 (Markdown)
+uv run tracegraph export-incident-memo A.json -o incident.md
+```
+
+`export-review-candidates`는 후보마다 `run_id`, `pattern_id`, `pattern_version`,
+`tool_key`, `artifact_digest` 다섯 필드만 씁니다. `run_id`가 없거나 도구 이름이
+`server::tool` 형태가 아닌 artifact가 하나라도 일치하면 전체를 실패시키고 기존 출력
+파일을 건드리지 않습니다.
+
+`export-incident-memo`는 `safe-v1` 보고서보다 더 좁습니다. step 이름, 오류 메시지,
+평가 label을 쓰지 않고, step은 `step_<번호>_<종류>` 별칭으로, run id는 잘린 SHA-256
+`run_digest`로만 나타냅니다. 나머지는 trace 상태, causal fidelity, step·오류 수, 프리셋
+패턴 id와 버전, edge origin, fidelity 공시 같은 구조 메타데이터입니다. 포함 관계만 보여 주는 edge나 출처를 모르는 edge는
+"caused by"가 아니라 "preceded by"로 적습니다. 메모에는 입력 artifact 파일 바이트의
+SHA-256이 함께 기록됩니다.
 
 ## 자주 헷갈리는 개념
 

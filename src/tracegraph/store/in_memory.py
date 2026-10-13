@@ -16,6 +16,10 @@ from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, Tr
 from tracegraph.normalize import normalize, validate_normalized
 
 
+#: Edge types whose endpoints this store can check: step -> step, or step -> the trace.
+_STEP_SOURCED = frozenset({EdgeType.CAUSED_BY, EdgeType.TREE_PARENT, EdgeType.BELONGS_TO})
+
+
 class InMemoryStore:
     def __init__(self) -> None:
         self._trace: Trace | None = None
@@ -56,6 +60,24 @@ class InMemoryStore:
             self._steps[s.step_id] = s.model_copy(deep=True)
 
     def upsert_edges(self, edges: list[Edge]) -> None:
+        """Append edges, all or nothing, rejecting any endpoint this store does not hold.
+
+        Matches LadybugStore, whose batch insert rolls back on a dangling endpoint. Accepting
+        one here deferred the failure to ``ancestors`` as a KeyError, far from its cause.
+        ``BELONGS_TO`` points at the trace, not at a step. ``WROTE``/``READ`` point at a
+        channel, which this store does not hold, so they are left unchecked as before.
+        """
+        trace_id = self._trace.trace_id if self._trace is not None else None
+        for e in edges:
+            if e.type not in _STEP_SOURCED:
+                continue
+            if e.src not in self._steps:
+                raise ValueError(f"{e.type.value} edge source {e.src!r} is not a known step")
+            if e.type is EdgeType.BELONGS_TO:
+                if e.dst != trace_id:
+                    raise ValueError(f"BELONGS_TO edge targets {e.dst!r}, not the loaded trace")
+            elif e.dst not in self._steps:
+                raise ValueError(f"{e.type.value} edge target {e.dst!r} is not a known step")
         self._edges.extend(e.model_copy(deep=True) for e in edges)
         for e in edges:
             if e.type is EdgeType.CAUSED_BY:

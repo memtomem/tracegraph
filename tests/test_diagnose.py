@@ -215,21 +215,28 @@ def test_metrics_never_sum_mixed_or_partially_unknown_currencies():
 def test_comparison_only_subtracts_costs_with_the_same_known_currency():
     baseline = _trace("baseline-cost", StepStatus.OK)
     current = _trace("current-cost", StepStatus.OK)
+    # Every step reports a cost on both sides, so the totals are complete and comparable.
+    for step in baseline.steps:
+        step.evidence = StepEvidence(total_cost="0", cost_currency="USD")
+    for step in current.steps:
+        step.evidence = StepEvidence(total_cost="0", cost_currency="USD")
     baseline.steps[0].evidence = StepEvidence(total_cost="1.25", cost_currency="USD")
     current.steps[0].evidence = StepEvidence(total_cost="2.50", cost_currency="USD")
     comparison = analyze(current, baseline=baseline).comparison
     assert comparison is not None
     assert comparison.metric_deltas["total_cost"] == "1.25"
 
-    current.steps[0].evidence = StepEvidence(total_cost="2.50", cost_currency="EUR")
-    comparison = analyze(current, baseline=baseline).comparison
-    assert comparison is not None
-    assert comparison.metric_deltas["total_cost"] is None
+    for step in current.steps:
+        step.evidence = StepEvidence(total_cost="0", cost_currency="EUR")
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["total_cost"] is None
+    assert any("total_cost delta unavailable" in w and "currenc" in w for w in report.warnings)
 
-    current.steps[0].evidence = StepEvidence(total_cost="2.50")
-    comparison = analyze(current, baseline=baseline).comparison
-    assert comparison is not None
-    assert comparison.metric_deltas["total_cost"] is None
+    for step in current.steps:
+        step.evidence = StepEvidence(total_cost="0")
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["total_cost"] is None
+    assert any("total_cost delta unavailable" in w for w in report.warnings)
 
 
 def test_every_matching_preset_is_reported_not_just_the_first():
@@ -478,3 +485,52 @@ def test_non_langgraph_traces_carry_no_langgraph_disclosure():
     assert not [
         w for w in analyze(_trace("t", StepStatus.OK)).warnings if "LangGraph" in w
     ]
+
+
+
+def test_token_delta_is_withheld_when_either_side_is_partially_covered():
+    # A difference of two lower bounds is not a lower bound on the difference: here the
+    # current run's unobserved steps could have used any number of tokens.
+    baseline = _trace("baseline-tok", StepStatus.OK)
+    current = _trace("current-tok", StepStatus.OK)
+    for step in baseline.steps:
+        step.evidence = StepEvidence(total_tokens=100)
+    current.steps[0].evidence = StepEvidence(total_tokens=100)
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["total_tokens"] is None
+    assert any("total_tokens delta unavailable" in w for w in report.warnings)
+
+    for step in current.steps:
+        step.evidence = StepEvidence(total_tokens=110)
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["total_tokens"] == 30
+    assert not any("total_tokens delta unavailable" in w for w in report.warnings)
+
+
+def test_cost_delta_is_withheld_when_an_unobserved_cost_could_flip_its_sign():
+    baseline = _trace("baseline-flip", StepStatus.OK)
+    current = _trace("current-flip", StepStatus.OK)
+    for step, cost in zip(baseline.steps, ("1.00", "5.00", "0"), strict=True):
+        step.evidence = StepEvidence(total_cost=cost, cost_currency="USD")
+    # Observed 2.00 vs 6.00 reads as -4.00, but the two silent steps could cost far more.
+    current.steps[0].evidence = StepEvidence(total_cost="2.00", cost_currency="USD")
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["total_cost"] is None
+    assert any("total_cost delta unavailable" in w for w in report.warnings)
+
+
+
+@pytest.mark.parametrize("currencies", [("USD", "EUR", "USD"), ("USD", None, "USD")])
+def test_mixed_currencies_within_a_run_are_disclosed(currencies):
+    baseline = _trace("baseline-mixed", StepStatus.OK)
+    current = _trace("current-mixed", StepStatus.OK)
+    for step, currency in zip(baseline.steps, currencies, strict=True):
+        step.evidence = StepEvidence(total_cost="1", cost_currency=currency)
+    for step in current.steps:
+        step.evidence = StepEvidence(total_cost="1", cost_currency="USD")
+    report = analyze(current, baseline=baseline)
+    assert report.comparison.metric_deltas["total_cost"] is None
+    assert any(w.startswith("baseline: total_cost unavailable") for w in report.warnings)
+    alone = analyze(baseline)
+    assert alone.metrics.total_cost is None
+    assert any(w.startswith("total_cost unavailable") for w in alone.warnings)

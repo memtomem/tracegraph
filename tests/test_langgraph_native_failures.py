@@ -452,6 +452,9 @@ def test_unresolvable_task_stays_unnamed():
     assert [e.name for e in errors] == [None]
     assert SENTINEL in (errors[0].error_msg or "")
     assert errors[0].kind is StepKind.CHAIN
+    # ... and the read says so: an unnamed failure is also what a drift between LangGraph's
+    # task-id algorithm and the copy here would look like.
+    assert any("could not be attributed" in w for w in raw.ingest_warnings)
 
 
 def test_error_source_node_write_names_the_task():
@@ -690,3 +693,14 @@ def test_declared_floor_covers_the_serializer_api_we_depend_on():
     assert floors["langgraph-checkpoint"] >= Version("4.1")
     # And the environment actually running the suite honours it.
     assert Version(version("langgraph-checkpoint")) >= floors["langgraph-checkpoint"]
+
+
+def test_derived_ids_colliding_with_each_other_are_rejected():
+    """Two derived ids can collide too: `A` + task `x#task:y` and `A#task:x` + task `y`.
+
+    Before, the second silently replaced the first and gained a bogus second cause.
+    """
+    first = _error_ck(CID, 1, "x#task:y")
+    second = _error_ck(f"{CID}#task:x", 2, "y", parent=CID)
+    with pytest.raises(ValueError, match="collides"):
+        LangGraphCheckpointAdapter(_StubSaver([first, second])).ingest("A")

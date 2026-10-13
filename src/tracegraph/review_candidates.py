@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tracegraph._atomic_write import write_text_atomic
 from tracegraph.analysis.patterns import Match, PathPattern
 from tracegraph.model import NormalizedTrace, Step, StepKind, StepStatus
 
 
-REVIEW_CANDIDATE_SCHEMA_VERSION = 1
-REVIEW_CANDIDATE_KIND = "tracegraph.review-candidates"
+REVIEW_CANDIDATE_SCHEMA_VERSION: Final = 1
+REVIEW_CANDIDATE_KIND: Final = "tracegraph.review-candidates"
 
 
 class ReviewCandidate(BaseModel):
@@ -120,17 +119,5 @@ def dumps(report: ReviewCandidateReport) -> str:
 
 def save_atomic(report: ReviewCandidateReport, path: str | Path) -> None:
     """Atomically replace ``path`` without leaving a partial report on failure."""
-    target = Path(path)
-    # Same contract as artifact.save_atomic / diagnose.save_atomic: create the parent
-    # directory so `--out newdir/report.json` works instead of failing inside mkstemp.
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(dumps(report))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    # The golden fixture is compared byte for byte, so line endings are fixed on every OS.
+    write_text_atomic(path, dumps(report), newline="\n")

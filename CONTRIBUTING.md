@@ -23,8 +23,9 @@ uv sync --locked
 uv run --no-sync pytest -m "not perf"     # the default gate
 uv run --no-sync pytest                   # includes wall-clock perf guards
 
-# Lint — the same pinned version CI runs
+# Lint and type check — the same pinned versions CI runs
 uvx ruff@0.14.2 check src tests scripts examples
+uv sync --locked --extra cypher --group typing && uv run --no-sync mypy
 
 # Optional Cypher accelerator (LadybugDB)
 uv sync --locked --extra cypher

@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from functools import cmp_to_key
-from typing import Callable
+from typing import Any, Callable
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step
 from tracegraph.normalize import validate_tree
@@ -56,7 +56,7 @@ def _children(nt: NormalizedTrace) -> dict[str, list[str]]:
     return out
 
 
-def _roots(nt: NormalizedTrace, children: dict[str, list[str]]) -> list[str]:
+def _roots(nt: NormalizedTrace) -> list[str]:
     has_parent = {e.src for e in nt.edges_of(EdgeType.TREE_PARENT)}
     return [s.step_id for s in nt.steps if s.step_id not in has_parent]
 
@@ -95,7 +95,7 @@ def _require_forest(nt: NormalizedTrace, side: str) -> None:
 
 def _compare(left: Canon, right: Canon) -> int:
     # Tuple-compatible lexical order without Python's recursive tuple comparison.
-    stack = [(left, right)]
+    stack: list[tuple[Any, Any]] = [(left, right)]
     while stack:
         a, b = stack.pop()
         if a is b:
@@ -112,7 +112,7 @@ def _compare(left: Canon, right: Canon) -> int:
 
 
 def _intern(steps, children, roots, label, table):
-    result = {}
+    result: dict[str, int] = {}
     stack = [(root, False) for root in roots]
     while stack:
         node, ready = stack.pop()
@@ -154,7 +154,7 @@ def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
     _require_forest(nt, "trace")
     children = _children(nt)
     steps = nt.steps_by_id()
-    roots = _roots(nt, children)
+    roots = _roots(nt)
     canon = _subtree_canons(steps, children, roots, label)
     return tuple(sorted((canon[r] for r in roots), key=cmp_to_key(_compare)))
 
@@ -162,9 +162,9 @@ def canonical(nt: NormalizedTrace, label: LabelFn = default_label) -> Canon:
 def is_isomorphic(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label) -> bool:
     _require_forest(a, "A")
     _require_forest(b, "B")
-    table = {}
+    table: dict[Any, int] = {}
     ca, cb = _children(a), _children(b)
-    ra, rb = _roots(a, ca), _roots(b, cb)
+    ra, rb = _roots(a), _roots(b)
     aa = _intern(a.steps_by_id(), ca, ra, label, table)
     bb = _intern(b.steps_by_id(), cb, rb, label, table)
     return sorted(aa[r] for r in ra) == sorted(bb[r] for r in rb)
@@ -192,8 +192,8 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
     _require_forest(b, "B")
     sa, sb = a.steps_by_id(), b.steps_by_id()
     ca, cb = _children(a), _children(b)
-    ra, rb = _roots(a, ca), _roots(b, cb)
-    table = {}
+    ra, rb = _roots(a), _roots(b)
+    table: dict[Any, int] = {}
     canA = _intern(sa, ca, ra, label, table)
     canB = _intern(sb, cb, rb, label, table)
     show = display_label or label
@@ -292,7 +292,9 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
             lambda k: child_canons(canA, ca, k),
             lambda k: child_canons(canB, cb, k),
         )
-        greedy(lambda k: label(sa[k]), lambda k: label(sb[k]))  # same label, changed kids
+        # Same label, changed kids. An empty label (every node under --structure) is shared
+        # by everything, so it is no evidence of correspondence.
+        greedy(lambda k: label(sa[k]) or None, lambda k: label(sb[k]) or None)
         return pairs, a_left, b_left
 
     def localize(
@@ -311,7 +313,7 @@ def diff(a: NormalizedTrace, b: NormalizedTrace, label: LabelFn = default_label,
         return pairs
 
     # Iterative worklist: a recursive descent would overflow on a deep-linear divergence.
-    worklist = [
+    worklist: list[tuple[str, str, Any]] = [
         (an, bn, None) for an, bn in localize(*align(ra, rb), here=None, root_level=True)
     ]
     while worklist:

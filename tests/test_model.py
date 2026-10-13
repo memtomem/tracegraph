@@ -86,3 +86,58 @@ def test_edge_direction_is_effect_to_cause():
 def test_unknown_schema_version_rejected():
     with pytest.raises(ValueError):
         artifact.loads('{"schema_version": 999, "trace": {}}')
+
+
+# --- non-finite floats never reach an artifact --------------------------------------------
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_evidence_floats_must_be_finite(value):
+    from tracegraph.model import EvaluationSummary, StepEvidence
+
+    with pytest.raises(ValueError):
+        StepEvidence(duration_ms=value)
+    with pytest.raises(ValueError):
+        EvaluationSummary(name="quality", score=value)
+
+
+def test_artifact_with_nan_token_is_rejected_on_load():
+    # Python's json accepts the non-standard `NaN` token; the artifact contract does not.
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id="t", source_kind="x"), steps=[Step(step_id="a", trace_id="t", seq=0)])
+    )
+    payload = json.loads(artifact.dumps(nt))
+    payload["trace"]["steps"][0]["evidence"] = {"duration_ms": "__NAN__"}
+    text = json.dumps(payload).replace('"__NAN__"', "NaN")
+    with pytest.raises(ValueError):
+        artifact.loads(text)
+
+
+def test_dumps_refuses_to_write_nan():
+    # A model built without validation (model_construct, attribute assignment) can still
+    # carry NaN; the writer must refuse rather than emit a file strict JSON parsers reject.
+    from tracegraph.model import StepEvidence
+
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id="t", source_kind="x"), steps=[Step(step_id="a", trace_id="t", seq=0)])
+    )
+    nt.steps[0].evidence = StepEvidence.model_construct(duration_ms=float("nan"))
+    with pytest.raises(ValueError):
+        artifact.dumps(nt)
+
+
+def test_cli_save_translates_a_serialization_error_into_a_usage_error(tmp_path):
+    import typer
+
+    from tracegraph import cli
+    from tracegraph.model import StepEvidence
+
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id="t", source_kind="x"), steps=[Step(step_id="a", trace_id="t", seq=0)])
+    )
+    nt.steps[0].evidence = StepEvidence.model_construct(duration_ms=float("nan"))
+    for save in (lambda: cli._save_artifact(nt, tmp_path / "a.json"),
+                 lambda: cli._save_ingested(nt, tmp_path / "b.json", explicit=True)):
+        with pytest.raises(typer.BadParameter, match="cannot save artifact"):
+            save()
+    assert list(tmp_path.iterdir()) == []

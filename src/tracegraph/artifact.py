@@ -12,10 +12,10 @@ import json
 import hashlib
 from collections.abc import Iterable, Mapping
 import re
-import os
 from pathlib import Path
-import tempfile
 
+from tracegraph._atomic_write import write_text_atomic
+from tracegraph.input_validation import loads as json_loads
 from tracegraph.model import NormalizedTrace, StepSource
 
 #: Bump when the on-disk shape changes incompatibly.
@@ -54,9 +54,14 @@ def _required_version(nt: NormalizedTrace) -> int:
 
 
 def dumps(nt: NormalizedTrace) -> str:
-    """Serialize a trace to a JSON string (stable key order for diff-friendly output)."""
+    """Serialize a trace to a JSON string (stable key order for diff-friendly output).
+
+    Raises ``ValueError`` rather than emitting the non-standard ``NaN``/``Infinity`` tokens,
+    which strict JSON parsers reject. The model refuses non-finite floats on validation, so
+    only a model built around validation (``model_construct``, attribute assignment) gets here.
+    """
     payload = {"schema_version": _required_version(nt), "trace": nt.model_dump(mode="json")}
-    return json.dumps(payload, indent=2, sort_keys=True)
+    return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
 
 
 def _migrate_v1(trace_payload: dict) -> dict:
@@ -109,16 +114,12 @@ def _migrate_v1(trace_payload: dict) -> dict:
 
 
 def loads(text: str) -> NormalizedTrace:
-    """Parse a trace from a JSON string, validating the schema version."""
-    try:
-        payload = json.loads(text)
-    except RecursionError as exc:
-        # Deeply-nested JSON overflows json's recursive scanner with a RecursionError (a
-        # RuntimeError, *not* a ValueError). Normalize it so the load boundary treats an
-        # over-nested stray as bad input — otherwise it escapes the CLI's (OSError, ValueError)
-        # handler and crashes the whole command with a raw traceback.
-        raise ValueError("JSON nesting too deep") from exc
-    return from_obj(payload)
+    """Parse a trace from a JSON string, validating the schema version.
+
+    Over-nested JSON raises ``ValueError`` (see ``input_validation.loads``), not the
+    ``RecursionError`` json itself raises, so it cannot escape the CLI's load handler.
+    """
+    return from_obj(json_loads(text))
 
 
 def from_obj(payload: object) -> NormalizedTrace:
@@ -137,7 +138,9 @@ def from_obj(payload: object) -> NormalizedTrace:
             f"artifact JSON must be a top-level object, got {type(payload).__name__}"
         )
     version = payload.get("schema_version")
-    if version not in _READABLE_VERSIONS:
+    # Exact int, not equality: `True == 1` and `2.0 == 2`, and `true` used to take the v1
+    # migration path. `dumps` only ever writes an int.
+    if type(version) is not int or version not in _READABLE_VERSIONS:
         readable = ", ".join(str(v) for v in _READABLE_VERSIONS)
         raise ValueError(
             f"unsupported artifact schema_version {version!r} (this build reads {readable})"
@@ -154,7 +157,18 @@ def from_obj(payload: object) -> NormalizedTrace:
         raise ValueError('artifact "trace" must be an object')
     if version == 1:
         trace_payload = _migrate_v1(trace_payload)
-    return NormalizedTrace.model_validate(trace_payload)
+    nt = NormalizedTrace.model_validate(trace_payload)
+    # The envelope is the signal an older reader acts on, so it may overstate what the content
+    # needs (a v3 file without task steps loads today) but never understate it: a v2 envelope
+    # around an origin-priority projection would be read under the wrong projection by every
+    # reader that trusts it, and a re-save would quietly become a different file. A v1
+    # envelope is migrated to v2 semantics, hence the floor of 2.
+    required = _required_version(nt)
+    if required > max(version, 2):
+        raise ValueError(
+            f"artifact declares schema_version {version} but its content requires {required}"
+        )
+    return nt
 
 
 def save(nt: NormalizedTrace, path: str | Path) -> None:
@@ -169,23 +183,7 @@ def save_atomic(nt: NormalizedTrace, path: str | Path, *, replace: bool = True) 
     # serialized must round-trip through the model. Validates the parsed shape directly —
     # no need to re-parse the JSON string we produced ourselves.
     NormalizedTrace.model_validate(nt.model_dump(mode="json"))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False
-        ) as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp_name = handle.name
-        if replace:
-            os.replace(temp_name, target)
-        else:
-            os.link(temp_name, target)
-    finally:
-        if temp_name is not None:
-            Path(temp_name).unlink(missing_ok=True)
+    write_text_atomic(target, text, replace=replace)
 
 
 def load(path: str | Path) -> NormalizedTrace:

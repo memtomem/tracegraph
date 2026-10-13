@@ -10,6 +10,103 @@ explicitly.
 
 ### Fixed
 
+- An artifact whose content was not canonical (for example a stored trace status that
+  disagreed with its steps) was stamped `schema_version` 4 even when it carried no edge
+  origins. Version 4 is now stamped only when the file's TREE_PARENT edges are the
+  origin-priority projection of its causal edges and that differs from the temporal one; the
+  rest of the trace does not affect the stamp. **Digest impact:** canonical artifacts are
+  unchanged, but re-serializing a non-canonical trace (one `validate` rejects) whose tree is
+  not the origin-priority one, such as a trace with its derived edges missing, now writes
+  version 2 or 3 instead of 4. Any digest computed from that re-serialization changes,
+  including the `artifact_digest` that `analyze` reports for such a trace.
+- Loading now rejects an envelope that understates its content: a `schema_version` 2 file
+  holding an origin-priority projection or derived task steps. Every reader that trusts the
+  envelope would have read such a file under the wrong rules, and a re-save rewrote it as a
+  different file. An envelope may still overstate what its content needs.
+- `schema_version` must be an integer. `true`, `1.0`, `2.0` and `4.0` were accepted because
+  they compare equal, and `true` was migrated as a version 1 file.
+- Evidence floats (`duration_ms`, evaluation `score`) must be finite, and the writer refuses
+  to emit `NaN`/`Infinity`, which are not JSON.
+- `--backend ladybug` crashed with a raw traceback on a step `seq` outside the INT64 range
+  the backend stores. It now exits with a usage error naming the limit.
+- `InMemoryStore.upsert_edges` accepted a `CAUSED_BY`/`TREE_PARENT` edge whose endpoint was
+  not a stored step, or a `BELONGS_TO` edge pointing at another trace; the failure surfaced
+  later as a `KeyError` from `ancestors`. It now raises `ValueError` and inserts nothing from
+  that batch, matching the LadybugDB store. `WROTE`/`READ` channel edges are unchecked as
+  before, and node upsert still replaces by ID.
+- OTLP and Phoenix imports crashed with a raw traceback on a timestamp of `Infinity`, `NaN`
+  or a number beyond the representable date range, on a `spanId`/`parentSpanId` given as a
+  list, and on Phoenix `annotations` that were not an array. A timestamp that cannot be read
+  — including garbage text, which was silently dropped before — is now reported as
+  unavailable and disclosed on stderr by `ingest-otlp`, `ingest-phoenix`, `analyze` and
+  `phoenix diagnose`. Malformed ids and annotations are rejected with a usage error.
+- An OTLP `status.code` of `true` was read as OK because `true == 1`, and `false` as UNSET
+  because `false == 0`; both are now rejected, for OTLP and Phoenix imports alike.
+- LangGraph: two derived task steps could receive the same id (checkpoint `A` with task
+  `x#task:y`, checkpoint `A#task:x` with task `y`); the second silently replaced the first
+  and gained a second cause it never had. The collision is now rejected like a collision
+  with a checkpoint.
+- LangGraph: a failed task that no candidate node reproduces is still reported unnamed, and
+  the read now says so on stderr. An unnamed failure is also what a change in LangGraph's
+  task-id algorithm would look like, so it is no longer silent.
+
+- `diff` and `validate` printed producer text through Rich markup: a step named
+  `tool[bold]` showed as `tool`, and an invalid edge naming `ghost[red]X[/red]` showed as
+  `ghostX`. Both now print the text literally, as `inspect`, `explain` and `query` already
+  did. Output paths are printed literally too: an `--out` path containing `[/]` used to
+  raise a markup error after the file had been written, so the command exited 1 for work
+  it had completed.
+- `diff --structure` paired any two leftover subtrees because every label is empty under
+  that option, then reported them under an empty path (`only in B under  > : subtree ·`).
+  An empty label is no longer treated as evidence of correspondence, and the reported
+  subtrees now show step names so they can be found, while the comparison still ignores
+  them. The identical/not-identical verdict and exit code are unchanged.
+- `explain` and `query --explain` labeled a nameless step by its `source`, which for
+  OTLP and Phoenix spans is always `loop` and for LangGraph is checkpoint metadata
+  (`input`, `loop`), not what the step was. They now use the step kind, like every other
+  view.
+- `export-incident-memo` wrote `links_preserved` as `true`/`false`/`null` in its front
+  matter but as `True`/`False`/`None` in its summary. Both now use the front-matter form.
+- The Phoenix CLI version-floor message is derived from the floor constant instead of
+  repeating it.
+
+- `analyze --baseline` published token deltas, and cost deltas, from totals that covered
+  only some steps on one side: with tokens on 3 of 3 steps in the baseline and 1 of 3 in
+  the current run it reported `-200`, although the silent steps could have used any amount.
+  Like the duration delta, these deltas are now withheld with a note unless every step on
+  both sides reports the metric. In traces where only model calls carry token counts this
+  withholds the token delta. A cost total or delta withheld because steps or runs report
+  different or unknown currencies is now disclosed too; before, `analyze` printed
+  `cost=unavailable` with no reason.
+
+- Writing an artifact or an analysis report left a hidden temporary file behind when the
+  write or fsync failed, because the temporary name was recorded only after writing. All
+  four output writers now share one helper that removes it on every failure.
+
+### Compatibility notes for imports
+
+These change what an input that imported successfully before now produces or whether it
+imports at all. No committed fixture is affected.
+
+- An OTLP token count given as a boolean (`true`, or `{"intValue": true}`) was stored as `1`;
+  it is now unavailable, matching how an unusable cost is already treated. A non-finite
+  token count is unavailable too instead of crashing the import. An `intValue` holding a
+  boolean is no longer converted to `0`/`1` for any attribute.
+- Raw OTLP input could inject evaluation summaries through the private
+  `_tracegraph_evaluations` span key, bypassing the length limit the Phoenix importer
+  applies. Only the Phoenix importer reads that key now.
+- An empty-string `traceId` or `spanId` is rejected. A `parentSpanId` of `0`, `false` or
+  `[]` used to be read as "no parent", which made a span with a malformed declared parent a
+  root; it is now rejected. A missing, `null` or empty-string `parentSpanId` still marks a
+  root span.
+- A Phoenix evaluation score too large to represent crashed the import; it is now
+  unavailable, like a non-finite score.
+- When several spans carry the `graph.node.parent_id` a span declares (a loop), the importer
+  picks the nearest execution that started earlier. A span with a missing or unreadable
+  start time sorted as time 0 and could win that choice, so a timestamp nobody recorded
+  decided a causal edge. Such spans no longer take part: the choice is treated as
+  ambiguous, and the span falls back to its declared `parentSpanId`, or the import is
+  rejected if it has none.
 - The CLA workflow refused every pull request from the maintainer's own commit-author
   account, which is not the account that owns the repository. Both are allowlisted now.
 - The release documentation asked for a personal access token with *read* access to pull
@@ -20,6 +117,51 @@ explicitly.
   inferring a rule.
 - It also did not say that a Trusted Publisher's "Environment name" is the GitHub
   environment rather than the index, which failed the first 0.2.0 rehearsal.
+
+### Dependencies
+
+- The optional `[cypher]` extra now accepts LadybugDB `>=0.18,<0.22` (was `<0.19`), and the
+  lockfile moves to 0.21.2. The full test suite and every fixture's output are unchanged
+  on 0.21.2.
+- CI now tests against Phoenix CLI 1.18.8 (was 1.8.1). The runtime floor stays 1.0.4: this
+  pin is what CI proves, not what tracegraph requires.
+
+### Added
+
+- `tracegraph export-incident-memo <artifact> -o memo.md` writes a Markdown post-mortem
+  intended for long-term memory stores. Its output is a strict allowlist: the run id appears
+  only as a truncated SHA-256 `run_digest`, steps appear as `step_<n>_<kind>` aliases, and
+  no step name, error message, evaluation label or payload is written. Edges that only show
+  containment or have no recorded origin are rendered as "preceded by", never "caused by".
+  The memo carries the SHA-256 of the exact artifact bytes it was built from.
+
+### Changed
+
+- **Artifact schema version 4.** When a step has several causes, its single TREE_PARENT is
+  now chosen by edge origin first — a declared graph or checkpoint parent over span
+  containment, over a span link, over an unknown origin — and only then by time. An artifact
+  whose tree differs from the purely temporal choice is stamped version 4; every other
+  artifact serializes as version 2 or 3, byte for byte as before. **Readers from 0.2.0 and
+  older refuse version 4 files** with an explicit unsupported-version error. This build reads
+  both projections, and the LadybugDB store re-emits a legacy file unchanged. The derived
+  tree feeds `inspect`, `diff`, and `analyze --baseline`, where it decides both the topology
+  changes and how steps are matched between the two runs: a step whose tree parent moved
+  can now appear as one removed and one added behavior change, and its logical step key
+  changes. Raw causal queries (`explain`, `query`) are unaffected.
+- Phoenix timestamps without a timezone are now read as UTC rather than in the local
+  timezone of the machine running the import. **Digest impact:** artifacts built from such
+  exports now hash the same on every machine, and differ from any artifact previously built
+  where the local timezone applied a nonzero offset to those timestamps. Timestamps that
+  carry a `Z` or an offset are unchanged.
+- **Phoenix artifacts no longer carry free-text annotation names or labels.** The Phoenix
+  import is documented as body-free and already kept only identifier-shaped span names, but
+  annotation names and labels were kept as free text (whitespace-collapsed, cut to 200
+  characters), so an evaluator's note such as `user said: my password is hunter2` reached
+  the artifact. They now pass the same identifier filter as span names: an evaluation whose
+  name fails it is dropped, and a label that fails it becomes `null` while the score is
+  kept. **Artifact content change:** a re-import of a Phoenix export with such annotations
+  produces different bytes and digests. Identifier-shaped text, which can still be personal
+  data such as an e-mail address, is kept.
 
 ## 0.2.0 - 2026-09-12
 

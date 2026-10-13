@@ -230,3 +230,17 @@ def test_duplicate_step_ids_are_rejected_with_a_clear_message():
     for call in _every_entry_point(bad):
         with pytest.raises(ValueError, match="duplicate step_id"):
             call()
+
+
+def test_structure_diff_does_not_pair_on_the_empty_label():
+    # Under --structure every label is "", which is no evidence of correspondence: two roots
+    # that differ are reported as added/removed, not "paired" and walked with an empty path.
+    result = diff(_chain("a", "b"), _chain("a", "b", "c"), structure_only)
+    assert not result.identical
+    assert result.changes == ["only in A: root subtree ·(·)", "only in B: root subtree ·(·(·))"]
+
+
+def test_structure_diff_can_display_names_while_ignoring_them():
+    result = diff(_chain("a", "b"), _chain("x", "y", "z"), structure_only,
+                  display_label=lambda s: s.name)
+    assert result.changes == ["only in A: root subtree a(b)", "only in B: root subtree x(y(z))"]

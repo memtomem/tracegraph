@@ -8,9 +8,9 @@ from pathlib import Path
 import re
 from typing import Any
 
-from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _span_array
+from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _attributes, _first, _span_array
 from tracegraph.input_validation import loads, object_field
-from tracegraph.model import CausalFidelity, RawTrace
+from tracegraph.model import RawTrace
 
 _SAFE_ATTRIBUTES = {
     "graph.node.id",
@@ -29,17 +29,13 @@ _SAFE_ATTRIBUTES = {
 }
 
 
-def _first(mapping: dict[str, Any], *names: str) -> Any:
-    for name in names:
-        value = mapping.get(name)
-        if value is not None:
-            return value
-    return None
-
-
-def _nanos(value: Any) -> str | None:
+def _nanos(value: Any) -> Any:
+    """Phoenix's time to OTLP nanoseconds. A value that cannot be converted is passed on
+    unchanged, so the span builder reports it as unavailable *and* discloses it."""
     if value is None:
         return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return value
     if isinstance(value, (int, float)):
         return str(int(value))
     text = str(value)
@@ -48,7 +44,7 @@ def _nanos(value: Any) -> str | None:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return None
+        return value
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return str(int(parsed.timestamp() * 1_000_000_000))
@@ -66,15 +62,9 @@ def _safe_operation_name(value: Any) -> str | None:
     return clean if _OPERATION_NAME.fullmatch(clean) else None
 
 
-def _safe_evaluation_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    clean = " ".join(str(value).split())
-    return clean[:200] or None
 
 
 def _attrs(span: dict[str, Any]) -> dict[str, Any]:
-    from tracegraph.adapters.otlp_spans import _attributes
     raw = _attributes(span)
     safe = {key: raw[key] for key in _SAFE_ATTRIBUTES if key in raw}
     kind = _first(span, "span_kind", "spanKind") or raw.get("openinference.span.kind")
@@ -85,14 +75,22 @@ def _attrs(span: dict[str, Any]) -> dict[str, Any]:
 
 def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for annotation in span.get("annotations") or []:
+    annotations = span.get("annotations")
+    if annotations is None:
+        annotations = []
+    if not isinstance(annotations, list):
+        raise ValueError("Phoenix spans[].annotations must be an array")
+    for annotation in annotations:
         if not isinstance(annotation, dict):
             continue
         result = annotation.get("result") or {}
         if not isinstance(result, dict):
             result = {}
-        name = annotation.get("name")
-        if not name:
+        # Annotation names and labels obey the same rule as span names: identifier-shaped text
+        # only, because a free-text label is commonly an evaluator's note about the content.
+        # Without a usable name an evaluation has no identity, so it is dropped entirely.
+        name = _safe_operation_name(annotation.get("name"))
+        if name is None:
             continue
         label = _first(result, "label") or annotation.get("label")
         score = _first(result, "score")
@@ -100,17 +98,11 @@ def _evaluations(span: dict[str, Any]) -> list[dict[str, Any]]:
             score = annotation.get("score")
         try:
             score = float(score) if score is not None else None
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             score = None
         if score is not None and not math.isfinite(score):
             score = None
-        out.append(
-            {
-                "name": _safe_evaluation_text(name),
-                "label": _safe_evaluation_text(label),
-                "score": score,
-            }
-        )
+        out.append({"name": name, "label": _safe_operation_name(label), "score": score})
     return out
 
 
@@ -168,8 +160,7 @@ class PhoenixExportAdapter:
             links_as_causes=False,
             include_error_messages=False,
             preserve_unset_status=True,
-            causal_fidelity=CausalFidelity.PARENT_ONLY,
-            links_preserved=False,
+            evaluation_channel="_tracegraph_evaluations",
         ).ingest(trace_id)
 
     @staticmethod
@@ -195,8 +186,6 @@ class PhoenixExportAdapter:
 
     @staticmethod
     def _span(trace_id: str, span: Any) -> dict[str, Any]:
-        if not isinstance(span, dict):
-            raise ValueError(f"Phoenix trace {trace_id!r} contains a non-object span")
         context = object_field(span.get("context"), "spans[].context")
         span_id = _first(context, "span_id", "spanId") or _first(span, "id", "span_id", "spanId")
         if not isinstance(span_id, str) or not span_id:

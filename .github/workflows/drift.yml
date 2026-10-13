@@ -1,0 +1,97 @@
+name: upstream drift
+
+# Every other workflow tests the locked dependency set, which is what makes them
+# reproducible and also what makes them blind to upstream releases. This one installs the
+# newest LangGraph, LangGraph checkpoint and LadybugDB (ignoring the lockfile and this
+# project's own version ranges) and the newest Phoenix CLI, and runs the same checks.
+#
+# The reason it exists: tracegraph names a failed LangGraph task by recomputing LangGraph's
+# private task-id algorithm. If LangGraph changes it, ingestion keeps working and failures
+# quietly lose their node names. tests/test_langgraph_native_failures.py asserts resolved
+# names, so that drift turns this job red instead of staying silent.
+#
+# A separate workflow on purpose: the release gate (scripts/require_ci_success.py) reads only
+# the `tests` workflow, so a red run here never blocks a release or a merge by itself. It is
+# a signal to look, and on a schedule it reaches the owner by e-mail.
+
+on:
+  schedule:
+    - cron: "17 3 * * 2" # Tuesdays, the day after the Phoenix + SyncMill E2E run
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - src/tracegraph/adapters/langgraph_checkpoint.py
+      - pyproject.toml
+      - uv.lock
+      - .github/workflows/drift.yml
+
+permissions:
+  contents: read
+
+jobs:
+  python-deps:
+    name: latest upstream (langgraph, langgraph-checkpoint, ladybug)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Informational on pull requests; a scheduled or manual run reports its real outcome.
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # Everything else stays exactly as locked; only the packages under watch move.
+      - name: Install locked environment
+        run: uv sync --locked --extra cypher
+
+      - name: Upgrade the watched packages past the lockfile
+        run: >-
+          uv pip install --python .venv/bin/python --upgrade
+          langgraph langgraph-checkpoint langgraph-checkpoint-sqlite ladybug
+
+      - name: Resolved versions
+        run: |
+          uv pip list --python .venv/bin/python | grep -iE '^(langgraph|langgraph-checkpoint|langgraph-checkpoint-sqlite|ladybug|pydantic) '
+          # The task-id helpers tracegraph mirrors live here. A changed digest with green
+          # tests still means the copy in langgraph_checkpoint.py deserves a re-read.
+          .venv/bin/python -c "import hashlib, pathlib, langgraph.pregel._algo as m; print('langgraph.pregel._algo sha256', hashlib.sha256(pathlib.Path(m.__file__).read_bytes()).hexdigest())"
+
+      - name: pytest
+        run: uv run --no-sync pytest -ra -m "not perf"
+
+  phoenix-cli:
+    name: latest Phoenix CLI read contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Resolved version
+        run: npx --yes @arizeai/phoenix-cli@latest --version
+
+      - name: Verify px read contract
+        run: |
+          set -euo pipefail
+          npx --yes @arizeai/phoenix-cli@latest trace get --help | grep -F -- '--include-annotations'
+          npx --yes @arizeai/phoenix-cli@latest trace get --help | grep -F -- '--project'
+          npx --yes @arizeai/phoenix-cli@latest trace list --help | grep -F -- '--include-annotations'
+          npx --yes @arizeai/phoenix-cli@latest trace list --help | grep -F -- '--project'
+          npx --yes @arizeai/phoenix-cli@latest project list --help | grep -F -- '--format'
+
+      - name: Verify px trace-list output schema
+        run: >-
+          python3 scripts/verify_phoenix_cli_contract.py
+          npx --yes @arizeai/phoenix-cli@latest

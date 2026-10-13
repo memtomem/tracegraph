@@ -79,6 +79,9 @@ tracegraph query tool-failure --backend ladybug A.json B.json   # use the option
 
 # export versioned, body-free governance evidence (an empty match set is a valid report)
 tracegraph export-review-candidates tool-retry-failure *.json -o candidates.json
+
+# export an allowlisted incident post-mortem (Markdown) for a long-term memory store
+tracegraph export-incident-memo A.json -o incident.md
 ```
 
 Frequently-used options, beyond `--out` / `--json-out`:
@@ -242,17 +245,27 @@ result, blast radius, preflight result, or graph state.
 
 ## Status
 
-**MVP works** — LangGraph/Phoenix/OTLP ingest plus inspect, explain, analyze, diff, and query.
+Alpha (`0.x`): the artifact, report and review-candidate formats are versioned contracts,
+and any change to them is called out in the [changelog](CHANGELOG.md).
 
-- **Phase 0 (frozen contract):** `RawTrace` vs `NormalizedTrace`, portable JSON artifact (system of record), `validate_raw` → projection → `validate_tree`/`validate_normalized`, in-memory store, `explain`.
-- **Phase 1 (ingestion):** `LangGraphCheckpointAdapter` reads any `BaseCheckpointSaver`, including subgraph checkpoint namespaces, and reconstructs declared checkpoint parentage; `examples/tiny_agent.py` generates real traces.
-- **Phase 2 (analysis + CLI):** AHU rooted-tree diff and the Typer CLI.
-- **Phase 3 (cross-trace queries):** backend-neutral `PathPattern` matcher over the raw causal graph + `query`/`presets` CLI — pure-Python, proving the "graph queries" value before any Cypher backend. The official `tool-retry-failure@v2` requires an explicit producer marker; variable-length **gaps** and **back-references** (`same_name_as`) remain available for query-only heuristics. Uncompilable unbounded patterns degrade honestly rather than truncate.
-- **Phase 5 (OTLP/OpenInference adapter):** `OTLPSpanAdapter` ingests Collector JSON/JSONL spans into the same causal model — the source that exercises full link-preserving raw/derived causality.
-- **Phoenix diagnosis:** `PhoenixExportAdapter`, `analyze`, and `phoenix diagnose` provide body-free automatic failure selection, retry detection, telemetry/evaluation summaries, and explicit parent-only fidelity warnings.
-- **Phase 6 (optional Cypher backend):** `agent-tracegraph[cypher]` ships a `LadybugStore` that compiles the **same** `PathPattern` spec to Cypher (`compile_to_cypher`); equivalence with the pure-Python matcher is the test contract, so the Cypher path is an accelerator, never a second source of truth.
-- **Ecosystem T3/P4 review slice:** OTLP `syncmill.run_id` correlation, versioned presets, deterministic body-free `export-review-candidates`, SyncMill human-review board intake, Toolgraph G3 artifact annotation, and the pinned live single-failure review path are complete. Explicit retry causality and SyncMill-to-Phoenix streaming are covered by the controlled E2E workflow; broader operational coverage remains separate.
-- **SyncMill contract completion:** route/pipeline/compete/council/decompose plus cancellation fixtures, stable span naming, body-free artifact digests, fail-open exporter reference behavior, operational failure presets, and non-causal Toolgraph preflight evidence are covered by executable tests.
+| Area | What exists |
+|---|---|
+| Sources | LangGraph checkpoint savers (including subgraph namespaces and native task failures), OTLP/OpenInference span exports, Phoenix CLI exports |
+| Commands | `ingest`, `ingest-otlp`, `ingest-phoenix`, `inspect`, `validate`, `explain`, `diff`, `analyze`, `presets`, `query`, `export-review-candidates`, `export-incident-memo`, `phoenix doctor`, `phoenix diagnose` |
+| Patterns | Versioned presets matched over the raw causal graph; the governance-eligible `tool-retry-failure@v2` requires an explicit producer retry marker, and repetition-only heuristics are query-only |
+| Backends | Pure-Python in-memory store (default); optional LadybugDB/Cypher accelerator (`[cypher]`), whose results must equal the pure-Python matcher's |
+| Ecosystem | SyncMill run correlation (`syncmill.run_id`), Toolgraph preflight evidence as non-causal metadata, a weekly Phoenix + SyncMill end-to-end workflow (Phoenix CLI and server pinned; SyncMill tracks its default branch) |
+
+Known limits:
+
+- A LangGraph task that was scheduled but left no result and no recorded error (a run
+  paused by `interrupt()`, stopped by the recursion limit, or killed) is not reported, so
+  such a run reads `ok` unless some other step recorded an error.
+- Phoenix exports carry no span links, so their artifacts are parent-only; additional fan-in
+  causes may be missing.
+- Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
+  producer's names and error messages.
+- CI covers Python 3.12 on Linux.
 
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
 super-step), and node names/kinds are best-effort metadata. Phoenix/OTLP adapters are
@@ -297,14 +310,30 @@ with deterministic SHA-256 aliases, and disclose in `warnings` when an alias act
 the report. Trace/step identifiers remain; this is not anonymization.
 Raw artifact names and bytes are not rewritten for report privacy or matching, so the
 artifact — unlike the report — can still carry whatever the producer put in a span name or
-error message (Phoenix ingestion excepted; it filters at the source).
+error message. Phoenix ingestion is the exception: it filters at the source, keeping span
+names and annotation names and labels only when they are identifier-shaped, and dropping
+status messages. Identifier-shaped is not the same as anonymous: an e-mail address passes.
 `export-review-candidates` output is not passed through the report redactor: its `tool_key`
-is the raw endpoint span name. Logical
+is the raw endpoint span name. `export-incident-memo` goes further than `safe-v1`: it writes
+no step names, error messages or evaluation labels at all. Steps appear as kind-based
+aliases and the run id as a truncated digest; the rest is structural metadata such as trace
+status, causal fidelity, step and error counts, preset pattern ids and versions, edge
+origins, fidelity disclosures, and the digest of the exact artifact bytes. Logical
 comparison keys are JSON-encoded typed paths; consumers should treat them as opaque strings.
 Containment and unknown edges preserve all error investigation candidates, deeper first.
 Explicit causal ancestry supplies context, not proof that an exception propagated.
 Explicit OTLP OK takes precedence over handled exception events on new ingestion; old
 artifacts are not reinterpreted.
+A span whose status is UNSET and that carries no exception event (one with a message or
+type makes it `error` in both importers) is read differently by source. `ingest-otlp`
+records it as `ok`, because UNSET is OpenTelemetry's default status and producers such as
+SyncMill leave successful spans unset. Phoenix ingestion keeps it as `unset`. Trace status
+is the same either way, but step statuses differ wherever they are shown, and a preset that
+requires an `ok` step does not match an unset one: a SyncMill run where an agent attempt
+left UNSET directly causes a failing `gate:` tool reports `gate-failure-after-success`
+through `ingest-otlp` and not through Phoenix. Compare a run with a baseline from the same
+source; mixing them can report a step whose status differs only by source as a behavior
+change (`ok` to `unset`, or the reverse).
 
 LangGraph ingestion reads both the configured error state channel and native task failures
 from checkpoint pending writes. A node that raises becomes a derived `task` step under the

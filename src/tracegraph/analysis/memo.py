@@ -2,40 +2,27 @@
 
 from __future__ import annotations
 
-from collections import deque
 import hashlib
-import os
 from pathlib import Path
-import tempfile
-import re
 
-from tracegraph.analysis.diagnose import _patterns
-from tracegraph.analysis.patterns import PRESETS
+from tracegraph._atomic_write import write_text_atomic
+from tracegraph.analysis.diagnose import (
+    INCIDENT_FIDELITY_WARNING,
+    LANGGRAPH_FIDELITY_WARNING,
+    LINKS_PRESERVED_FIDELITY_WARNING,
+    PARENT_ONLY_FIDELITY_WARNING,
+    pattern_findings,
+)
 from tracegraph.model import (
+    EXPLICIT_ORIGINS,
+    SHA256_DIGEST,
     CausalFidelity,
-    Edge,
     EdgeOrigin,
     EdgeType,
     NormalizedTrace,
     StepStatus,
 )
-from tracegraph.normalize import validate_structure
-
-INCIDENT_FIDELITY_WARNING = (
-    "Failure candidates are investigation leads. Containment/unknown edges do not "
-    "prove propagation; explicit causal ancestry is context, not proof of exception propagation."
-)
-PARENT_ONLY_FIDELITY_WARNING = (
-    "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
-)
-LANGGRAPH_FIDELITY_WARNING = (
-    "LangGraph failure capture covers the configured error channel and task pending writes "
-    "for recognized checkpoint layouts; absence of an observed failure does not prove execution success."
-)
-LINKS_PRESERVED_FIDELITY_WARNING = (
-    "Link preservation covers valid in-trace links only; foreign or unresolved links are omitted."
-)
-
+from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
 def compute_run_digest(run_id: str | None) -> str | None:
     """Deterministic, one-way hash alias for run_id; raw string is never exported."""
@@ -55,7 +42,7 @@ def _format_origin(origin: EdgeOrigin | None) -> str:
 
 
 def _relation_phrase(origin: EdgeOrigin | None) -> str:
-    if origin in {EdgeOrigin.CHECKPOINT_PARENT, EdgeOrigin.GRAPH_PARENT, EdgeOrigin.SPAN_LINK}:
+    if origin in EXPLICIT_ORIGINS:
         return "caused by"
     if origin is EdgeOrigin.SPAN_PARENT_FALLBACK:
         return "preceded by (containment only)"
@@ -77,17 +64,13 @@ def build_incident_memo(
     - Never misrepresents containment or unverified edges as causation.
     - Validates digest format and restricts patterns to known supported presets.
     """
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact_digest):
+    if not SHA256_DIGEST.fullmatch(artifact_digest):
         raise ValueError(
             f"Invalid artifact_digest: {artifact_digest!r}; must match 'sha256:<64 lowercase hex digits>'"
         )
 
     validate_structure(nt)
-    raw_patterns = _patterns(nt)
-    patterns = [
-        p for p in raw_patterns
-        if p.pattern_id in PRESETS and isinstance(p.pattern_version, int)
-    ]
+    patterns = pattern_findings(nt)
 
     run_digest = compute_run_digest(nt.trace.run_id)
     short_digest = artifact_digest.removeprefix("sha256:")[:12]
@@ -103,11 +86,11 @@ def build_incident_memo(
 
     # Collect raw CAUSED_BY edges grouped by effect
     caused_by_edges = nt.edges_of(EdgeType.CAUSED_BY)
-    incoming_edges: dict[str, list[Edge]] = {}
-    for edge in caused_by_edges:
-        incoming_edges.setdefault(edge.src, []).append(edge)
+    incoming_edges = incoming_edges_by_step(caused_by_edges)
 
     error_steps = [s for s in steps_sorted if s.status is StepStatus.ERROR]
+    preserved = nt.trace.links_preserved
+    links_preserved = "null" if preserved is None else str(preserved).lower()
 
     lines: list[str] = [
         "---",
@@ -119,7 +102,7 @@ def build_incident_memo(
         "  type: incident",
         f"  artifact_digest: {artifact_digest}",
         f"  causal_fidelity: {nt.trace.causal_fidelity.value}",
-        f"  links_preserved: {str(nt.trace.links_preserved).lower() if nt.trace.links_preserved is not None else 'null'}",
+        f"  links_preserved: {links_preserved}",
     ]
     if run_digest is not None:
         lines.append(f"  run_digest: {run_digest}")
@@ -132,7 +115,7 @@ def build_incident_memo(
         f"- **Trace Status**: `{nt.trace.status.value}`",
         f"- **Artifact Digest**: `{artifact_digest}`",
         f"- **Causal Fidelity**: `{nt.trace.causal_fidelity.value}`",
-        f"- **Links Preserved**: `{nt.trace.links_preserved}`",
+        f"- **Links Preserved**: `{links_preserved}`",
     ])
     if run_digest is not None:
         lines.append(f"- **Run Digest**: `{run_digest}`")
@@ -145,7 +128,7 @@ def build_incident_memo(
     if patterns:
         lines.append("### Detected Patterns")
         for p in patterns:
-            matched_aliases = [alias_by_id[sid] for sid in p.step_ids if sid in alias_by_id]
+            matched_aliases = [alias_by_id[sid] for sid in p.step_ids]
             lines.append(f"- **{p.pattern_id}** (v{p.pattern_version}): steps `[{', '.join(matched_aliases)}]`")
         lines.append("")
 
@@ -157,7 +140,7 @@ def build_incident_memo(
             direct_edges = incoming_edges.get(err_step.step_id, [])
             if direct_edges:
                 pred_items = [
-                    f"`{alias_by_id.get(edge.dst, 'unknown_step')}` [{_format_origin(edge.origin)}]"
+                    f"`{alias_by_id[edge.dst]}` [{_format_origin(edge.origin)}]"
                     for edge in direct_edges
                 ]
                 lines.append(f"  - Direct recorded predecessors: {', '.join(pred_items)}")
@@ -167,15 +150,8 @@ def build_incident_memo(
 
         # Collect unique upstream causal edges reachable from any failure step
         error_step_ids = {s.step_id for s in error_steps}
-        reachable_step_ids: set[str] = set(error_step_ids)
-        queue: deque[str] = deque(error_step_ids)
-
-        while queue:
-            curr_id = queue.popleft()
-            for edge in incoming_edges.get(curr_id, []):
-                if edge.dst not in reachable_step_ids:
-                    reachable_step_ids.add(edge.dst)
-                    queue.append(edge.dst)
+        causes = {sid: [e.dst for e in edges] for sid, edges in incoming_edges.items()}
+        reachable_step_ids = error_step_ids | ancestor_ids(error_step_ids, causes)
 
         ancestry_edges = [
             edge for edge in caused_by_edges
@@ -185,8 +161,8 @@ def build_incident_memo(
         if ancestry_edges:
             lines.append("### Causal Ancestry Graph")
             for edge in ancestry_edges:
-                eff_alias = alias_by_id.get(edge.src, "unknown_step")
-                cause_alias = alias_by_id.get(edge.dst, "unknown_step")
+                eff_alias = alias_by_id[edge.src]
+                cause_alias = alias_by_id[edge.dst]
                 rel = _relation_phrase(edge.origin)
                 origin_str = f" [{_format_origin(edge.origin)}]"
                 lines.append(f"- `{eff_alias}` {rel} `{cause_alias}`{origin_str}")
@@ -214,22 +190,4 @@ def build_incident_memo(
 
 def save_incident_memo(content: str, destination: Path) -> None:
     """Atomically write incident memo markdown to destination without leaving orphaned temp files."""
-    destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
-            delete=False,
-        ) as tmp:
-            temp_name = tmp.name
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-        os.replace(temp_name, destination)
-    finally:
-        if temp_name is not None:
-            Path(temp_name).unlink(missing_ok=True)
+    write_text_atomic(destination, content)

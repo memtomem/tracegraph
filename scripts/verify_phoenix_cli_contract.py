@@ -80,7 +80,7 @@ class _PhoenixHandler(BaseHTTPRequestHandler):
 
 def main(argv: list[str]) -> int:
     if not argv:
-        raise SystemExit("pass the pinned px launcher, e.g. npx --yes @arizeai/phoenix-cli@1.8.1")
+        raise SystemExit("pass the pinned px launcher, e.g. npx --yes @arizeai/phoenix-cli@1.18.8")
     server = ThreadingHTTPServer(("127.0.0.1", 0), _PhoenixHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()

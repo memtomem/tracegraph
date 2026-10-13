@@ -135,6 +135,14 @@ jobs:
       - name: ruff
         run: uvx ruff@0.14.2 check src tests scripts examples
 
+      # Inside the locked environment, not uvx: mypy has to see pydantic, typer, rich and
+      # ladybug to check the code that uses them.
+      - name: Install (with cypher extra and the typing group)
+        run: uv sync --locked --extra cypher --group typing
+
+      - name: mypy
+        run: uv run --no-sync mypy
+
   base:
     name: pure-python core
     runs-on: ubuntu-latest

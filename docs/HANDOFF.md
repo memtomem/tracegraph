@@ -1,6 +1,96 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-09-15 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-13 (Asia/Seoul)
+
+- **상태:** 로컬 커밋 19개, **미푸시**. 기준 커밋은 `e5d86c1`(PR #27 병합)이다.
+  브랜치 16개가 한 줄로 쌓여 있어 각 브랜치는 바로 앞 브랜치를 base로 한다. PR은 아래 표
+  순서대로 열거나, 최상단 브랜치 `docs/unset-status-by-source` 하나로
+  묶어 열어야 한다.
+- **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
+  게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
+  핀·Python matrix 보류)을 받아 구현했다.
+- **공개 계약:** canonical artifact, 분석 보고서, review 후보의 바이트는 그대로다. 바뀐 출력과
+  호환성 영향은 모두 `CHANGELOG.md`의 Unreleased에 적었다.
+
+### 브랜치와 범위
+
+| 순서 | 브랜치 | head | 내용 |
+| --- | --- | --- | --- |
+| 1 | `fix/artifact-load-boundary` | `c839d70` | `schema_version` 정수 강제, envelope이 본문보다 낮은 버전을 선언하면 거부, v4 판정을 TREE_PARENT edge만으로, NaN/Infinity 거부, LadybugDB INT64 범위 밖 `seq`를 사용 오류로, InMemoryStore dangling edge 거부 |
+| 2 | `docs/changelog-backfill` | `60b3e88` | 0.2.0 이후 누락된 계약 변경 3건(schema v4, Phoenix naive→UTC, `export-incident-memo`) 기록, README Status를 기능·한계 표로 |
+| 3 | `fix/adapter-ingest-boundary` | `d9f1037` | 읽을 수 없는 timestamp는 "사용 불가 + stderr 공시", 잘못된 id·bool status 거부, bool 토큰 수 무시, raw OTLP의 evaluation 주입 차단, LangGraph 파생 id 충돌 거부와 task 이름 해석 실패 공시 |
+| 4 | `fix/cli-render-escape` | `b5288ce` | `diff`·`validate`·출력 경로 escape, `diff --structure`의 빈 label 짝짓기 제거, 이름 없는 step 라벨을 kind로 통일, memo `links_preserved` 표기 통일 |
+| 5 | `fix/diagnose-metric-deltas` | `5c545e8` | 토큰·비용 delta도 duration처럼 양쪽 전 step 커버리지일 때만 발행, 통화 혼재 공시 |
+| 6 | `fix/untimed-spans-never-pick-a-parent` | `ee4f0d5` | 시작 시각이 없거나 읽을 수 없는 span은 반복 `graph.node.parent_id`의 "가장 가까운 앞선 실행" 선택에 참여하지 않음 |
+| 7 | `refactor/consolidate-writers-and-dead-code` | `9f8938c` | atomic writer 4벌 통합(쓰기 실패 시 임시 파일이 남던 2곳 수정), 공유 상수, 도달 불가 코드 삭제 |
+| 8 | `refactor/normalize-and-analysis-helpers` | `5683fcb` | `raw_layer`, `ProjectionRule`, `incoming_edges_by_step`, `ancestor_ids`, `pattern_findings` |
+| 9 | `refactor/cli-phoenix-layer` | `1f98e73` | px 명령 인자, 로드 오류, Match 생성 중복 제거. Phoenix 계층 모듈 분리는 이득이 없어 하지 않음 |
+| 10 | `chore/mypy-gate` | `376c26e` | mypy 오류 26건→0, CI lint job에 mypy gate(`typing` 그룹), px 인자 고정 테스트 보강 |
+| 11 | `chore/ladybug-0.21` | `dee60e0` | `[cypher]` extra `ladybug>=0.18,<0.22`, lockfile 0.21.2 |
+| 12 | `chore/phoenix-cli-1.18` | `301d014` | CI 핀 Phoenix CLI 1.18.8. 런타임 하한 1.0.4는 그대로 |
+| 13 | `ci/upstream-drift` | `613e764` | 최신 langgraph·langgraph-checkpoint·ladybug·px로 주간 실행하는 별도 workflow |
+| 14 | `fix/phoenix-annotation-body-free` | `72770a5` | Phoenix artifact에서 자유 텍스트 annotation name/label 제거(D2) |
+| 15 | `docs/handoff-2026-10-13` | `23b3571` | 이 인계 기록. 코드 변경 없음 |
+| 16 | `docs/unset-status-by-source` | 이 문서의 최종 커밋 | D3 (a): OTLP와 Phoenix의 UNSET 해석 차이를 README·`USAGE_KO.md`·adapter 주석에 기록, 이 문서의 D3 항목 갱신. 동작 변경 없음 |
+
+### 검증 증거
+
+환경: macOS/arm64, Python 3.12.11. 모두 최상단 코드 커밋(`72770a5`)에서 이 세션에 실행했다. 그 위의 15번 브랜치는 이 문서만 바꾼다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 `pytest -q` | **709 passed** (기준 620) |
+| 성능 guard `pytest -m perf` | **4 passed** |
+| lint `uvx ruff@0.14.2 check src tests scripts examples` | 통과 |
+| 타입 `uv sync --locked --extra cypher --group typing && uv run --no-sync mypy` | **0 errors** (기준 26). 오류를 일부러 넣으면 rc=1 확인 |
+| `uv lock --check` | 최신 |
+| 골든 하네스 | 모든 커밋 fixture의 artifact·보고서·memo·review 후보·CLI 출력 172개 파일을 `e5d86c1`과 비교. artifact·분석 보고서·후보는 **바이트 동일**. 바뀐 것은 브랜치 4의 의도된 출력뿐(CLI 11개, memo 14개) |
+| LadybugDB 0.21.2 환경의 골든 | 0.18.1과 동일 |
+| 최신 업스트림(langgraph 1.2.15, langgraph-checkpoint 4.3.0, langgraph-checkpoint-sqlite 3.1.2, ladybug 0.21.2), `drift.yml`과 같은 설치 절차 | **705 passed**, 4 deselected (perf 제외. 잠긴 환경과 같은 수) |
+| Phoenix CLI 1.18.8 | CI의 read-contract 단계와 `scripts/verify_phoenix_cli_contract.py` 통과 |
+| drift 탐지력 | task-id 재계산 상수 하나를 바꾸면 native-failure 테스트 10개 실패 |
+| 회귀 테스트 판별력 | 새 테스트는 수정 전 소스에서 실패, 경계·인과 가드는 하나씩 제거해 해당 테스트가 실패함을 확인 |
+| 리뷰 게이트 | 계획 2라운드, 브랜치마다 diff 1~3라운드. 모든 지적을 반영하거나 아래 후속 항목으로 보류. 브랜치 7·8·9는 SHIP |
+
+골든 하네스는 저장소 밖 임시 스크립트로 돌렸고 커밋하지 않았다. 원격 증거는 **없다**: 원격
+CI, 설치 wheel 검증, Phoenix + SyncMill E2E(특히 CLI 1.18.8 핀)는 push 뒤 확인해야 한다.
+
+editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPATH=src`가 필요하다.
+그렇지 않으면 다른 checkout의 소스를 import한다.
+
+### 남은 결정과 후속 항목
+
+1. **D3 — OTLP UNSET 보존: 결정됨(2026-10-13), (a) 현행 유지와 차이 문서화.** 승인 후
+   측정으로 전제가 뒤집혀 보존은 구현하지 않았다. OTel에서
+   UNSET은 성공 span의 기본 상태이고 SyncMill도 그렇게 낸다. `unset`을 보존하면
+   `gate-failure-after-success`(`{status=ok}`)가 계약 fixture `compete-gate-reject`에서 사라지고
+   계약 테스트 1개가 실패하며 artifact 11개·보고서 13개가 바뀐다. 선택지: (a) 현행 유지와
+   차이 문서화, (b) Phoenix도 UNSET→OK, (c) UNSET 보존 + 프리셋이 unset을 성공으로
+   취급하고 버전 bump. 소유자가 (a)를 골랐고 브랜치 16이 차이를 문서화했다. SyncMill fixture
+   10개를 UNSET 보존으로 다시 읽으면 trace status는 모두 같고, preset 결과가 달라지는 것은
+   `compete-gate-reject`의 `gate-failure-after-success` 하나다. 서로 다른 경로로 읽은 실행을
+   baseline으로 비교하면 `ok`→`unset` behavior change가 생기므로(`route-fallback` 대
+   `route-success`에서 `syncmill.run` 1건 측정) 문서는 같은 경로끼리 비교하라고 적었다. 같은 실행을 Phoenix로 읽으면
+   이 preset이 나오지 않는 것은 그대로이며, 이를 바꾸려면 (b)나 (c)를 다시 열어야 한다.
+2. **반복 `graph.node.parent_id`의 시간 기반 선택.** 리뷰어가 두 번 "timing으로 인과를 정한다"고
+   지적했다. 기존 설계 결정으로 유지했고, 시각 없는 span만 제외했다(브랜치 6).
+3. **부분 커버리지 합계와 거부된 텔레메트리 값.** 토큰·비용 합계는 일부 step만 덮어도 단독
+   수치로 표시되고(문서화된 lower bound), bool 토큰 수나 표현 불가 점수는 경고 없이 버려진다.
+4. **LangGraph checkpoint 형태 검증.** 조작된 checkpoint DB에서 `metadata.parents`가 객체가
+   아니면 선언된 부모를 버려 root가 되고, 다른 형태 4가지는 traceback을 낸다.
+5. **보류된 계획 항목.** Phoenix 서버 핀 20.21.0(E2E 필요), Python 3.13/3.14 matrix(branch
+   protection의 required check 이름 변경 필요), 토큰·비용 집계 범위 축소, adapter
+   `from_file`의 크기 제한.
+6. **기존 보류 결정**(아래 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
+7. **0.3.0 릴리스.** push → 원격 CI와 E2E 확인 → CHANGELOG 날짜와 `pyproject.toml` 버전 →
+   `test-v0.3.0` 예행 → `v0.3.0`. 절차는 [릴리스 런북](releasing.md).
+
+---
+
+## 이전 전달 상태 — 2026-09-15 (Asia/Seoul)
+
+아래 본문은 당시 기록이다. 이후 PR #27로 착지했다(`e5d86c1`). 현재 상태와 미해결 목록은 문서 상단을 따른다.
+
 
 - **문서 작성 시점의 상태:** Phase 1은 기본 브랜치에 병합·푸시 완료. Phase 2.1(TREE_PARENT Origin 우선순위)은 로컬 구현·검증 완료이며, 아래 기록은 커밋 전 작업 트리를 기준으로 한다.
 - Phase 2.1 전달 대상은 소스 3개·테스트 1개·문서 2개, 총 6개 파일이다. 이 기록 시점에는 미커밋·미푸시이고 PR·해당 변경의 원격 CI는 대기 상태다. 이후 착지 결과는 이 문서를 포함한 Git 이력과 PR의 최종 SHA로 확인한다.
@@ -276,7 +366,7 @@ PR #22(native 실패 수집)와 PR #23(license·CLA·PyPI 메타데이터)에 �
 유지할 계약:
 
 - raw multi-parent `CAUSED_BY`가 정본이며 `TREE_PARENT`는 손실 가능한 비교·표시용 projection이다.
-- 이 변경의 artifact reader는 v1~v4를 읽는다. writer는 origin 우선순위로 트리가 달라지면 v4, 그 외 task step이 있으면 v3, 나머지는 v2를 쓴다. 레거시 v2/v3 canonical 아티팩트의 재직렬화 바이트를 보존하며, analysis report v2와 candidate v1은 유지한다.
+- artifact reader는 v1~v4를 읽는다. writer는 파일의 TREE_PARENT가 origin 우선순위 projection이고 그것이 시간순 projection과 다를 때 v4, 그 외 task step이 있으면 v3, 나머지는 v2를 쓴다. reader는 본문이 요구하는 것보다 낮은 envelope을 거부한다. 레거시 v2/v3 canonical 아티팩트의 재직렬화 바이트를 보존하며, analysis report v2와 candidate v1은 유지한다.
   report schema는 추가 필드를 거부하므로 관측 필드 추가 전에 버전·reader 호환성을 설계한다.
 - 자동 retry는 명시적 producer marker만 사용한다. heuristic은 governance export에 사용하지 않는다.
 - `safe-v1`은 구조 식별자를 유지하는 본문 제거 정책이며 익명화가 아니다.

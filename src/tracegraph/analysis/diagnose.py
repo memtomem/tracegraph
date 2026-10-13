@@ -4,23 +4,51 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
+from typing import Any, overload
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-import tempfile
 
 from pydantic import BaseModel, Field
 
 from tracegraph import artifact
+from tracegraph._atomic_write import write_text_atomic
 from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, build_index, find_matches
-from tracegraph.model import CausalFidelity, EdgeOrigin, EdgeType, NormalizedTrace, Step, StepStatus
-from tracegraph.normalize import validate_structure
+from tracegraph.model import (
+    EXPLICIT_ORIGINS,
+    CausalFidelity,
+    EdgeType,
+    NormalizedTrace,
+    Step,
+    StepStatus,
+)
+from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
 REPORT_SCHEMA_VERSION = 2
+#: Fidelity disclosures shared by analysis reports and incident memos, so the two never drift.
+INCIDENT_FIDELITY_WARNING = (
+    "Failure candidates are investigation leads. Containment/unknown edges do not "
+    "prove propagation; explicit causal ancestry is context, not proof of exception propagation."
+)
+PARENT_ONLY_FIDELITY_WARNING = (
+    "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
+)
+LANGGRAPH_FIDELITY_WARNING = (
+    "LangGraph failure capture covers the configured error channel and task pending writes "
+    "for recognized checkpoint layouts; absence of an observed failure does not prove execution success."
+)
+LINKS_PRESERVED_FIDELITY_WARNING = (
+    "Link preservation covers valid in-trace links only; foreign or unresolved links are omitted."
+)
+
+
+def _clause(sentence: str) -> str:
+    return sentence[:1].lower() + sentence[1:]
+
+
 _AUTO_PRESETS = (
     "tool-retry-failure",
     "repeated-agent-failure",
@@ -124,6 +152,12 @@ class AnalysisReport(BaseModel):
 _ALIAS = re.compile(r"redacted:[0-9a-f]{64}")
 
 
+@overload
+def _safe(value: str) -> str: ...
+@overload
+def _safe(value: None) -> None: ...
+@overload
+def _safe(value: str | None) -> str | None: ...
 def _safe(value: str | None) -> str | None:
     if value is None or re.fullmatch(r"[A-Za-z0-9_.:/#@-]{1,200}", value):
         return value
@@ -154,26 +188,14 @@ def _cause_adjacency(nt: NormalizedTrace) -> dict[str, list[str]]:
     return out
 
 
-def _ancestors(start: str, adjacency: dict[str, list[str]]) -> set[str]:
-    seen: set[str] = set()
-    queue = deque(adjacency.get(start, []))
-    while queue:
-        current = queue.popleft()
-        if current in seen:
-            continue
-        seen.add(current)
-        queue.extend(adjacency.get(current, []))
-    return seen
-
-
 def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[DiagnosticStep]]:
     steps = nt.steps_by_id()
     errors = {step.step_id for step in nt.steps if step.status is StepStatus.ERROR}
     adjacency = _cause_adjacency(nt)
-    explicit = {}
-    depth = {}
+    explicit: dict[str, list[str]] = {}
+    depth: dict[str, int] = {}
     for edge in nt.edges_of(EdgeType.CAUSED_BY):
-        if edge.origin in {EdgeOrigin.CHECKPOINT_PARENT, EdgeOrigin.GRAPH_PARENT, EdgeOrigin.SPAN_LINK}:
+        if edge.origin in EXPLICIT_ORIGINS:
             explicit.setdefault(edge.src, []).append(edge.dst)
     for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
         depth[step.step_id] = 1 + max((depth[c] for c in adjacency.get(step.step_id, [])), default=-1)
@@ -195,17 +217,15 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
 
     # Edges indexed by effect: each finding then touches only its own nodes' edges
     # (output-proportional) instead of re-scanning the whole edge list per finding.
-    edges_by_effect: dict[str, list] = {}
-    for edge in nt.edges_of(EdgeType.CAUSED_BY):
-        edges_by_effect.setdefault(edge.src, []).append(edge)
+    edges_by_effect = incoming_edges_by_step(nt.edges_of(EdgeType.CAUSED_BY))
 
     findings: list[FailureFinding] = []
     for step_id in primary_ids:
         # Full ancestor sets are materialized only for primary failures (the findings
         # need them); propagated errors never pay a BFS.
-        ancestor_ids = _ancestors(step_id, adjacency)
-        ordered = sorted(ancestor_ids, key=lambda sid: (steps[sid].seq, sid))
-        relevant = ancestor_ids | {step_id}
+        ancestors = ancestor_ids([step_id], adjacency)
+        ordered = sorted(ancestors, key=lambda sid: (steps[sid].seq, sid))
+        relevant = ancestors | {step_id}
         selected = [
             edge
             for sid in relevant
@@ -233,7 +253,7 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
     return findings, [_shown(steps[sid]) for sid in propagated_ids]
 
 
-def _patterns(nt: NormalizedTrace) -> list[PatternFinding]:
+def pattern_findings(nt: NormalizedTrace) -> list[PatternFinding]:
     """Every auto preset's matches, de-duplicated *within* a preset only.
 
     The key is ``(pattern_id, match)``: two different presets legitimately describe the same
@@ -275,12 +295,7 @@ def _iso(value: str | None) -> datetime | None:
         return None
 
 
-def _metrics(nt: NormalizedTrace) -> MetricSummary:
-    """Metric summary only; see :func:`_metrics_with_notes` for the disclosure notes."""
-    return _metrics_with_notes(nt)[0]
-
-
-def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], bool]:
+def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], frozenset[str]]:
     """Summarize observed metrics and report what had to be withheld.
 
     Every degradation is disclosed rather than absorbed: a wall duration that cannot be
@@ -288,10 +303,10 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
     total (the same posture the mixed-currency path already takes) instead of silently
     summing the remainder into an understated figure. "Unavailable", never a wrong number.
 
-    The third element says whether ``wall_duration_ms`` covers every step. A duration built
-    from a subset is a lower bound, which is honest to publish on its own but cannot be
-    subtracted: the unobserved work has unknown length, so a delta computed from it has
-    unknown magnitude *and* unknown sign.
+    The third element names the metrics that cover every step. A total built from a subset
+    of steps is a lower bound, which is honest to publish on its own but cannot be
+    subtracted: the unobserved work has unknown size, so a delta computed from it has
+    unknown magnitude *and* unknown sign. The same rule holds for duration, tokens and cost.
     """
     notes: list[str] = []
     duration_complete = False
@@ -377,6 +392,12 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
     ambiguous_cost = len(cost_currencies) > 1 or (
         bool(cost_currencies) and has_currencyless_cost
     )
+    if ambiguous_cost:
+        notes.append(
+            "total_cost unavailable: steps report "
+            + ("different currencies" if len(cost_currencies) > 1 else "costs with and without a currency")
+            + ", and costs are never converted or summed across currencies."
+        )
     if unusable_costs:
         # Dropping the bad value and summing the rest would report a confident number that
         # is knowably too low. Withhold the total and say why.
@@ -385,6 +406,15 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
             f"total_cost unavailable: {unusable_costs} step(s) reported a cost that is not a "
             "finite non-negative decimal, so the remaining costs would understate the total."
         )
+    complete = {
+        field
+        for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+        if nt.steps and all(s.evidence and getattr(s.evidence, field) is not None for s in nt.steps)
+    }
+    if duration_complete:
+        complete.add("wall_duration_ms")
+    if nt.steps and len(costs) == len(nt.steps) and not ambiguous_cost:
+        complete.add("total_cost")
     evaluations = [
         EvaluationFinding(
             step_id=step.step_id,
@@ -409,7 +439,7 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
             else None
         ),
         evaluations=evaluations,
-    ), notes, duration_complete
+    ), notes, frozenset(complete)
 
 
 def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, Step]:
@@ -434,7 +464,7 @@ def _logical_keys(nt: NormalizedTrace, table: dict | None = None) -> dict[int, S
     if table is None:
         table = {}
     result: dict[int, Step] = {}
-    queue = deque()
+    queue: deque[tuple[str, int | None]] = deque()
     for root in children.get(None, []):
         queue.append((root, None))
     while queue:
@@ -458,7 +488,7 @@ def _comparison(
     *,
     current_patterns: list[PatternFinding],
     current_metrics: MetricSummary,
-    current_duration_complete: bool,
+    current_complete: frozenset[str],
     notes: list[str] | None = None,
 ) -> ComparisonSummary:
     """Compare against a baseline. Appends the baseline's own metric disclosures to ``notes``.
@@ -469,7 +499,7 @@ def _comparison(
     on its own.
     """
     structural = tree_diff(baseline, current, display_label=_display_name)
-    table = {}
+    table: dict[Any, int] = {}
     before, after = _logical_keys(baseline, table), _logical_keys(current, table)
     signatures = {number: signature for signature, number in table.items()}
 
@@ -484,19 +514,20 @@ def _comparison(
     changes: list[BehaviorChange] = []
     for key in sorted(set(before) | set(after)):
         old, new = before.get(key), after.get(key)
+        either = new or old
         old_status = old.status.value if old else None
         new_status = new.status.value if new else None
         if old_status != new_status:
             changes.append(
                 BehaviorChange(
                     logical_step_key=display_key(key),
-                    name=(new or old).name if (new or old) else None,
+                    name=either.name if either else None,
                     before=old_status,
                     after=new_status,
                 )
             )
 
-    before_patterns = _patterns(baseline)
+    before_patterns = pattern_findings(baseline)
     after_patterns = current_patterns
     pattern_ids = set(_AUTO_PRESETS)
     deltas = {
@@ -504,46 +535,51 @@ def _comparison(
         - sum(item.pattern_id == name for item in before_patterns)
         for name in sorted(pattern_ids)
     }
-    bm, baseline_notes, baseline_duration_complete = _metrics_with_notes(baseline)
+    bm, baseline_notes, baseline_complete = _metrics_with_notes(baseline)
     cm = current_metrics
-    cost_delta: str | None = None
-    if (
-        bm.total_cost is not None
-        and cm.total_cost is not None
-        and bm.cost_currency is not None
-        and bm.cost_currency == cm.cost_currency
-    ):
-        cost_delta = format(Decimal(cm.total_cost) - Decimal(bm.total_cost), "f")
-    if notes is not None:
-        notes.extend(f"baseline: {note}" for note in baseline_notes)
+    if notes is None:
+        notes = []
+    notes.extend(f"baseline: {note}" for note in baseline_notes)
     # A delta between two lower bounds is not a lower bound on the delta. If either side
-    # missed a step, the unobserved work could be longer than the difference, so the number
+    # missed a step, the unobserved work could be larger than the difference, so the number
     # would be wrong in magnitude and possibly in sign. Withhold it and say why; disclosing
     # the inputs' incompleteness does not license publishing a confident subtraction of them.
-    durations_comparable = current_duration_complete and baseline_duration_complete
-    if not durations_comparable and None not in (cm.wall_duration_ms, bm.wall_duration_ms):
-        if notes is not None:
+    comparable = current_complete & baseline_complete
+
+    def covered(field: str) -> bool:
+        if field in comparable:
+            return True
+        if getattr(cm, field) is not None and getattr(bm, field) is not None:
+            what = "duration" if field == "wall_duration_ms" else "total"
             notes.append(
-                "wall_duration_ms delta unavailable: at least one side's duration covers "
-                "only part of its trace, so the difference has unknown size and sign."
+                f"{field} delta unavailable: at least one side's {what} covers only part of "
+                "its trace, so the difference has unknown size and sign."
             )
+        return False
+
+    cost_delta: str | None = None
+    current_cost, baseline_cost = cm.total_cost, bm.total_cost
+    if current_cost is not None and baseline_cost is not None and (
+        bm.cost_currency is None or bm.cost_currency != cm.cost_currency
+    ):
+        notes.append(
+            "total_cost delta unavailable: the two runs report different or unknown "
+            "currencies, and costs are never converted."
+        )
+    elif covered("total_cost") and current_cost is not None and baseline_cost is not None:
+        cost_delta = format(Decimal(current_cost) - Decimal(baseline_cost), "f")
+    metric_deltas: dict[str, float | int | str | None] = {
+        field: _delta(getattr(cm, field), getattr(bm, field)) if covered(field) else None
+        for field in ("wall_duration_ms", "prompt_tokens", "completion_tokens", "total_tokens")
+    }
+    metric_deltas["total_cost"] = cost_delta
     return ComparisonSummary(
         baseline_digest=_digest(baseline),
         topology_identical=structural.identical,
         topology_changes=structural.changes,
         behavior_changes=changes,
         pattern_count_deltas=deltas,
-        metric_deltas={
-            "wall_duration_ms": (
-                _delta(cm.wall_duration_ms, bm.wall_duration_ms)
-                if durations_comparable
-                else None
-            ),
-            "prompt_tokens": _delta(cm.prompt_tokens, bm.prompt_tokens),
-            "completion_tokens": _delta(cm.completion_tokens, bm.completion_tokens),
-            "total_tokens": _delta(cm.total_tokens, bm.total_tokens),
-            "total_cost": cost_delta,
-        },
+        metric_deltas=metric_deltas,
     )
 
 
@@ -559,18 +595,18 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
     if baseline is not None:
         validate_structure(baseline)
     primary, propagated = _failures(nt)
-    patterns = _patterns(nt)
-    metrics, metric_notes, duration_complete = _metrics_with_notes(nt)
+    patterns = pattern_findings(nt)
+    metrics, metric_notes, complete = _metrics_with_notes(nt)
     warnings: list[str] = []
     if nt.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
         warnings.append(
-            "Phoenix export preserves parent relationships only; additional fan-in causes may be missing."
+            PARENT_ONLY_FIDELITY_WARNING
         )
     for label, trace in (("current", nt), ("baseline", baseline)):
         if trace is None:
             continue
         if label == "baseline" and trace.trace.causal_fidelity is CausalFidelity.PARENT_ONLY:
-            warnings.append("baseline: Phoenix export preserves parent relationships only; additional fan-in causes may be missing.")
+            warnings.append(f"baseline: {PARENT_ONLY_FIDELITY_WARNING}")
         lossy = sum(step.projection_lossy for step in trace.steps)
         if lossy:
             warnings.append(f"{label}: derived tree drops causes at {lossy} step(s); topology comparison covers TREE_PARENT only.")
@@ -581,11 +617,12 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             # derived failure step and looks identical to a clean run. Absence of a failure
             # is therefore still not evidence of success, and nothing in the artifact says
             # which case applies — so the disclosure cannot be made conditional.
-            warnings.append(f"{label}: LangGraph failure capture covers the configured error channel and task pending writes for recognized checkpoint layouts; absence of an observed failure does not prove execution success.")
+            warnings.append(f"{label}: {LANGGRAPH_FIDELITY_WARNING}")
         if trace.trace.links_preserved:
-            warnings.append(f"{label}: link preservation covers valid in-trace links only; foreign or unresolved links are omitted.")
+            # Mid-sentence after the label, so the shared sentence starts in lower case here.
+            warnings.append(f"{label}: {_clause(LINKS_PRESERVED_FIDELITY_WARNING)}")
     if primary or propagated:
-        warnings.append("Failure candidates are investigation leads. Containment/unknown edges do not prove propagation; explicit causal ancestry is context, not proof of exception propagation.")
+        warnings.append(INCIDENT_FIDELITY_WARNING)
     if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):
         warnings.append("Metrics sum observed span values; coverage may be partial and producer aggregates may double count.")
     # Withheld or partially-covered metrics are disclosed, never silently absorbed. The
@@ -597,7 +634,7 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             baseline,
             current_patterns=patterns,
             current_metrics=metrics,
-            current_duration_complete=duration_complete,
+            current_complete=complete,
             notes=metric_notes,
         )
         if baseline
@@ -633,8 +670,8 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             step.name = clean(step.name)
     for step in report.propagated_failures:
         step.name = clean(step.name)
-    for finding in report.patterns:
-        finding.labels = [clean(name) for name in finding.labels]
+    for pattern in report.patterns:
+        pattern.labels = [clean(name) for name in pattern.labels]
     for item in report.metrics.evaluations:
         item.name, item.label = clean(item.name), clean(item.label)
     if report.comparison:
@@ -660,17 +697,4 @@ def save_atomic(report: AnalysisReport, path: str | Path) -> None:
     # Round-trip the public model before replacing an existing report (validated on the
     # parsed shape directly — no need to re-parse the JSON we just produced).
     AnalysisReport.model_validate(report.model_dump(mode="json"))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_name: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False
-        ) as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-            temp_name = handle.name
-        os.replace(temp_name, target)
-    finally:
-        if temp_name is not None:
-            Path(temp_name).unlink(missing_ok=True)
+    write_text_atomic(target, text)

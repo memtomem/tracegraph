@@ -283,8 +283,8 @@ class LangGraphCheckpointAdapter:
         for step_id, step in steps.items():
             display_parent_id = display_parent_by_step.get(step_id)
             parent_cp = checkpoints.get(display_parent_id) if display_parent_id else None
-            parent_key = key_by_step_id.get(display_parent_id) if display_parent_id else None
-            branch_target = self._branch_target(parent_key, key_by_step_id[step_id])
+            display_parent_key = key_by_step_id.get(display_parent_id) if display_parent_id else None
+            branch_target = self._branch_target(display_parent_key, key_by_step_id[step_id])
             name = self._producing_node(parent_cp, branch_target)
             if name:
                 step.name = name
@@ -347,6 +347,7 @@ class LangGraphCheckpointAdapter:
         """
         warnings: list[str] = []
         derived: list[tuple[str, Step]] = []
+        derived_ids: set[str] = set()
         for step_id in sorted(steps, key=lambda sid: (steps[sid].seq, sid)):
             writes = writes_by_step.get(step_id) or {}
             cp = checkpoints[step_id]
@@ -370,14 +371,22 @@ class LangGraphCheckpointAdapter:
                 )
                 message = cls._error_message(error)
                 cancelled = message.startswith(_CANCELLED_PREFIX)
+                if name is None and not cancelled:
+                    warnings.append(
+                        f"checkpoint {cid}: failed task {task_id} could not be attributed to a "
+                        "node; no candidate reproduced its task id, which is also what a change "
+                        "in LangGraph's task-id algorithm would look like."
+                    )
                 derived_id = f"{step_id}#task:{task_id}"
-                if derived_id in steps:
+                if derived_id in steps or derived_id in derived_ids:
                     # Checkpoint ids are unrestricted strings, so this is conceivable. The
                     # duplicate guard above only covers real checkpoints, and silently
                     # overwriting one would delete a genuine step.
                     raise ValueError(
-                        f"derived task step id {derived_id!r} collides with a checkpoint id"
+                        f"derived task step id {derived_id!r} collides with a checkpoint id "
+                        "or another derived step"
                     )
+                derived_ids.add(derived_id)
                 derived.append((
                     step_id,
                     Step(
@@ -447,10 +456,8 @@ class LangGraphCheckpointAdapter:
             digest.update(joined)
             hexed = digest.hexdigest()
         else:
-            try:
-                from xxhash import xxh3_128_hexdigest
-            except ImportError:  # pragma: no cover - xxhash is a declared dependency
-                return None
+            from xxhash import xxh3_128_hexdigest
+
             hexed = xxh3_128_hexdigest(seed + joined)
         return f"{hexed[:8]}-{hexed[8:12]}-{hexed[12:16]}-{hexed[16:20]}-{hexed[20:32]}"
 

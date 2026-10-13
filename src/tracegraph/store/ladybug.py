@@ -45,7 +45,7 @@ from tracegraph.model import (
     StepStatus,
     Trace,
 )
-from tracegraph.normalize import normalize, validate_normalized
+from tracegraph.normalize import ProjectionRule, normalize, validate_normalized
 
 # Property layout for the Step node table. Kept beside the schema so adding a model field
 # is a single-source change; the constructor reads this list to bind ``$params`` for INSERT.
@@ -109,6 +109,8 @@ class LadybugStore:
         self._conn = conn
         self._closed = False
         self._trace: Trace | None = None
+        #: Set by from_trace: re-derive the temporal (pre-origin-priority) projection.
+        self._legacy_projection = False
         # Read caches over the DB contents, invalidated by the corresponding upsert. The
         # store is an accelerator over an immutable-once-loaded trace, so repeated queries
         # (ancestors per failure, find_matches per preset) shouldn't re-dump the graph.
@@ -157,18 +159,13 @@ class LadybugStore:
     def from_trace(cls, nt: NormalizedTrace, *, path: str | Path | None = None) -> "LadybugStore":
         """Load a normalized trace. Validates both edge layers at the boundary (same as
         InMemoryStore.from_trace) so a corrupt artifact can't enter the DB."""
-        validate_normalized(nt)
+        rule = validate_normalized(nt)
         store = cls(path=path)
         try:
             store.init_schema()
-            # Preserve whether the artifact was loaded under legacy temporal-only projection
-            # so trace() and export_artifact() round-trip byte-for-byte.
-            raw_check = RawTrace(
-                trace=nt.trace,
-                steps=[s.model_copy(update={"projection_lossy": False}) for s in nt.steps],
-                causal_edges=nt.edges_of(EdgeType.CAUSED_BY),
-            )
-            store._legacy_projection = (nt != normalize(raw_check, origin_priority=True))
+            # Remember which projection the artifact uses, so trace() and export_artifact()
+            # re-derive the same one and round-trip a legacy artifact byte for byte.
+            store._legacy_projection = rule is ProjectionRule.TEMPORAL
             # Deep-copy the header, matching InMemoryStore.from_trace. Holding the caller's
             # object by reference let a later mutation of the input change what trace()
             # returns while the persisted Trace row still held the original values, so the
@@ -320,7 +317,7 @@ class LadybugStore:
         ]
         self._trace_cache = normalize(
             RawTrace(trace=self._trace, steps=raw_steps, causal_edges=raw_edges),
-            origin_priority=not getattr(self, "_legacy_projection", False),
+            origin_priority=not self._legacy_projection,
         )
         return self._trace_cache.model_copy(deep=True)
 
@@ -438,8 +435,15 @@ class LadybugStore:
 # --- helpers (module-level so they're easy to unit-test if needed) ---
 
 
+_INT64 = range(-(2**63), 2**63)
+
+
 def _step_params(s: Step) -> dict[str, Any]:
     """Bind a Step to the names declared in ``_STEP_FIELDS`` (enums → ``.value`` strings)."""
+    # The model's ``seq`` is an unbounded int; the column is INT64. Out of range, the binding
+    # raised pybind's RuntimeError, which no load boundary translates.
+    if s.seq not in _INT64:
+        raise ValueError(f"step {s.step_id!r} seq {s.seq} exceeds the INT64 range of this backend")
     return {
         "step_id": s.step_id,
         "trace_id": s.trace_id,

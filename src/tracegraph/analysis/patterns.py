@@ -290,7 +290,6 @@ def _find_matches_forward(index: TraceIndex, pattern: PathPattern) -> list[list[
                 advance(child, idx + 1, acc2, bound2)
             return
         lo, hi = nxt.gap
-        unbounded = hi is None
         # BFS forward over CAUSED_BY (cause -> effect). De-dup on (node, distance) so a diamond
         # doesn't blow up exponentially while still visiting every distinct path *length* — an
         # endpoint reachable only at a longer-than-min distance within [lo, hi] is not missed.
@@ -301,9 +300,9 @@ def _find_matches_forward(index: TraceIndex, pattern: PathPattern) -> list[list[
             if (cur, dist) in visited_states:
                 continue
             visited_states.add((cur, dist))
-            if dist >= lo and (unbounded or dist <= hi):
+            if dist >= lo and (hi is None or dist <= hi):
                 advance(cur, idx + 1, acc2, bound2)
-            if unbounded or dist < hi:
+            if hi is None or dist < hi:
                 for c in children.get(cur, []):
                     frontier.append((c, dist + 1))
 
@@ -334,7 +333,9 @@ def _match_two_step_unbounded(
         for eff in effects:
             parents.setdefault(eff, []).append(cause)
 
-    lo = p1.gap[0]  # type: ignore[index]  (dispatcher guarantees p1.gap is (lo, None))
+    # The dispatcher only routes here when p1.gap is (lo, None).
+    assert p1.gap is not None
+    lo = p1.gap[0]
     results: list[list[str]] = []
     for e in (sid for sid, st in steps.items() if p1.matches(st)):
         # Ancestors of e that p0 could match (backward reachability over CAUSED_BY).
@@ -378,9 +379,17 @@ def search(traces: list[NormalizedTrace], pattern: PathPattern) -> list[Match]:
         index = build_index(nt)
         steps = index[0]
         for path in find_matches(nt, pattern, index=index):
-            labels = [steps[i].name or steps[i].kind.value for i in path]
-            matches.append(Match(trace_id=nt.trace.trace_id, step_ids=path, labels=labels))
+            matches.append(match_for(nt.trace.trace_id, steps, path))
     return matches
+
+
+def match_for(trace_id: str, steps: dict[str, Step], path: list[str]) -> Match:
+    """A :class:`Match` with display labels: each step's name, else its kind."""
+    return Match(
+        trace_id=trace_id,
+        step_ids=path,
+        labels=[steps[i].name or steps[i].kind.value for i in path],
+    )
 
 
 @dataclass(frozen=True)
