@@ -13,11 +13,11 @@
   0.3.1로 PyPI에 공개했다(2026-10-13). 준비 커밋은
   [PR #34](https://github.com/memtomem/tracegraph/pull/34)(merge `54ab5e1`, PR #33 포함)이고,
   `test-v0.3.1`과 `v0.3.1`이 모두 이 커밋을 가리킨다. 아래 8번 항목에 검증 결과를 적었다.
-- **미공개 변경:** [PR #36](https://github.com/memtomem/tracegraph/pull/36)(merge `b248954`,
-  2026-10-14)이 `interrupt()`로 멈춘 LangGraph task 보고와 artifact `schema_version` 5를 더했다.
-  0.3.1은 v5 artifact를 읽지 못하므로 minor인 0.4.0으로 낸다. `CHANGELOG.md`의
-  `0.4.0 - 2026-10-14`에 있고, 준비 커밋은 브랜치 `release/0.4.0`에 있다. 남은 순서는 병합 →
-  `test-v0.4.0` 예행 → `v0.4.0`이다. 아래 9번 항목에 범위와 검증 결과를 적었다.
+- **0.4.0 릴리스:** [PR #36](https://github.com/memtomem/tracegraph/pull/36)(merge `b248954`)이
+  더한 `interrupt()`로 멈춘 LangGraph task 보고와 artifact `schema_version` 5를 0.4.0으로 PyPI에
+  공개했다(2026-10-14). 0.3.1은 v5 artifact를 읽지 못하므로 minor다. 준비 커밋은
+  [PR #39](https://github.com/memtomem/tracegraph/pull/39)(merge `3451374`)이고, `test-v0.4.0`과
+  `v0.4.0`이 모두 이 커밋을 가리킨다. 범위는 아래 9번, 릴리스 검증은 10번 항목에 적었다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
@@ -176,6 +176,22 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
      전체 테스트가 통과한다. 리뷰 게이트는 좁힌 계획 2라운드, 구현 2라운드(SHIP, SHIP).
    - 원래 P1b 계획 파일(`2-tracegraph-transient-bonbon.md`)은 사라져 복구하지 못했다. 다시 세운
      계획과 재현 스크립트는 저장소 밖 `~/.claude/plans/p1b-pending-tasks.md`, `p1b-probes/`에 있다.
+10. **0.4.0 릴리스: 완료(2026-10-14).** 0.3.1과 같은 절차를 따랐다.
+   - TestPyPI 예행: [run 38478479784](https://github.com/memtomem/tracegraph/actions/runs/38478479784).
+     production: [run 38479504984](https://github.com/memtomem/tracegraph/actions/runs/38479504984).
+   - wheel `dad06577…c347`, sdist `c5bceb9b…dad8`. 예행 build, TestPyPI 파일, production build,
+     PyPI 파일이 바이트 단위로 같고, 두 파일 모두 `release.yml`·`pypi` environment의 publish
+     attestation이 있다.
+   - TestPyPI와 PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치에서 `scripts/verify_wheel.py`
+     통과(cypher backend parity 포함). PyPI description은 `v0.4.0`의 `README.md`와 같고 페이지는
+     HTTP 200이다. TestPyPI wheel로 `interrupt()`에서 멈춘 SQLite thread를 ingest하면
+     `schema_version` 5와 `source=interrupt` step이 나온다.
+   - 업로드 직후 `uvx --from agent-tracegraph==0.4.0`이 한 번 "unsatisfiable"로 실패하고 15초 뒤
+     재시도에서 설치됐다. 0.3.1 때와 같은 simple index 반영 지연이다.
+   - [GitHub Release v0.4.0](https://github.com/memtomem/tracegraph/releases/tag/v0.4.0)은
+     prerelease로 만들었다.
+   - 관찰: `inspect` 트리는 `unset` step에 표식을 붙이지 않아 interrupt step이 노드 이름만으로
+     보인다. 릴리스를 막을 문제는 아니며 표시 개선 후보다.
 
 ---
 
