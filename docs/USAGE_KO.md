@@ -215,6 +215,16 @@ Phoenix export는 parent 관계를 제공하지만 원래 OTLP span link는 복�
 따라서 결과에 `parent_only`가 표시되며, 이는 “fan-in이 없다”가 아니라 “추가 원인이
 export에서 유실됐을 수 있다”는 뜻입니다.
 
+status가 UNSET이고 exception event가 없는 span도 경로마다 다르게 읽습니다(message나 type이
+있는 exception event가 붙으면 두 경로 모두 `error`). `ingest-otlp`는 이를 `ok`로
+기록합니다. UNSET은 OpenTelemetry의 기본 status이고 SyncMill도 성공 span을 UNSET으로 남기기
+때문입니다. Phoenix 경로는 `unset`을 그대로 둡니다. trace status는 같지만 step status는
+표시되는 곳마다 다르고, `ok` step을 요구하는 preset은 `unset` step에 맞지 않습니다. 그래서
+UNSET으로 남은 agent 시도가 실패한 `gate:` tool의 직접 원인인 SyncMill 실행은
+`ingest-otlp`에서는 `gate-failure-after-success`로 보고되고 Phoenix에서는 보고되지 않습니다.
+baseline은 같은 경로로 읽은 실행과 비교하십시오. 섞으면 경로 때문에만 status가 다른 step이
+behavior change(`ok`→`unset` 또는 그 반대)로 보고될 수 있습니다.
+
 Phoenix에서 직접 내려받은 JSON도 사용할 수 있습니다.
 
 ```bash

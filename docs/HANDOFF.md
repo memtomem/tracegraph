@@ -2,9 +2,9 @@
 
 ## 현재 전달 상태 — 2026-10-13 (Asia/Seoul)
 
-- **상태:** 로컬 커밋 18개(이 문서 포함), **미푸시**. 기준 커밋은 `e5d86c1`(PR #27 병합)이다.
-  브랜치 15개(코드 14개 + 이 문서 1개)가 한 줄로 쌓여 있어 각 브랜치는 바로 앞 브랜치를
-  base로 한다. PR은 아래 표 순서대로 열거나, 최상단 브랜치 `docs/handoff-2026-10-13` 하나로
+- **상태:** 로컬 커밋 19개, **미푸시**. 기준 커밋은 `e5d86c1`(PR #27 병합)이다.
+  브랜치 16개가 한 줄로 쌓여 있어 각 브랜치는 바로 앞 브랜치를 base로 한다. PR은 아래 표
+  순서대로 열거나, 최상단 브랜치 `docs/unset-status-by-source` 하나로
   묶어 열어야 한다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
@@ -30,7 +30,8 @@
 | 12 | `chore/phoenix-cli-1.18` | `301d014` | CI 핀 Phoenix CLI 1.18.8. 런타임 하한 1.0.4는 그대로 |
 | 13 | `ci/upstream-drift` | `613e764` | 최신 langgraph·langgraph-checkpoint·ladybug·px로 주간 실행하는 별도 workflow |
 | 14 | `fix/phoenix-annotation-body-free` | `72770a5` | Phoenix artifact에서 자유 텍스트 annotation name/label 제거(D2) |
-| 15 | `docs/handoff-2026-10-13` | 이 문서의 커밋 | 이 인계 기록. 코드 변경 없음 |
+| 15 | `docs/handoff-2026-10-13` | `23b3571` | 이 인계 기록. 코드 변경 없음 |
+| 16 | `docs/unset-status-by-source` | 이 문서의 최종 커밋 | D3 (a): OTLP와 Phoenix의 UNSET 해석 차이를 README·`USAGE_KO.md`·adapter 주석에 기록, 이 문서의 D3 항목 갱신. 동작 변경 없음 |
 
 ### 검증 증거
 
@@ -59,12 +60,18 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
 
 ### 남은 결정과 후속 항목
 
-1. **D3 — OTLP UNSET 보존: 승인 후 측정으로 전제가 뒤집혀 구현하지 않음.** OTel에서
+1. **D3 — OTLP UNSET 보존: 결정됨(2026-10-13), (a) 현행 유지와 차이 문서화.** 승인 후
+   측정으로 전제가 뒤집혀 보존은 구현하지 않았다. OTel에서
    UNSET은 성공 span의 기본 상태이고 SyncMill도 그렇게 낸다. `unset`을 보존하면
    `gate-failure-after-success`(`{status=ok}`)가 계약 fixture `compete-gate-reject`에서 사라지고
    계약 테스트 1개가 실패하며 artifact 11개·보고서 13개가 바뀐다. 선택지: (a) 현행 유지와
-   차이 문서화(권고), (b) Phoenix도 UNSET→OK, (c) UNSET 보존 + 프리셋이 unset을 성공으로
-   취급하고 버전 bump.
+   차이 문서화, (b) Phoenix도 UNSET→OK, (c) UNSET 보존 + 프리셋이 unset을 성공으로
+   취급하고 버전 bump. 소유자가 (a)를 골랐고 브랜치 16이 차이를 문서화했다. SyncMill fixture
+   10개를 UNSET 보존으로 다시 읽으면 trace status는 모두 같고, preset 결과가 달라지는 것은
+   `compete-gate-reject`의 `gate-failure-after-success` 하나다. 서로 다른 경로로 읽은 실행을
+   baseline으로 비교하면 `ok`→`unset` behavior change가 생기므로(`route-fallback` 대
+   `route-success`에서 `syncmill.run` 1건 측정) 문서는 같은 경로끼리 비교하라고 적었다. 같은 실행을 Phoenix로 읽으면
+   이 preset이 나오지 않는 것은 그대로이며, 이를 바꾸려면 (b)나 (c)를 다시 열어야 한다.
 2. **반복 `graph.node.parent_id`의 시간 기반 선택.** 리뷰어가 두 번 "timing으로 인과를 정한다"고
    지적했다. 기존 설계 결정으로 유지했고, 시각 없는 span만 제외했다(브랜치 6).
 3. **부분 커버리지 합계와 거부된 텔레메트리 값.** 토큰·비용 합계는 일부 step만 덮어도 단독
@@ -76,7 +83,7 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    `from_file`의 크기 제한.
 6. **기존 보류 결정**(아래 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
 7. **0.3.0 릴리스.** push → 원격 CI와 E2E 확인 → CHANGELOG 날짜와 `pyproject.toml` 버전 →
-   `test-v0.3.0` 예행 → `v0.3.0`. 절차는 [릴리스 런북](releasing.md). D3 결정이 먼저다.
+   `test-v0.3.0` 예행 → `v0.3.0`. 절차는 [릴리스 런북](releasing.md).
 
 ---
 

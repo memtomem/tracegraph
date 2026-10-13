@@ -324,6 +324,16 @@ Containment and unknown edges preserve all error investigation candidates, deepe
 Explicit causal ancestry supplies context, not proof that an exception propagated.
 Explicit OTLP OK takes precedence over handled exception events on new ingestion; old
 artifacts are not reinterpreted.
+A span whose status is UNSET and that carries no exception event (one with a message or
+type makes it `error` in both importers) is read differently by source. `ingest-otlp`
+records it as `ok`, because UNSET is OpenTelemetry's default status and producers such as
+SyncMill leave successful spans unset. Phoenix ingestion keeps it as `unset`. Trace status
+is the same either way, but step statuses differ wherever they are shown, and a preset that
+requires an `ok` step does not match an unset one: a SyncMill run where an agent attempt
+left UNSET directly causes a failing `gate:` tool reports `gate-failure-after-success`
+through `ingest-otlp` and not through Phoenix. Compare a run with a baseline from the same
+source; mixing them can report a step whose status differs only by source as a behavior
+change (`ok` to `unset`, or the reverse).
 
 LangGraph ingestion reads both the configured error state channel and native task failures
 from checkpoint pending writes. A node that raises becomes a derived `task` step under the

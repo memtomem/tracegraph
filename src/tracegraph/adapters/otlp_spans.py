@@ -336,6 +336,9 @@ class OTLPSpanAdapter:
         #: Treat OTLP span links as additional causes (the multi-parent fan-in source).
         self._links_as_causes = links_as_causes
         self._include_error_messages = include_error_messages
+        #: Keep UNSET (without exception evidence, see ``_status``) instead of reading it as OK.
+        #: Off for OTLP: UNSET is OTel's default status and SyncMill leaves successful spans
+        #: unset, which ``gate-failure-after-success`` needs as ``ok``. Phoenix turns it on.
         self._preserve_unset_status = preserve_unset_status
         self._causal_fidelity = causal_fidelity or (
             CausalFidelity.DECLARED_DAG if links_as_causes else CausalFidelity.PARENT_ONLY
