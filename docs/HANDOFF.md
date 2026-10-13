@@ -8,11 +8,11 @@
 - **릴리스:** `agent-tracegraph` 0.3.0을 PyPI에 공개했다(2026-10-13). 준비 커밋은
   [PR #29](https://github.com/memtomem/tracegraph/pull/29)(merge `008502d`)이고, `test-v0.3.0`과
   `v0.3.0`이 모두 이 커밋을 가리킨다. 아래 7번 항목에 검증 결과를 적었다.
-- **0.3.0 이후 착지(미릴리스):** [PR #31](https://github.com/memtomem/tracegraph/pull/31)(merge
-  `be1930c`, 후속 3번)과 [PR #32](https://github.com/memtomem/tracegraph/pull/32)(merge `f325e82`,
-  후속 4번). 둘 다 사용자 출력이 바뀌는 수정이라 0.3.1로 낸다. `CHANGELOG.md`의
-  `0.3.1 - 2026-10-13`에 있고, 준비 커밋은 브랜치 `release/0.3.1`에 있다. 남은 순서는 병합 →
-  `test-v0.3.1` 예행 → `v0.3.1`이다. 두 merge commit의 `tests` run은 통과했다.
+- **0.3.1 릴리스:** [PR #31](https://github.com/memtomem/tracegraph/pull/31)(merge `be1930c`,
+  후속 3번)과 [PR #32](https://github.com/memtomem/tracegraph/pull/32)(merge `f325e82`, 후속 4번)을
+  0.3.1로 PyPI에 공개했다(2026-10-13). 준비 커밋은
+  [PR #34](https://github.com/memtomem/tracegraph/pull/34)(merge `54ab5e1`, PR #33 포함)이고,
+  `test-v0.3.1`과 `v0.3.1`이 모두 이 커밋을 가리킨다. 아래 8번 항목에 검증 결과를 적었다.
 - **계기:** 0.2.0 공개 이후 첫 전체 cold 리뷰. 탐색 결과를 재현으로 확인하고, 계획을 리뷰
   게이트 2라운드에 통과시킨 뒤 소유자 결정(0.3.0, D2 식별자 필터, D3 포함, 집계 범위·서버
   핀·Python matrix 보류)을 받아 구현했다.
@@ -138,6 +138,17 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    - 프로젝트 페이지: PyPI JSON의 description이 `v0.3.0`의 `README.md`와 바이트 단위로 같고
      (`text/markdown`), project URL 4개와 페이지가 HTTP 200을 돌려준다. 렌더링 결과를 눈으로
      보는 확인은 하지 않았다.
+8. **0.3.1 릴리스: 완료(2026-10-13).** 0.3.0과 같은 절차를 따랐다.
+   - TestPyPI 예행: [run 38400016801](https://github.com/memtomem/tracegraph/actions/runs/38400016801).
+     production: [run 38404287958](https://github.com/memtomem/tracegraph/actions/runs/38404287958).
+   - wheel `d2c955ee…0e97`, sdist `7d23fa70…7fbf`. TestPyPI 파일, production build, PyPI 파일이
+     바이트 단위로 같고, 두 파일 모두 `release.yml`·`pypi` environment의 publish attestation이 있다.
+   - PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치에서 `scripts/verify_wheel.py` 통과.
+     PyPI description은 `v0.3.1`의 `README.md`와 같고 페이지는 HTTP 200이다.
+   - 업로드 직후 `uvx --from agent-tracegraph==0.3.1`이 "no version"으로 한 번 실패했다. JSON API에는
+     이미 있었고 약 15초 뒤 재시도에서 설치됐다. simple index 반영 지연이다.
+   - [GitHub Release v0.3.1](https://github.com/memtomem/tracegraph/releases/tag/v0.3.1)은
+     prerelease로 만들었다.
 
 ---
 
