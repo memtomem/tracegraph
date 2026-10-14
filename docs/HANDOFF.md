@@ -206,10 +206,14 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    아래 첫 병합이다. 운영 주의: 외부 기여자의 서명 댓글은 PR head에서 check를 다시 돌리지
    않으므로, 서명 뒤 Actions에서 `CLAAssistant`를 재실행해야 병합할 수 있다. `dependabot[bot]`은
    allowlist에 있다.
-13. **좁은 터미널에서 실패하는 기존 CLI 테스트(미해결, 소유자 결정 대기).** `COLUMNS=40`에서
-   `tests/test_cli.py` 13개가 실패한다. PR #41 이전 코드에서도 같은 13개이므로 기존 문제다. Rich가
-   호출자 터미널 폭으로 줄바꿈하기 때문이며, PR #41의 새 테스트는 `cli_mod.console`을 고정 폭
-   `Console`로 바꿔 피했다. CI는 기본 폭이라 통과한다.
+13. **좁은 터미널에서 실패하던 테스트: 해결(2026-10-14).** 실제 범위는 `test_cli.py` 13개가 아니라
+   전체 suite였다. `COLUMNS=40`에서 85개(`test_checkpoint_shape_boundary.py` 60개 포함),
+   `TERMINAL_WIDTH=40`에서 77개가 실패했다. pytest capture 아래에서는 실제 터미널이 보이지 않아
+   폭은 80이고, 이 두 환경변수만 그것을 바꾼다(40열 pty에서 `COLUMNS` 없이 돌리면 수정 전에도
+   전부 통과). 대부분은 typer가 에러마다 새로 만드는 콘솔이라 fixture로는 닿지 않으므로,
+   `tests/conftest.py`가 import 시점에 `COLUMNS=80`을 고정하고 `TERMINAL_WIDTH`를 지운다(`TERM=dumb`과
+   같은 방식). 네 조합(40, 200, `TERMINAL_WIDTH=40`, 둘 다)에서 937개 통과. 다른 폭이 필요한
+   테스트는 PR #41의 `_inspect_at_width`처럼 `Console(width=...)`를 직접 만든다.
 14. **이슈 #37 출발점(시작 전).** 시작하지 않은 task(recursion limit, kill,
    `interrupt_before`/`after`)를 opt-in 컴파일 그래프(`--graph module:attr`)로 보고한다.
    - 먼저 정할 계약: 사용자 코드 import라는 신뢰 경계, 그래프 동일성 확인과 artifact 기록,
