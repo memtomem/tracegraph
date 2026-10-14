@@ -19,6 +19,12 @@ before any ``Console`` reads it — rather than in a fixture (which would run to
 pytest process is ephemeral so the unrestored env is harmless. (Box-drawing/wrapping still
 happens; ``_panel_text`` collapses that and also strips escapes defensively, in case a single
 test module is run without this conftest.)
+
+Width is pinned the same way. Under pytest's capture neither console can see a terminal, so
+they wrap at 80 columns unless the environment says otherwise: Rich reads ``COLUMNS`` and
+typer's error console also reads ``TERMINAL_WIDTH``. A narrow value in either splits asserted
+phrases that CI never splits. ``COLUMNS=80`` restates the default and ``TERMINAL_WIDTH`` is
+dropped. Tests that need another width construct their own ``Console(width=...)``.
 """
 
 import os
@@ -26,3 +32,5 @@ import os
 os.environ["TERM"] = "dumb"
 os.environ.pop("FORCE_COLOR", None)
 os.environ.pop("PY_COLORS", None)
+os.environ["COLUMNS"] = "80"
+os.environ.pop("TERMINAL_WIDTH", None)
