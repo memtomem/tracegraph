@@ -69,6 +69,10 @@ dev = [
     # and pyyaml only reaches the environment today through langgraph -> langchain-core:
     # a dependency bump there would turn that test red for a reason nothing in it names.
     "pyyaml>=6",
+    # Executes examples/getting_started_ko.ipynb in tests/test_notebooks.py, so the tutorial's
+    # commands and exit codes cannot drift from the CLI without a red test.
+    "nbclient>=0.10",
+    "ipykernel>=6",
 ]
 # Kept out of `dev` so the default environment stays what the test jobs prove; CI's lint
 # job installs it explicitly. Pinned: a new mypy release is a new set of rules.

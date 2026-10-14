@@ -27,6 +27,14 @@ explicitly.
   `schedule_graph`, or a `scheduled` step) declares 6, and 0.4.x refuses it by name. Every
   artifact ingested without `--graph` keeps its version and its bytes; the header field is
   omitted, not written as `null`.
+- **A hands-on getting-started notebook in Korean**, `examples/getting_started_ko.ipynb`, for
+  first-time users working from a repository checkout. It runs the example agent and every
+  core command offline, interprets each output, and works through two applied scenarios:
+  checking a change against a baseline, and aggregating failures across many runs from
+  `analyze --json-out` reports. Its outputs are committed, and `tests/test_notebooks.py`
+  executes it so its commands and exit codes cannot drift from the CLI. `nbclient` and
+  `ipykernel` join the development dependencies. Nothing ships in the wheel or sdist, and no
+  artifact or report contract changes.
 
 ### Changed
 
