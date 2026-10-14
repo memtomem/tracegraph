@@ -2,9 +2,10 @@
 
 ## 현재 전달 상태 — 2026-10-14 (Asia/Seoul)
 
-- **다음 세션 시작점:** `tracegraph-mvp` @ `9d28b13`(PR #41 병합), 작업 트리 깨끗. PyPI 최신은
-  0.4.0이고, 그 뒤 착지한 미릴리스 변경은 PR #41 하나다(11번). 다음 큰 작업은
-  [이슈 #37](https://github.com/memtomem/tracegraph/issues/37)이며 출발점은 14번 항목에 있다.
+- **다음 세션 시작점:** `tracegraph-mvp` @ `3a955a1`(PR #44 병합), 작업 트리 깨끗. PyPI 최신은
+  0.4.0이다. 그 뒤 착지한 미릴리스 변경은 PR #41(11번), PR #43(13번, 테스트만), PR #44(14번,
+  artifact v6)다. 다음 릴리스는 artifact 계약이 바뀌므로 0.4.1이 아니라 0.5.0이 맞다(소유자 결정
+  대기). 열린 이슈는 없다.
 - **상태:** [PR #28](https://github.com/memtomem/tracegraph/pull/28)로 착지했다(merge `23e94697`, 2026-10-13). 기준 커밋은 `e5d86c1`(PR #27 병합)이고, 그 위 커밋 19개다.
   브랜치 16개를 한 줄로 쌓아 최상단 `docs/unset-status-by-source` 하나로 PR을 열었고, merge
   commit으로 합쳐 아래 표의 커밋이 그대로 남아 있다.
@@ -214,17 +215,30 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    `tests/conftest.py`가 import 시점에 `COLUMNS=80`을 고정하고 `TERMINAL_WIDTH`를 지운다(`TERM=dumb`과
    같은 방식). 네 조합(40, 200, `TERMINAL_WIDTH=40`, 둘 다)에서 937개 통과. 다른 폭이 필요한
    테스트는 PR #41의 `_inspect_at_width`처럼 `Console(width=...)`를 직접 만든다.
-14. **이슈 #37 출발점(시작 전).** 시작하지 않은 task(recursion limit, kill,
-   `interrupt_before`/`after`)를 opt-in 컴파일 그래프(`--graph module:attr`)로 보고한다.
-   - 먼저 정할 계약: 사용자 코드 import라는 신뢰 경계, 그래프 동일성 확인과 artifact 기록,
-     "시작 안 함" 표식(새 `StepSource`와 내용 기준 artifact v6 후보), CLI 모양.
-   - 그래프 없는 추론을 버린 근거(완료된 실행을 미완료로 읽는 4가지)는 이슈 본문과 9번 항목에
-     있다. 수용 기준도 같다: 완료·재개·fork된 실행에 미완료 작업을 표시하지 않는다.
-   - `get_state`는 oracle이 아니다. LangGraph 1.2.2는 두 번째 `interrupt()` 뒤 `next=()`를
-     보고한다(1.2.15는 바로잡음). `invoke` 반환값과 대조하고, 두 버전 모두에서 측정한다(drift
-     워크플로가 최신 버전을 돌린다).
-   - 재현 스크립트 `~/.claude/plans/p1b-probes/probe{,2..7}.py`(저장소 밖, `uv run --no-sync python
-     <file>`)가 barrier·예약 이름 state key·그래프 교체·subgraph replay 시나리오를 이미 만든다.
+14. **이슈 #37 — 예약됐지만 기록이 없는 task 보고: 착지, 미릴리스(PR #44, merge `3a955a1`, 2026-10-14).**
+   - `ingest --graph path/to/file.py:attr`(`langgraph.json` 형식) 또는 `pkg.module:attr`로 컴파일된
+     그래프를 받아, LangGraph 공개 API `get_state`가 가장 최근 root checkpoint에서 예약하는 task 중
+     write가 하나도 없는 것을 `unset` step(`source=scheduled`)으로 보고한다. `Send`는 packet마다 하나.
+     끝남·실패·멈춤은 여전히 checkpoint의 write로 판정하므로 `task`·`interrupt` step과 겹치지 않는다.
+   - **계약(소유자 결정):** 수용 기준을 "thread를 쓴 그래프 기준"으로 다시 정했다. head 하나를 보는
+     consistency gate는 리뷰 2라운드에서 양방향으로 실패했다(과거 `versions_seen` 때문에 정상 그래프
+     거부, trigger를 추가한 그래프 통과). 대신 그래프 구조 지문을 `trace.schedule_graph`에 남긴다
+     (예약 task가 없어도). 새 `StepSource.SCHEDULED`, 내용 기준 artifact v6, trace status 유지.
+     `--graph` 없이 만든 artifact와 출력은 바이트가 같다(커밋된 fixture 출력 252개 확인).
+   - 비공개 `prepare_next_tasks`는 버렸다. migration·delta 채널 복원·null write를 다시 구현해야 했고,
+     "사용자 코드 안 돌림"이라는 장점도 사실이 아니었다(managed value, 채널 `from_checkpoint`).
+   - 신뢰 경계: 모듈 import(top-level 코드)와, 읽는 동안 그래프의 state callback(mapper·validator,
+     reducer, custom channel, managed value, cache-key 함수)이 실행된다. 노드는 실행되지 않는다.
+   - 공시만 하는 경우: head에 적용 안 된 `Command(goto)` 입력, 그래프에 없는 노드로 가는 `Send`.
+   - 검증: 테스트 1033개(신규 96개, 1.2.2·1.2.15·`COLUMNS=40`), 의도적 회귀 8개 중 7개 검출(놓친
+     1개는 명시적 head id가 같은 위험을 이중으로 막는 장치). 리뷰: 계획 2라운드, 구현 2라운드.
+   - 재현 스크립트와 계획: `~/.claude/plans/p37-scheduled-tasks.md`, `~/.claude/plans/p37-probes/`
+     (저장소 밖).
+15. **범위 밖 기존 결함(미해결, 이슈 미등록).** 오류 task 경로의 `_undecodable_sends`
+   (`adapters/langgraph_checkpoint.py`)가 tasks 채널을 평면 리스트로 읽는다. 옛 Topic 인코딩
+   `(flag, packets)`에서는 packet 3개를 "2 Send packet(s) could not be decoded (langgraph is not
+   installed)"로 잘못 공시한다. 오래된 checkpoint에만 해당한다. PR #44의 `_send_packets`처럼 그래프
+   채널에 디코딩을 맡기면 되지만, 그 경로에는 그래프가 없으므로 별도 판단이 필요하다.
 
 ---
 
