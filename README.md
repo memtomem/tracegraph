@@ -14,7 +14,9 @@ then runs analyses the mainstream observability tools don't:
 It is **not** a checkpointer — a graph-backed `BaseCheckpointSaver` already exists.
 tracegraph is the read-path *analysis* layer. See [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md)
 for the full rationale and competitive landscape. Korean readers can start with
-[`docs/USAGE_KO.md`](docs/USAGE_KO.md).
+[`docs/USAGE_KO.md`](docs/USAGE_KO.md), or run the hands-on notebook
+[`examples/getting_started_ko.ipynb`](examples/getting_started_ko.ipynb) from a repository
+checkout.
 Current delivery evidence, known limitations, and next work are maintained in
 [`docs/HANDOFF.md`](docs/HANDOFF.md).
 

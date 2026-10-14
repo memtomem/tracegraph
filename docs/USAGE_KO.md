@@ -12,6 +12,9 @@ tracegraph는 LangGraph checkpoint나 OpenInference/OTLP span export를 읽어�
 3. `analyze` 또는 `inspect`, `explain`, `diff`로 분석한다.
 4. 여러 artifact에서 `query`로 패턴을 찾는다.
 
+같은 흐름을 실제 출력과 해석, 실무 응용 예시와 함께 직접 실행해 보려면 저장소 checkout에서
+실습 노트북 [`examples/getting_started_ko.ipynb`](../examples/getting_started_ko.ipynb)를 여세요.
+
 ## 설치
 
 개발 환경에서는 저장소 루트에서 `uv`를 사용합니다.
