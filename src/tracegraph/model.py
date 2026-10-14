@@ -26,7 +26,7 @@ from enum import Enum
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 
 class StepKind(str, Enum):
@@ -63,6 +63,13 @@ class StepSource(str, Enum):
     for which the recorded history holds no resume and no result. It states what the
     checkpoints record, not that LangGraph would resume the task today — a thread re-run under
     a revised graph can finish without writing a checkpoint, leaving the record unchanged.
+
+    ``SCHEDULED`` is a task that a compiled graph supplied at ingest schedules at the thread's
+    newest checkpoint and for which that checkpoint holds no write at all: a run stopped by the
+    recursion limit, killed, or held at a static breakpoint. It is LangGraph's answer *for that
+    graph* — another graph can give another answer — and it does not claim the task never
+    started: a task killed mid-run records nothing either. The trace header's
+    ``schedule_graph`` identifies the graph.
     """
 
     INPUT = "input"
@@ -71,6 +78,7 @@ class StepSource(str, Enum):
     FORK = "fork"
     TASK = "task"
     INTERRUPT = "interrupt"
+    SCHEDULED = "scheduled"
 
 
 class StepStatus(str, Enum):
@@ -181,6 +189,18 @@ class Edge(BaseModel):
     origin: EdgeOrigin | None = None
 
 
+class ScheduleGraph(BaseModel):
+    """The compiled graph whose schedule produced a trace's ``SCHEDULED`` steps.
+
+    Present whenever one was supplied, even when it scheduled nothing: that is what separates
+    "checked against a graph, nothing pending" from "not checked". Only a structural
+    fingerprint is kept. The import reference is a local path or module name, which would make
+    the same run's artifact differ from machine to machine.
+    """
+
+    fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class Trace(BaseModel):
     """One agent run / thread."""
 
@@ -195,6 +215,16 @@ class Trace(BaseModel):
     causal_fidelity: CausalFidelity = CausalFidelity.LEGACY_UNKNOWN
     links_preserved: bool | None = None
     decision_evidence: list[DecisionEvidence] = Field(default_factory=list)
+    schedule_graph: ScheduleGraph | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_schedule_graph(self, handler: SerializerFunctionWrapHandler) -> dict:
+        # Absent, the key is left out rather than written as null, so every trace ingested
+        # without a graph serializes to the same bytes as before the field existed.
+        data = handler(self)
+        if self.schedule_graph is None:
+            data.pop("schedule_graph", None)
+        return data
 
 
 class RawTrace(BaseModel):

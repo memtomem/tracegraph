@@ -329,9 +329,39 @@ LangGraph 노드가 `interrupt()`로 멈춘 뒤 resume도 결과도 기록되지
 이 step은 "기록된 이력 안에서 멈춘 채 끝났다"는 뜻이며, 지금 LangGraph가 이 task를 재개할
 것이라는 뜻은 아닙니다. interrupt와 함께 resume이나 오류가 기록되었는데 결과가 없으면
 checkpoint만으로는 아직 멈춰 있는지 알 수 없으므로 step을 만들지 않고 ingest 때 공시합니다.
-recursion limit, 프로세스 종료, `interrupt_before`/`interrupt_after` breakpoint처럼 task가
-시작조차 하지 않은 경우는 기록이 남지 않아 보고되지 않습니다. interrupt step이 있는
-artifact는 `schema_version` 5를 선언하므로 0.3.1 이하 버전은 이 파일을 읽지 않습니다.
+recursion limit, 프로세스 종료, `interrupt_before`/`interrupt_after` breakpoint처럼 예약된
+task가 아무것도 기록하지 않은 경우는 그래프 없이는 보고되지 않습니다(아래 scheduled step).
+interrupt step이 있는 artifact는 `schema_version` 5를 선언하므로 0.3.1 이하 버전은 이 파일을
+읽지 않습니다.
+
+### scheduled step
+
+`ingest`에 thread를 쓴 컴파일된 그래프를 `--graph`로 넘기면, 예약됐지만 아무것도 기록하지
+않은 task를 보고합니다.
+
+```bash
+uv run tracegraph ingest --sqlite trace.db --thread A --out A.json --graph path/to/agent.py:graph
+uv run tracegraph ingest --sqlite trace.db --thread A --out A.json --graph pkg.module:graph
+```
+
+LangGraph의 `get_state`가 그 그래프로 thread의 가장 최근 root checkpoint에서 예약하는 task를
+알려 주고, 그중 그 checkpoint에 write가 하나도 없는 task가 source `scheduled`, status `unset`인
+step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 checkpoint의 write로 판정하므로 `task`나
+`interrupt` step과 겹치지 않습니다. 실행 도중 죽은 task도 아무것도 기록하지 않으므로, 이 step은
+"시작하지 않았다"는 뜻이 아닙니다.
+
+- **결과는 넘긴 그래프에 대한 답입니다.** 다른 그래프는 같은 checkpoint에서 다른 task를 예약할
+  수 있고, checkpoint 하나로는 어느 그래프가 썼는지 증명할 수 없습니다. 그래서 artifact에
+  그래프의 구조 지문(`trace.schedule_graph`)을 남깁니다. 예약된 task가 없어도 남기므로 "확인했고
+  남은 일이 없음"과 "확인하지 않음"이 구분됩니다.
+- **공시만 하는 경우:** 그 checkpoint에 저장됐지만 아직 적용되지 않은 `Command(goto=...)` 입력과,
+  그래프에 없는 노드로 가는 `Send` packet은 LangGraph 자신의 답에서 빠지므로 ingest 때 경고로
+  알립니다.
+- **코드가 실행됩니다.** 모듈을 import하므로 top-level 코드가 돌고, checkpoint를 읽는 동안 그래프의
+  state callback(schema mapper·validator, reducer, custom channel, managed value, cache-key 함수)이
+  실행됩니다. 노드는 실행되지 않습니다. `--graph`를 직접 줄 때만 쓰며 추론하지 않습니다.
+- `--graph`로 읽은 artifact는 `schema_version` 6을 선언하므로 0.4.x 이하 버전은 읽지 않습니다.
+  trace status는 그대로입니다.
 
 ### step id
 

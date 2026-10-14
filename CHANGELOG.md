@@ -8,6 +8,26 @@ explicitly.
 
 ## Unreleased
 
+### Added
+
+- **`ingest --graph` reports LangGraph tasks that were scheduled but recorded nothing.**
+  Given the compiled graph (`path/to/file.py:attr` or `pkg.module:attr`), LangGraph's
+  `get_state` lists the tasks it schedules at the thread's newest root checkpoint, and each one
+  with no write there becomes an `unset` step with the new source value `scheduled`, linked by
+  `CAUSED_BY` to that checkpoint: the recursion limit, a killed process, a static breakpoint,
+  one step per `Send` packet. Finished, failed and paused tasks are still read from the
+  checkpoint's writes, so these steps never duplicate `task` or `interrupt` steps. The result
+  is LangGraph's answer for the supplied graph; the trace header records its structural
+  fingerprint as `schedule_graph`, also when nothing is scheduled. An unapplied
+  `Command(goto=...)` input and `Send` packets to a node the graph lacks are disclosed at
+  ingest. `--graph` imports the module and runs the graph's state callbacks while reading,
+  but no node. `inspect` marks such a step `◌ scheduled` and adds `· N scheduled` to the
+  summary.
+- **Artifact schema version 6**, stamped by content: an artifact read with `--graph` (it has
+  `schedule_graph`, or a `scheduled` step) declares 6, and 0.4.x refuses it by name. Every
+  artifact ingested without `--graph` keeps its version and its bytes; the header field is
+  omitted, not written as `null`.
+
 ### Changed
 
 - `inspect` marks a step paused by `interrupt()` as `⏸ interrupted`, in yellow rather than

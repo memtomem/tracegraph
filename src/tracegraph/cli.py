@@ -710,6 +710,10 @@ def _label(step) -> str:
         # Paused, not finished: green would read as success, which is the misreading the
         # interrupt step exists to prevent.
         return f"[yellow]{step.seq}: {base}  ⏸ interrupted[/]{suffix}"
+    if step.source is StepSource.SCHEDULED:
+        # Scheduled and unwritten: no outcome at all, so neither green nor the interrupt's
+        # yellow, which marks a task that did run up to its pause.
+        return f"[dim]{step.seq}: {base}  ◌ scheduled[/]{suffix}"
     return f"[green]{step.seq}: {base}[/]{suffix}"
 
 
@@ -750,12 +754,14 @@ def _render_tree(nt: NormalizedTrace) -> None:
     n_tool = sum(1 for s in nt.steps if s.kind.value == "TOOL")
     n_lossy = sum(1 for s in nt.steps if s.projection_lossy)
     n_paused = sum(1 for s in nt.steps if s.source is StepSource.INTERRUPT)
-    # Appended only when present, so the summary of every trace without interrupt steps
-    # stays byte-identical to what earlier releases printed.
+    n_scheduled = sum(1 for s in nt.steps if s.source is StepSource.SCHEDULED)
+    # Appended only when present, so the summary of every trace without interrupt or
+    # scheduled steps stays byte-identical to what earlier releases printed.
     paused = f" · {n_paused} interrupted" if n_paused else ""
+    scheduled = f" · {n_scheduled} scheduled" if n_scheduled else ""
     console.print(
         f"\n[dim]{len(nt.steps)} steps · {n_tool} tool · "
-        f"{n_err} error · {n_lossy} lossy-projection{paused}[/]"
+        f"{n_err} error · {n_lossy} lossy-projection{paused}{scheduled}[/]"
     )
 
 
@@ -765,14 +771,32 @@ def ingest(
     thread: str = typer.Option(..., "--thread", "-t", help="thread_id to ingest."),
     out: Path = typer.Option(None, "--out", "-o", help="Artifact path (default <thread>.json)."),
     error_channel: str = typer.Option("error", help="State channel that signals a step error."),
+    graph: str = typer.Option(
+        None,
+        "--graph",
+        help=(
+            "Compiled graph that wrote the thread, as path/to/file.py:attr or pkg.module:attr, "
+            "to report tasks it schedules but that recorded nothing. Imports and runs that "
+            "module, and the graph's state callbacks while reading; never a node."
+        ),
+    ),
 ) -> None:
     """Ingest a LangGraph thread's checkpoint history into a portable artifact."""
     from tracegraph.sqlite_snapshot import ingest_snapshot
 
     target = out or artifact.default_path(thread)
     _distinct_paths([sqlite], [target])
+    # Passed only when given, so an ingest without --graph makes exactly the call it always has.
+    extra: dict[str, Any] = {}
+    if graph is not None:
+        from tracegraph.graph_ref import load_graph
+
+        try:
+            extra["graph"] = load_graph(graph)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--graph") from exc
     try:
-        nt = _normalize_read(ingest_snapshot(sqlite, thread, error_channel=error_channel))
+        nt = _normalize_read(ingest_snapshot(sqlite, thread, error_channel=error_channel, **extra))
         _save_ingested(nt, target, explicit=out is not None)
     except (OSError, ValueError, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc

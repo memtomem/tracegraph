@@ -19,13 +19,14 @@ from tracegraph.input_validation import loads as json_loads
 from tracegraph.model import NormalizedTrace, StepSource
 
 #: Bump when the on-disk shape changes incompatibly.
-ARTIFACT_SCHEMA_VERSION = 5
+ARTIFACT_SCHEMA_VERSION = 6
 
 #: Versions this build can read. 1 needs a migration (see ``_migrate_v1``); 2 -> 3 is the
 #: identity, because 3 adds only a new ``Step.source`` value and changes nothing existing.
 #: 4 signals that TREE_PARENT was derived under EdgeOrigin precedence rather than
-#: legacy temporal-only selection. 5 adds only the ``interrupt`` ``Step.source`` value.
-_READABLE_VERSIONS = (1, 2, 3, 4, ARTIFACT_SCHEMA_VERSION)
+#: legacy temporal-only selection. 5 adds only the ``interrupt`` ``Step.source`` value. 6 adds
+#: the ``scheduled`` ``Step.source`` value and the optional ``schedule_graph`` trace header.
+_READABLE_VERSIONS = (1, 2, 3, 4, 5, ARTIFACT_SCHEMA_VERSION)
 
 
 def _required_version(nt: NormalizedTrace) -> int:
@@ -38,6 +39,9 @@ def _required_version(nt: NormalizedTrace) -> int:
     bump would invalidate digests already exported in review-candidate reports for artifacts
     whose content did not change at all.
 
+    * An artifact read against a supplied graph — it has a ``schedule_graph`` header, whether
+      or not that graph scheduled anything, or a scheduled step — is stamped 6, for the same
+      reason as 5 below.
     * An artifact that carries an interrupt step is stamped 5, whatever its projection: a
       v5 reader also reads the v4 projection, and an older reader would otherwise fail on
       the unknown enum value instead of refusing the version by name.
@@ -50,6 +54,9 @@ def _required_version(nt: NormalizedTrace) -> int:
     """
     from tracegraph.normalize import requires_origin_priority_projection
 
+    scheduled = StepSource.SCHEDULED
+    if nt.trace.schedule_graph is not None or any(step.source is scheduled for step in nt.steps):
+        return 6
     interrupt = StepSource.INTERRUPT
     if any(step.source is interrupt for step in nt.steps):
         return 5

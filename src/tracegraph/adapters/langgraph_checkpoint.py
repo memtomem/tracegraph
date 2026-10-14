@@ -61,10 +61,25 @@ A node that calls ``interrupt()`` leaves an ``__interrupt__`` pending write on t
 that scheduled it, and LangGraph resumes from the thread's newest root checkpoint. A task whose
 *only* write on that checkpoint is ``__interrupt__`` therefore never received a resume or
 produced a result, and becomes an ``UNSET`` step with ``source=INTERRUPT``. That is a statement
-about the recorded history, not a prediction that LangGraph would resume it now. Tasks that were
-scheduled but never started (the recursion limit, a killed process, a static breakpoint) leave no
-write at all and are not reported: telling them apart from finished work needs the compiled
-graph, which this adapter does not have.
+about the recorded history, not a prediction that LangGraph would resume it now.
+
+Scheduled tasks
+---------------
+A task that was scheduled but recorded nothing (the recursion limit, a killed process, a static
+breakpoint) leaves no write at all. The checkpoint alone cannot tell it from finished work, so
+it is reported only when the caller supplies the compiled graph (``schedule_graph``). LangGraph
+itself then lists the tasks the graph schedules at the newest root checkpoint, through the public
+``get_state``, and each one that has no pending write there becomes an ``UNSET`` step with
+``source=SCHEDULED``. ``get_state`` is used only to enumerate: whether a task finished, failed or
+paused is still read from the checkpoint's own writes, so the paths above are unchanged and the
+two kinds of step can never describe the same task.
+
+The answer belongs to the supplied graph. A different graph can schedule different tasks from
+the same checkpoint, and no check over one checkpoint can prove which graph wrote it, so the
+trace records the graph's fingerprint rather than claiming it is the one. Two things LangGraph
+silently drops from its own answer are disclosed instead of reported: a ``Command(goto=...)``
+input saved on the newest checkpoint by a run that then died (``get_state`` lists tasks before
+applying such writes), and ``Send`` packets addressed to a node the graph does not have.
 """
 
 from __future__ import annotations
@@ -88,6 +103,7 @@ from tracegraph.model import (
     Step,
     StepKind,
     StepSource,
+    ScheduleGraph,
     StepStatus,
     Trace,
 )
@@ -186,10 +202,14 @@ class LangGraphCheckpointAdapter:
         *,
         error_channel: str = "error",
         source_kind: str = "langgraph",
+        schedule_graph: Any = None,
     ) -> None:
         self._saver = saver
         self._error_channel = error_channel
         self._source_kind = source_kind
+        #: A compiled LangGraph graph to ask which tasks are scheduled at the head; see the
+        #: module docstring. ``None`` leaves scheduled-but-unwritten tasks unreported.
+        self._schedule_graph = schedule_graph
 
     # --- TraceAdapter ---
 
@@ -341,6 +361,16 @@ class LangGraphCheckpointAdapter:
                 trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
             )
         )
+        schedule_graph = None
+        if self._schedule_graph is not None:
+            from tracegraph.graph_ref import fingerprint
+
+            ingest_warnings.extend(
+                self._derive_scheduled_steps(
+                    trace_id, steps, checkpoints, key_by_step_id, writes_by_step, edges
+                )
+            )
+            schedule_graph = ScheduleGraph(fingerprint=fingerprint(self._schedule_graph))
         if malformed_writes:
             ingest_warnings.append(
                 f"{malformed_writes} pending write(s) are not a (task id, channel, value) "
@@ -354,6 +384,7 @@ class LangGraphCheckpointAdapter:
             thread_id=trace_id,
             status=StepStatus.ERROR if any_error else StepStatus.OK,
             causal_fidelity=CausalFidelity.DECLARED_DAG,
+            schedule_graph=schedule_graph,
         )
         return RawTrace(
             trace=trace,
@@ -485,10 +516,9 @@ class LangGraphCheckpointAdapter:
         first, which then reads as finished); a failure followed by a retry that interrupts leaves the same
         ``{__error__, __interrupt__}`` as the reverse order, because savers keep no order.
         """
-        root_ids = [sid for sid, (ns, _) in key_by_step_id.items() if ns == _ROOT_NS]
-        if not root_ids:
+        head_id = cls._head_step_id(checkpoints, key_by_step_id)
+        if head_id is None:
             return []
-        head_id = max(root_ids, key=lambda sid: checkpoints[sid]["id"])
         head = steps[head_id]
         cp = checkpoints[head_id]
         _, cid = key_by_step_id[head_id]
@@ -545,6 +575,136 @@ class LangGraphCheckpointAdapter:
                 "is still paused, so none is reported as interrupted."
             )
         return warnings
+
+    @staticmethod
+    def _head_step_id(
+        checkpoints: dict[str, dict], key_by_step_id: dict[str, _CheckpointKey]
+    ) -> str | None:
+        """The newest root-namespace checkpoint: what LangGraph resumes from and ``get_state``
+        reads. ``None`` for a history with no root checkpoint."""
+        root_ids = [sid for sid, (ns, _) in key_by_step_id.items() if ns == _ROOT_NS]
+        if not root_ids:
+            return None
+        return max(root_ids, key=lambda sid: checkpoints[sid]["id"])
+
+    # --- scheduled tasks (a supplied compiled graph) ---
+
+    def _derive_scheduled_steps(
+        self,
+        trace_id: str,
+        steps: dict[str, Step],
+        checkpoints: dict[str, dict],
+        key_by_step_id: dict[str, _CheckpointKey],
+        writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]],
+        edges: list[Edge],
+    ) -> list[str]:
+        """Add one UNSET step per task the supplied graph schedules at the head with no write.
+
+        The graph is bound to this adapter's saver with its own config and store cleared, and
+        asked for exactly the head checkpoint: a graph carrying ``with_config`` for an older
+        checkpoint would otherwise read history instead. Whatever the graph's callbacks raise
+        while LangGraph reads the checkpoint, ``SystemExit`` included, refuses the ingest as a
+        ``ValueError``; ``KeyboardInterrupt`` propagates.
+        """
+        head_id = self._head_step_id(checkpoints, key_by_step_id)
+        if head_id is None:
+            return []
+        head = steps[head_id]
+        cp = checkpoints[head_id]
+        _, cid = key_by_step_id[head_id]
+        graph = self._schedule_graph
+        bound = graph.copy(update={"checkpointer": self._saver, "store": None, "config": None})
+        config = {
+            "configurable": {"thread_id": trace_id, "checkpoint_ns": _ROOT_NS, "checkpoint_id": cid}
+        }
+        try:
+            snapshot = bound.get_state(config)
+        except KeyboardInterrupt:
+            raise
+        except BaseException as exc:
+            text = str(exc)
+            reason = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+            raise ValueError(f"the supplied graph could not read checkpoint {cid}: {reason}") from exc
+        read = (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
+        if read != cid:
+            raise ValueError(
+                f"the supplied graph read checkpoint {read!r} instead of the head {cid!r}"
+            )
+
+        head_writes = writes_by_step.get(head_id) or {}
+        for task in snapshot.tasks:
+            if task.id in head_writes:
+                continue  # finished, failed or paused: the paths above read its writes
+            derived_id = f"{head_id}#scheduled:{task.id}"
+            if derived_id in steps:
+                raise ValueError(
+                    f"derived scheduled step id {derived_id!r} collides with a checkpoint id "
+                    "or another derived step"
+                )
+            steps[derived_id] = Step(
+                step_id=derived_id,
+                trace_id=trace_id,
+                seq=head.seq + 1,
+                ts=head.ts,
+                kind=StepKind.TOOL if _looks_like_tool_node(task.name) else StepKind.CHAIN,
+                source=StepSource.SCHEDULED,
+                name=task.name,
+                status=StepStatus.UNSET,
+            )
+            edges.append(
+                Edge(
+                    type=EdgeType.CAUSED_BY,
+                    src=derived_id,
+                    dst=head_id,
+                    # LangGraph schedules the task from the head checkpoint itself.
+                    origin=EdgeOrigin.CHECKPOINT_PARENT,
+                )
+            )
+
+        warnings: list[str] = []
+        triggers = {str(t) for node in graph.nodes.values() for t in node.triggers} | {_TASKS}
+        unapplied = sum(
+            1 for channel, _ in head_writes.get(_NULL_TASK_ID, ()) if channel in triggers
+        )
+        if unapplied:
+            warnings.append(
+                f"checkpoint {cid}: {unapplied} input write(s) (a Command goto) wait to be "
+                "applied when a run resumes from this checkpoint; LangGraph does not list the "
+                "tasks they would start, so none is reported as scheduled."
+            )
+        packets = self._send_packets(graph, cp)
+        unknown = sorted(
+            {
+                node
+                for node in (getattr(packet, "node", None) for packet in packets)
+                if isinstance(node, str) and node not in graph.nodes
+            }
+        )
+        if unknown:
+            count = sum(1 for packet in packets if getattr(packet, "node", None) in unknown)
+            warnings.append(
+                f"checkpoint {cid}: {count} Send packet(s) address node(s) the supplied graph "
+                f"does not have ({', '.join(unknown)}); LangGraph schedules nothing for them, "
+                "so none is reported as scheduled."
+            )
+        return warnings
+
+    @staticmethod
+    def _send_packets(graph: Any, cp: dict) -> list[Any]:
+        """The checkpoint's pending ``Send`` packets, decoded by the graph's own tasks channel.
+
+        LangGraph's channel knows every layout it has written (its ``from_checkpoint`` still
+        accepts an older tuple encoding), so it decodes them here rather than a copy of that
+        knowledge. A checkpoint older than version 4 kept them in ``pending_sends`` instead.
+        """
+        packets = list(cp.get("pending_sends") or ())
+        channel = graph.channels.get(_TASKS)
+        values = cp.get("channel_values", {})
+        if channel is not None and _TASKS in values:
+            restored = channel.from_checkpoint(values[_TASKS])
+            if restored.is_available():
+                packets.extend(restored.get())
+        return packets
 
     @staticmethod
     def _writes_by_task(pending_writes: Any) -> tuple[dict[str, list[tuple[str, Any]]], int]:

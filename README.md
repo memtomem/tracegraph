@@ -258,11 +258,12 @@ and any change to them is called out in the [changelog](CHANGELOG.md).
 
 Known limits:
 
-- A LangGraph task that was scheduled but never started (a run stopped by the recursion
+- A LangGraph task that was scheduled but recorded nothing (a run stopped by the recursion
   limit, killed, or held at an `interrupt_before`/`interrupt_after` breakpoint) leaves no
-  write and is not reported, so such a run reads `ok` unless some other step recorded an
-  error. A task paused by `interrupt()` *is* reported (below), but only at the root graph:
-  the subgraph node is named, not the node inside it that paused.
+  write. It is reported only when `ingest --graph` names the compiled graph (below); without
+  it such a run reads `ok` unless some other step recorded an error. Trace status stays `ok`
+  either way. A task paused by `interrupt()` is reported without a graph. Both are reported
+  only at the root graph: the subgraph node is named, not the node inside it.
 - Phoenix exports carry no span links, so their artifacts are parent-only; additional fan-in
   causes may be missing.
 - Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
@@ -353,7 +354,25 @@ that checkpoint: the recorded history holds no resume and no result for it. That
 history, not whether LangGraph would resume the task today. An interrupt recorded together with
 a resume or an error and no result is ambiguous in the checkpoint itself — under LangGraph 1.2.2
 a task resumed with nothing to write looks exactly like one paused a second time — so it is
-disclosed at ingest, not reported. An artifact carrying interrupt steps declares artifact `schema_version` 5; one
+disclosed at ingest, not reported. Scheduled tasks need the compiled graph: `tracegraph ingest --sqlite trace.db --thread A
+--graph path/to/agent.py:graph` (the `langgraph.json` form) or `--graph pkg.module:graph`.
+LangGraph's own `get_state` then lists the tasks that graph schedules at the thread's newest
+root checkpoint, and each one with no write there becomes an `unset` step with source
+`scheduled`. Whether a task finished, failed or paused is still read from the checkpoint's
+writes, so a `scheduled` step never duplicates a `task` or `interrupt` step. A `scheduled`
+step does not claim that the task never started: a task killed mid-run records nothing
+either. The answer belongs to the graph you pass: a different graph can schedule different
+tasks from the same checkpoint, and nothing in one checkpoint proves which graph wrote it, so
+the artifact records the graph's structural fingerprint (`trace.schedule_graph`) — even when
+nothing is scheduled, which is how "checked, nothing pending" differs from "not checked".
+A `Command(goto=...)` input saved on that checkpoint but not yet applied, and `Send` packets
+addressed to a node the graph lacks, are left out of LangGraph's own answer; ingest discloses
+both instead.
+`--graph` runs code: it imports the module (top-level code runs), and reading the checkpoint
+runs the graph's state callbacks — schema mappers and validators, reducers, custom channels,
+managed values, cache-key functions — though no node runs. It is never inferred. An artifact
+read with `--graph` declares artifact `schema_version` 6. An artifact carrying interrupt
+steps declares artifact `schema_version` 5; one
 whose derived tree relies on EdgeOrigin precedence declares 4; otherwise, an artifact carrying
 derived task steps declares `schema_version` 3, and artifacts without them still serialize as
 version 2, byte for byte.
