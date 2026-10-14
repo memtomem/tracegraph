@@ -2,6 +2,9 @@
 
 ## 현재 전달 상태 — 2026-10-14 (Asia/Seoul)
 
+- **다음 세션 시작점:** `tracegraph-mvp` @ `9d28b13`(PR #41 병합), 작업 트리 깨끗. PyPI 최신은
+  0.4.0이고, 그 뒤 착지한 미릴리스 변경은 PR #41 하나다(11번). 다음 큰 작업은
+  [이슈 #37](https://github.com/memtomem/tracegraph/issues/37)이며 출발점은 14번 항목에 있다.
 - **상태:** [PR #28](https://github.com/memtomem/tracegraph/pull/28)로 착지했다(merge `23e94697`, 2026-10-13). 기준 커밋은 `e5d86c1`(PR #27 병합)이고, 그 위 커밋 19개다.
   브랜치 16개를 한 줄로 쌓아 최상단 `docs/unset-status-by-source` 하나로 PR을 열었고, merge
   commit으로 합쳐 아래 표의 커밋이 그대로 남아 있다.
@@ -191,7 +194,33 @@ editable 설치를 공유하는 git worktree에서 테스트할 때는 `PYTHONPA
    - [GitHub Release v0.4.0](https://github.com/memtomem/tracegraph/releases/tag/v0.4.0)은
      prerelease로 만들었다.
    - 관찰: `inspect` 트리는 `unset` step에 표식을 붙이지 않아 interrupt step이 노드 이름만으로
-     보인다. 릴리스를 막을 문제는 아니며 표시 개선 후보다.
+     보였다. 11번에서 해결했다.
+11. **`inspect`의 interrupt 표시: 착지, 미릴리스(PR #41, merge `9d28b13`, 2026-10-14).**
+   `source=interrupt` step을 노란색 `⏸ interrupted`로 표시하고, 하나 이상이면 요약 줄에
+   `· N interrupted`를 붙인다. 다른 `unset` step(Phoenix `unset`, 취소된 task)은 그대로이고,
+   interrupt step이 없는 trace의 출력은 바이트 단위로 같다(커밋된 fixture 출력 121개 확인).
+   `CHANGELOG.md`의 Unreleased에 있으며 다음 릴리스(0.4.1)에 들어간다. 리뷰 2라운드(NEEDS-FIX:
+   테스트의 터미널 폭 의존 → console 폭 고정, SHIP).
+12. **`CLAAssistant`를 required check로: 완료(2026-10-14).** 소유자가 branch protection을 바꿔
+   `tracegraph-mvp`의 required check가 8개가 됐다(`app_id` 15368, GitHub Actions). PR #41이 이 규칙
+   아래 첫 병합이다. 운영 주의: 외부 기여자의 서명 댓글은 PR head에서 check를 다시 돌리지
+   않으므로, 서명 뒤 Actions에서 `CLAAssistant`를 재실행해야 병합할 수 있다. `dependabot[bot]`은
+   allowlist에 있다.
+13. **좁은 터미널에서 실패하는 기존 CLI 테스트(미해결, 소유자 결정 대기).** `COLUMNS=40`에서
+   `tests/test_cli.py` 13개가 실패한다. PR #41 이전 코드에서도 같은 13개이므로 기존 문제다. Rich가
+   호출자 터미널 폭으로 줄바꿈하기 때문이며, PR #41의 새 테스트는 `cli_mod.console`을 고정 폭
+   `Console`로 바꿔 피했다. CI는 기본 폭이라 통과한다.
+14. **이슈 #37 출발점(시작 전).** 시작하지 않은 task(recursion limit, kill,
+   `interrupt_before`/`after`)를 opt-in 컴파일 그래프(`--graph module:attr`)로 보고한다.
+   - 먼저 정할 계약: 사용자 코드 import라는 신뢰 경계, 그래프 동일성 확인과 artifact 기록,
+     "시작 안 함" 표식(새 `StepSource`와 내용 기준 artifact v6 후보), CLI 모양.
+   - 그래프 없는 추론을 버린 근거(완료된 실행을 미완료로 읽는 4가지)는 이슈 본문과 9번 항목에
+     있다. 수용 기준도 같다: 완료·재개·fork된 실행에 미완료 작업을 표시하지 않는다.
+   - `get_state`는 oracle이 아니다. LangGraph 1.2.2는 두 번째 `interrupt()` 뒤 `next=()`를
+     보고한다(1.2.15는 바로잡음). `invoke` 반환값과 대조하고, 두 버전 모두에서 측정한다(drift
+     워크플로가 최신 버전을 돌린다).
+   - 재현 스크립트 `~/.claude/plans/p1b-probes/probe{,2..7}.py`(저장소 밖, `uv run --no-sync python
+     <file>`)가 barrier·예약 이름 state key·그래프 교체·subgraph replay 시나리오를 이미 만든다.
 
 ---
 
