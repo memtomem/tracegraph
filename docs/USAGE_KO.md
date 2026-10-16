@@ -89,7 +89,8 @@ code는 0이며, CI 판정은 기존 `diff`와 `query`를 계속 사용합니다
 `CHOOSE_NEW_ARTIFACT_PATH`는 존재하는 파일명이 아니라 사용자가 새 경로로 바꿔야 하는
 자리표시자입니다. 안내만으로 파일을 저장하거나 명령을 실행하지 않습니다. 이미 소비된 stdin은
 복구할 수 없으며, Phoenix 재조회 시 데이터가 바뀌었다면 다시 진단하여 step ID를 확인해야 합니다.
-`/dev/fd/...`의 pipe처럼 다시 읽을 수 없는 파일 입력도 재입력이 필요한 스트림으로 안내합니다.
+`/dev/stdin`, `/dev/fd/...`, `/proc/...`처럼 프로세스에 종속되는 입력 경로와 pipe도
+재입력이 필요한 스트림으로 안내합니다.
 복사 가능한 명령은 POSIX 셸용으로 인자를 인용합니다. 제어문자가 있는 인자는 실행용 명령 대신
 이스케이프된 argv 값으로 표시합니다. ID·경로·명령의 `:ok:` 같은 문자열은 emoji로 바꾸지 않고,
 좁은 터미널에서도 복사할 값 중간에 줄바꿈을 삽입하지 않습니다.
@@ -442,8 +443,9 @@ uv run tracegraph query tool-failure A.json B.json
 ## 추천 학습 순서
 
 `examples/getting_started_ko.ipynb`의 저장된 CLI 출력은 이전 버전입니다.
-노트북 재실행 및 실습 5의 수동 ID 조회 설명 갱신은 후속 작업으로 남아 있습니다.
-현재는 `analyze` 출력의 `step_id:` 값을 그대로 `explain`에 사용할 수 있습니다.
+현재는 `analyze` 출력의 `Next investigation steps`에 있는 `explain` 명령을 복사해 사용하세요.
+`step_id:` 줄은 표시용 JSON 문자열이며 셸용 인용이 아닙니다. 이를 명령에 그대로 붙이면
+`$HOME` 같은 문자열이 셸에서 확장될 수 있으므로, 인자가 안전하게 인용된 안내 명령을 사용하세요.
 
 1. `examples/tiny_agent.py`로 `A.json`, `B.json`을 만든다.
 2. `inspect A.json`으로 에러 step을 찾는다.
