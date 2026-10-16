@@ -1772,6 +1772,34 @@ def test_investigation_literal_report_and_long_id_at_narrow_width(tmp_path, monk
 
 
 @pytest.mark.parametrize("phoenix", [False, True])
+@pytest.mark.parametrize("source", ["/dev/stdin", "/dev/../dev/stdin", "/proc/self/fd/0"])
+def test_investigation_redirected_stdin_alias_requires_replay(tmp_path, phoenix, source):
+    from pathlib import Path
+    if not Path(source).exists():
+        pytest.skip("requires stdin descriptor alias")
+    path = tmp_path / "input.json"
+    _investigation_artifact(path, count=1)
+    if phoenix:
+        path.write_text(json.dumps(_phoenix_export()))
+    # A real regular-file stdin redirect matters: is_file() is true on these aliases,
+    # and Linux realpath() follows /proc/self/fd/0 all the way to the input file.
+    with path.open("rb") as stdin:
+        result = subprocess.run(
+            [sys.executable, "-c", "from tracegraph.cli import app; app()", "analyze", source],
+            stdin=stdin, capture_output=True, text=True, timeout=30,
+        )
+    assert result.returncode == 0, result.stderr
+    commands = _investigation_commands(result.stdout)
+    assert commands
+    assert all(source not in arg for command in commands for arg in command)
+    assert "Template only" in result.stdout
+    if phoenix:
+        assert "--file=-" in commands[0]
+    else:
+        assert "consumed stream cannot be recovered" in " ".join(result.stdout.split())
+
+
+@pytest.mark.parametrize("phoenix", [False, True])
 @pytest.mark.parametrize("regular_file", [False, True])
 def test_investigation_consumed_pipe_requires_replay(tmp_path, phoenix, regular_file):
     from pathlib import Path

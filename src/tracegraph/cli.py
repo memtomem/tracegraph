@@ -433,11 +433,12 @@ def _render_next_steps(
     if json_out is None and len(report.primary_failures) > limit:
         console.print("  No JSON report saved. Request --json-out with a chosen report path.")
 
-    # A named pipe/process substitution is already consumed, just like stdin.
-    # Checking its type does not open or read it again.
+    # Device/proc paths are process-bound even when backed by a regular file.
+    # Do not resolve symlinks: Linux fd aliases can resolve to that backing file.
+    # Checking a named pipe's type does not open or read it again.
     replay = source is not None and (
         source == "-"
-        or source.startswith(("/dev/fd/", "/proc/self/fd/"))
+        or os.path.abspath(source).startswith(("/dev/", "/proc/"))
         or not Path(source).is_file()
     )
     target = str(saved_artifact) if saved_artifact is not None else (
