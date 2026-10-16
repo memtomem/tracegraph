@@ -1573,3 +1573,236 @@ def test_px_read_commands_are_exact(monkeypatch):
         ["px", "project", "list", "--limit", "1", "--format", "raw", "--no-progress"],
         ["px", "trace", "list", "--limit", "1", "--format", "raw", "--no-progress", "--project", "proj"],
     ]
+
+
+# Investigation guidance must navigate the exact evidence without changing analysis data.
+def _investigation_artifact(path, *, count=2, source_kind="fixture", control_id=False, ok=False):
+    steps = [Step(
+        step_id=("ns:ok:\x1b[31mhidden" if control_id else f"--ns:ok:failure-{i}"),
+        trace_id="investigation", seq=i, name="private prompt body",
+        kind=StepKind.TOOL, status=StepStatus.OK if ok else StepStatus.ERROR,
+    ) for i in range(count)]
+    nt = normalize(RawTrace(
+        trace=Trace(trace_id="investigation", source_kind=source_kind),
+        steps=steps, causal_edges=[],
+    ))
+    artifact.save_atomic(nt, path)
+    return nt
+
+
+def _investigation_commands(output):
+    import shlex
+    return [shlex.split(line.strip()) for line in output.splitlines()
+            if line.strip().startswith("tracegraph ")]
+
+
+def test_investigation_artifact_commands_navigate_exact_ids(tmp_path, monkeypatch):
+    # These are artifact bytes even though the producer source_kind says Phoenix.
+    path = tmp_path / "a:ok:b 'quote' $HOME;[bold].json"
+    nt = _investigation_artifact(path, source_kind="phoenix_cli")
+    reads = []
+    original = cli_mod._read_source
+
+    def read(source):
+        reads.append(source)
+        return original(source)
+
+    monkeypatch.setattr(cli_mod, "_read_source", read)
+    result = runner.invoke(app, ["analyze", str(path)])
+    assert result.exit_code == 0, result.output
+    assert reads == [str(path)]  # provenance comes from the original parse
+    assert "private prompt body" not in result.output
+    commands = _investigation_commands(result.output)
+    assert len(commands) == 2
+    assert {c[-1] for c in commands} == {s.step_id for s in nt.steps}
+    for command in commands:
+        assert command[:3] == ["tracegraph", "explain", "--"]
+        assert command[3] == str(path)
+        explained = runner.invoke(app, command[1:])
+        assert explained.exit_code == 0, explained.output
+    assert "Template only" not in result.output
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_investigation_truncation_matches_report_storage(tmp_path, saved):
+    from tracegraph.analysis.diagnose import analyze, dumps
+    path = tmp_path / "trace.json"
+    nt = _investigation_artifact(path)
+    out = tmp_path / "report.json"
+    args = ["analyze", str(path), "--limit", "1"]
+    if saved:
+        args += ["--json-out", str(out)]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "1 more failure candidate(s) not shown" in flat
+    assert "--limit 2" in flat
+    assert "in JSON report" not in flat
+    assert ("Saved JSON report:" in flat) is saved
+    assert ("No JSON report saved" in flat) is not saved
+    assert out.exists() is saved
+    if saved:
+        assert out.read_text() == dumps(analyze(nt))
+    assert len(_investigation_commands(result.output)) == 1
+
+
+@pytest.mark.parametrize("stdin", [False, True])
+def test_investigation_phoenix_export_requires_explicit_ingest(tmp_path, stdin):
+    path = tmp_path / "p:x: 'q' $HOME;[x].json"
+    payload = json.dumps(_phoenix_export())
+    path.write_text(payload)
+    result = runner.invoke(app, ["analyze", "-" if stdin else str(path)],
+                           input=payload if stdin else None)
+    assert result.exit_code == 0, result.output
+    commands = _investigation_commands(result.output)
+    assert commands[0][:2] == ["tracegraph", "ingest-phoenix"]
+    assert "--file=" + ("-" if stdin else str(path)) in commands[0]
+    assert "--trace=phoenix-1" in commands[0]
+    assert "--out=CHOOSE_NEW_ARTIFACT_PATH" in commands[0]
+    assert "Template only" in result.output
+    assert "parent_only" in result.output
+    assert "re-fetch" not in result.output
+    assert ("Replay the original Phoenix" in result.output) is stdin
+    # Resolve the explicitly labelled template, ingest, then execute its explain commands.
+    out = tmp_path / "saved.json"
+    ingest = [a.replace("CHOOSE_NEW_ARTIFACT_PATH", str(out)) for a in commands[0][1:]]
+    ingested = runner.invoke(app, ingest, input=payload if stdin else None)
+    assert ingested.exit_code == 0, ingested.output
+    for command in commands[1:]:
+        args = [a.replace("CHOOSE_NEW_ARTIFACT_PATH", str(out)) for a in command[1:]]
+        assert runner.invoke(app, args).exit_code == 0
+
+
+def test_investigation_artifact_stdin_requires_replay(tmp_path):
+    path = tmp_path / "input.json"
+    _investigation_artifact(path, count=1)
+    result = runner.invoke(app, ["analyze", "-"], input=path.read_text())
+    assert result.exit_code == 0, result.output
+    assert "Replay the original artifact stream" in result.output
+    assert "ingest-phoenix" not in result.output
+    assert "CHOOSE_NEW_ARTIFACT_PATH" in result.output
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_investigation_live_phoenix_uses_selected_trace_and_project(tmp_path, monkeypatch, saved):
+    from tracegraph.adapters import PhoenixExportAdapter
+    nt = normalize(PhoenixExportAdapter(_phoenix_export("trace:ok:1")).ingest("trace:ok:1"))
+    monkeypatch.setattr(cli_mod, "_px_version", lambda: "1.8.1")
+    monkeypatch.setattr(cli_mod, "_px_latest_trace", lambda **kw: (nt, True, 20))
+    out = tmp_path / "saved.json"
+    args = ["phoenix", "diagnose", "--project", "a:ok: 'project';$HOME"]
+    if saved:
+        args += ["--save-artifact", str(out)]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 0, result.output
+    commands = _investigation_commands(result.output)
+    assert out.exists() is saved
+    if saved:
+        assert all(c[:3] == ["tracegraph", "explain", "--"] for c in commands)
+        assert all(c[3] == str(out) for c in commands)
+    else:
+        assert commands[0][:3] == ["tracegraph", "phoenix", "diagnose"]
+        assert "--project=a:ok: 'project';$HOME" in commands[0]
+        assert commands[0][-2:] == ["--", "trace:ok:1"]
+        assert "upstream data may have changed" in result.output
+
+
+@pytest.mark.parametrize("command", ["analyze", "phoenix"])
+def test_investigation_does_not_claim_failed_save_succeeded(tmp_path, monkeypatch, command):
+    path = tmp_path / "input.json"
+    nt = _investigation_artifact(path)
+    # Replacing an existing directory is a portable write failure.
+    destination = tmp_path / "directory"
+    destination.mkdir()
+    if command == "analyze":
+        args = ["analyze", str(path), "--json-out", str(destination)]
+    else:
+        monkeypatch.setattr(cli_mod, "_px_version", lambda: "1.8.1")
+        monkeypatch.setattr(cli_mod, "_px_trace", lambda *a, **kw: nt)
+        args = ["phoenix", "diagnose", "id", "--save-artifact", str(destination)]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 2, result.output
+    assert "Next investigation steps" not in result.output
+    assert "Saved JSON report:" not in result.output
+    assert "step_id:" in result.output  # analysis still renders before the failed write
+
+
+def test_investigation_controls_are_escaped_not_copyable(tmp_path):
+    path = tmp_path / "input.json"
+    _investigation_artifact(path, count=1, control_id=True)
+    result = runner.invoke(app, ["analyze", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "\\u001b" in result.output
+    assert "ns:ok:" in result.output
+    assert "\x1b[31mhidden" not in result.output
+    assert "no copyable shell command" in result.output
+    assert not _investigation_commands(result.output)
+
+
+def test_investigation_no_error_has_no_spurious_actions(tmp_path):
+    path = tmp_path / "input.json"
+    _investigation_artifact(path, count=1, ok=True)
+    result = runner.invoke(app, ["analyze", str(path)])
+    assert result.exit_code == 0, result.output
+    assert "Next investigation steps" not in result.output
+    assert not _investigation_commands(result.output)
+
+
+@pytest.mark.parametrize("ok", [False, True])
+def test_investigation_literal_report_and_long_id_at_narrow_width(tmp_path, monkeypatch, ok):
+    from rich.console import Console
+    monkeypatch.setattr(cli_mod, "console", Console(width=40, force_terminal=False))
+    path = tmp_path / "input.json"
+    nt = _investigation_artifact(path, count=1, ok=ok)
+    long_id = "ns:ok:" + "segment-" * 20 + "end"
+    nt.steps[0].step_id = long_id
+    # Re-normalize so the derived BELONGS_TO edge uses the new ID.
+    nt = normalize(RawTrace(trace=nt.trace, steps=nt.steps, causal_edges=[]))
+    artifact.save_atomic(nt, path)
+    out = tmp_path / ("report:ok:" + "long-" * 20 + ".json")
+    result = runner.invoke(app, ["analyze", str(path), "--json-out", str(out)])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert any("Saved JSON report:" in line and str(out) in line for line in lines)
+    assert result.output.count(str(out)) == 1
+    if not ok:
+        assert '    step_id: "' + long_id + '"' in lines
+        assert _investigation_commands(result.output)[0][-1] == long_id
+
+
+@pytest.mark.parametrize("phoenix", [False, True])
+@pytest.mark.parametrize("regular_file", [False, True])
+def test_investigation_consumed_pipe_requires_replay(tmp_path, phoenix, regular_file):
+    from pathlib import Path
+    path = tmp_path / "input.json"
+    _investigation_artifact(path, count=1)
+    payload = json.dumps(_phoenix_export()).encode() if phoenix else path.read_bytes()
+    if regular_file:
+        path.write_bytes(payload)
+        read_fd = os.open(path, os.O_RDONLY)
+        write_fd = None
+    else:
+        read_fd, write_fd = os.pipe()
+    source = f"/dev/fd/{read_fd}"
+    try:
+        if not Path(source).exists():
+            pytest.skip("requires /dev/fd")
+        if write_fd is not None:
+            os.write(write_fd, payload)
+            os.close(write_fd)
+            write_fd = None
+        result = runner.invoke(app, ["analyze", source])
+        assert result.exit_code == 0, result.output
+        commands = _investigation_commands(result.output)
+        assert all(source not in arg for command in commands for arg in command)
+        assert "Template only" in result.output
+        assert "re-fetch" not in result.output
+        if phoenix:
+            assert "--file=-" in commands[0]
+        else:
+            assert "consumed stream cannot be recovered" in " ".join(result.output.split())
+    finally:
+        os.close(read_fd)
+        if write_fd is not None:
+            os.close(write_fd)

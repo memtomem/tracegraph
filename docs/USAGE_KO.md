@@ -72,6 +72,35 @@ uv run tracegraph analyze A.json --baseline B.json --json-out analysis.json
 요약을 한 번에 보여 줍니다. 정상/실패 차이가 발견되어도 분석 자체가 성공하면 exit
 code는 0이며, CI 판정은 기존 `diff`와 `query`를 계속 사용합니다.
 
+### 진단에서 증거 조사로 이동하기
+
+실패 후보에는 전체 `step_id`가 표시됩니다. 같은 이름의 tool이 여러 번 실행돼도
+이 ID로 구분할 수 있습니다. `Next investigation steps`에는 다음 안내가 나옵니다.
+
+| 분석 입력 | 다음 단계 |
+| --- | --- |
+| artifact 파일 | 해당 파일과 전체 step ID를 넣은 `tracegraph explain -- ...` 명령 |
+| Phoenix export 파일 | 선택 trace를 `ingest-phoenix`로 저장한 뒤 `explain`하는 템플릿 |
+| stdin의 artifact | 원래 입력을 선택한 파일로 다시 보존한 뒤 `explain`하는 템플릿 |
+| stdin의 Phoenix export | 원래 입력을 다시 공급하여 `ingest-phoenix --file=-`로 저장하는 템플릿 |
+| `phoenix diagnose --save-artifact ...` | 저장 성공 후 실제 artifact 경로로 `explain`하는 명령 |
+| artifact를 저장하지 않은 `phoenix diagnose` | 이번에 선택된 trace ID와 project를 유지해 저장하는 재조회 템플릿 |
+
+`CHOOSE_NEW_ARTIFACT_PATH`는 존재하는 파일명이 아니라 사용자가 새 경로로 바꿔야 하는
+자리표시자입니다. 안내만으로 파일을 저장하거나 명령을 실행하지 않습니다. 이미 소비된 stdin은
+복구할 수 없으며, Phoenix 재조회 시 데이터가 바뀌었다면 다시 진단하여 step ID를 확인해야 합니다.
+`/dev/fd/...`의 pipe처럼 다시 읽을 수 없는 파일 입력도 재입력이 필요한 스트림으로 안내합니다.
+복사 가능한 명령은 POSIX 셸용으로 인자를 인용합니다. 제어문자가 있는 인자는 실행용 명령 대신
+이스케이프된 argv 값으로 표시합니다. ID·경로·명령의 `:ok:` 같은 문자열은 emoji로 바꾸지 않고,
+좁은 터미널에서도 복사할 값 중간에 줄바꿈을 삽입하지 않습니다.
+
+후보가 생략되면 전체 후보를 보는 데 필요한 `--limit` 값을 안내합니다. JSON 보고서를 저장하지
+않았으면 `--json-out` 사용법을, 저장에 성공했으면 실제 경로를 안내합니다. ID는 익명화되지 않으며
+`explain`은 artifact의 원시 이름과 오류를 표시할 수 있으므로 공유 전에 확인하세요. 표시된 선행
+관계만으로 예외 전파나 근본 원인이 확정되는 것은 아닙니다.
+직접 관측한 실패, edge origin에 따른 인과·containment 구분과 누락 telemetry 표시는 기존 분석
+출력을 유지합니다. 새 조사 안내가 인과관계를 추가 추론하거나 근본 원인을 확정하지는 않습니다.
+
 ## trace 구조 보기: inspect
 
 `inspect`는 trace의 실행 흐름을 트리 형태로 보여 줍니다.
@@ -411,6 +440,10 @@ uv run tracegraph query tool-failure A.json B.json
 ```
 
 ## 추천 학습 순서
+
+`examples/getting_started_ko.ipynb`의 저장된 CLI 출력은 이전 버전입니다.
+노트북 재실행 및 실습 5의 수동 ID 조회 설명 갱신은 후속 작업으로 남아 있습니다.
+현재는 `analyze` 출력의 `step_id:` 값을 그대로 `explain`에 사용할 수 있습니다.
 
 1. `examples/tiny_agent.py`로 `A.json`, `B.json`을 만든다.
 2. `inspect A.json`으로 에러 step을 찾는다.

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from decimal import Decimal
@@ -210,12 +211,23 @@ def _read_source(source: str) -> str:
     return _read_artifact_bytes(Path(source)).decode("utf-8")
 
 
+@dataclass(frozen=True)
+class _AnalysisInput:
+    trace: NormalizedTrace
+    is_artifact: bool
+
+
 def _load_analysis_source(source: str, trace_id: str | None = None) -> NormalizedTrace:
+    return _load_analysis_input(source, trace_id).trace
+
+
+def _load_analysis_input(source: str, trace_id: str | None = None) -> _AnalysisInput:
     """Strictly identify a tracegraph artifact or Phoenix CLI trace export."""
     try:
         text = _read_source(source)
         payload = load_json(text)
-        if isinstance(payload, dict) and "schema_version" in payload:
+        is_artifact = isinstance(payload, dict) and "schema_version" in payload
+        if is_artifact:
             nt = artifact.from_obj(payload)
         else:
             from tracegraph.adapters import PhoenixExportAdapter
@@ -232,7 +244,7 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
                 selected = ids[0]
             nt = _normalize_read(adapter.ingest(selected))
         validate_normalized(nt)
-        return nt
+        return _AnalysisInput(nt, is_artifact)
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot load analysis input {source}: {_load_reason(exc)}") from exc
 
@@ -375,6 +387,95 @@ def _px_latest_trace(*, project: str | None = None) -> tuple[NormalizedTrace, bo
     return nt, error_index is not None, len(payload)
 
 
+def _argument_text(value: str) -> str:
+    # JSON quoting makes controls visible; nonprinting Unicode (including bidi controls)
+    # also uses escapes. Identifiers remain identifiers, not anonymized aliases.
+    return json.dumps(value, ensure_ascii=not value.isprintable())
+
+
+def _print_evidence(text: str) -> None:
+    """Keep evidence identifiers and paths literal and copyable, even on narrow terminals."""
+    console.print(text, markup=False, highlight=False, emoji=False, soft_wrap=True)
+
+
+def _show_investigation_command(args: list[str]) -> None:
+    if any(not arg.isprintable() for arg in args):
+        console.print(
+            "  Nonprinting argument: no copyable shell command. Use these escaped argv values:",
+            markup=False,
+        )
+        _print_evidence("  " + json.dumps(args, ensure_ascii=True))
+        return
+    _print_evidence("  " + shlex.join(args))
+
+
+def _render_next_steps(
+    report: AnalysisReport,
+    *,
+    limit: int,
+    source: str | None = None,
+    is_artifact: bool = False,
+    saved_artifact: Path | None = None,
+    json_out: Path | None = None,
+    project: str | None = None,
+) -> None:
+    """Called only after requested writes succeed; never saves or executes guidance."""
+    if json_out is not None:
+        _print_evidence("\nSaved JSON report: " + _argument_text(str(json_out)))
+    findings = report.primary_failures[:limit]
+    if not findings:
+        return
+    console.print("\n[bold]Next investigation steps[/]")
+    console.print(
+        "  IDs identify evidence, not anonymous data. explain may display raw names/errors; "
+        "review before sharing. Recorded predecessors do not prove exception propagation."
+    )
+    if json_out is None and len(report.primary_failures) > limit:
+        console.print("  No JSON report saved. Request --json-out with a chosen report path.")
+
+    # A named pipe/process substitution is already consumed, just like stdin.
+    # Checking its type does not open or read it again.
+    replay = source is not None and (
+        source == "-"
+        or source.startswith(("/dev/fd/", "/proc/self/fd/"))
+        or not Path(source).is_file()
+    )
+    target = str(saved_artifact) if saved_artifact is not None else (
+        source if is_artifact and not replay else None
+    )
+    if target is None:
+        target = "CHOOSE_NEW_ARTIFACT_PATH"
+        console.print(
+            "  Template only: replace CHOOSE_NEW_ARTIFACT_PATH with a new, unused path. "
+            "No artifact was saved by this diagnosis."
+        )
+        if source is None:
+            args = ["tracegraph", "phoenix", "diagnose"]
+            if project is not None:
+                args.append("--project=" + project)
+            args.extend(["--save-artifact=" + target, "--", report.trace_id])
+            console.print("  Re-fetch the selected trace explicitly; its upstream data may have changed. "
+                          "If re-fetch changed the trace, diagnose it again before explaining.")
+            _show_investigation_command(args)
+        elif is_artifact:
+            console.print(
+                "  Replay the original artifact stream into your chosen file first; "
+                "this consumed stream cannot be recovered by tracegraph."
+            )
+        else:
+            if replay:
+                console.print("  Replay the original Phoenix export on stdin for this ingest command.")
+            _show_investigation_command([
+                "tracegraph", "ingest-phoenix", "--file=" + ("-" if replay else source),
+                "--trace=" + report.trace_id, "--out=" + target,
+            ])
+        console.print("  After saving, use the step IDs below.")
+    for finding in findings:
+        _show_investigation_command([
+            "tracegraph", "explain", "--", target, finding.step.step_id,
+        ])
+
+
 def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
     status_style = "red" if report.status == StepStatus.ERROR.value else "green"
     console.print(
@@ -388,6 +489,7 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
     for finding in report.primary_failures[:limit]:
         step = finding.step
         console.print(f"  [red]✗[/] {escape(step.name or step.kind)} ({step.kind}, step {step.seq})")
+        _print_evidence(f"    step_id: {_argument_text(step.step_id)}")
         shown = {item.step_id: item.name or item.kind for item in finding.causal_steps}
         shown[step.step_id] = step.name or step.kind
         for edge in finding.causal_edges:
@@ -398,7 +500,8 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
             )
     remaining = len(report.primary_failures) - limit
     if remaining > 0:
-        console.print(f"  [dim]… {remaining} more failure candidate(s) in JSON report[/]")
+        console.print(f"  [dim]… {remaining} more failure candidate(s) not shown; "
+                      f"use --limit {len(report.primary_failures)} to show all.[/]")
     if report.propagated_failures:
         names = ", ".join(escape(item.name or item.kind) for item in report.propagated_failures)
         console.print(f"  [dim]propagated/context errors: {names}[/]")
@@ -862,13 +965,15 @@ def analyze_command(
     if limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
     _distinct_paths([Path(p) for p in (source, baseline) if p and p != "-"], [json_out] if json_out else [])
-    nt = _load_analysis_source(source, trace)
+    loaded = _load_analysis_input(source, trace)
+    nt = loaded.trace
     baseline_nt = _load_analysis_source(baseline, baseline_trace) if baseline else None
     report = build_analysis(nt, baseline=baseline_nt)
     _render_analysis(report, limit=limit)
     if json_out:
         _save_report(report, json_out)
-        console.print(f"\n[green]report[/] → {escape(str(json_out))}")
+    _render_next_steps(report, limit=limit, source=source,
+                       is_artifact=loaded.is_artifact, json_out=json_out)
 
 
 @phoenix_app.command(name="diagnose")
@@ -909,10 +1014,11 @@ def phoenix_diagnose(
     _render_analysis(report, limit=limit)
     if save_artifact:
         _save_artifact(nt, save_artifact)
-        console.print(f"\n[green]artifact[/] → {escape(str(save_artifact))}")
+        _print_evidence("\nSaved artifact: " + _argument_text(str(save_artifact)))
     if json_out:
         _save_report(report, json_out)
-        console.print(f"[green]report[/] → {escape(str(json_out))}")
+    _render_next_steps(report, limit=limit, saved_artifact=save_artifact,
+                       json_out=json_out, project=project)
 
 
 @phoenix_app.command(name="doctor")

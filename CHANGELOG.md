@@ -10,6 +10,17 @@ explicitly.
 
 ### Added
 
+- **Guided investigation after `analyze` and `phoenix diagnose`** (#58): displayed failure
+  candidates include full step IDs, with POSIX-quoted `explain` commands for existing artifacts
+  or explicitly labelled save/replay templates for exports, stdin, and unsaved Phoenix traces.
+  Evidence IDs, paths and commands preserve literal emoji-like tokens and are not forcibly
+  line-wrapped; consumed pipe inputs require replay. Nonprinting arguments are shown as
+  escaped data instead of copyable commands. Hidden
+  candidates show the required `--limit`; report paths are acknowledged only after successful
+  writes, without duplicate report-path notices. Existing edge-origin/fidelity warnings and
+  missing-telemetry disclosures continue to distinguish evidence from causal claims; this
+  change adds navigation, not new causal inference. Analysis JSON schemas, exit codes, and
+  artifact privacy boundaries are unchanged.
 - **`ingest --graph` reports LangGraph tasks that were scheduled but recorded nothing.**
   Given the compiled graph (`path/to/file.py:attr` or `pkg.module:attr`), LangGraph's
   `get_state` lists the tasks it schedules at the thread's newest root checkpoint, and each one
