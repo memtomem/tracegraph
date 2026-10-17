@@ -177,24 +177,29 @@ def _read_artifact_bytes(path: Path) -> bytearray:
     result accumulates into a single ``bytearray`` (no final full-size join copy).
     This is the single file-load boundary every CLI path goes through.
     """
+    with open(path, "rb") as handle:
+        return _read_bounded(handle)
+
+
+def _read_bounded(handle: Any) -> bytearray:
+    """Bounded chunked reads from an open binary handle (a file or stdin)."""
     limit = _max_artifact_bytes()
     buf = bytearray()
-    with open(path, "rb") as handle:
-        while True:
-            want = (
-                min(_READ_CHUNK_BYTES, limit + 1 - len(buf))
-                if limit
-                else _READ_CHUNK_BYTES
+    while True:
+        want = (
+            min(_READ_CHUNK_BYTES, limit + 1 - len(buf))
+            if limit
+            else _READ_CHUNK_BYTES
+        )
+        chunk = handle.read(want)
+        if not chunk:
+            break
+        buf += chunk
+        if limit and len(buf) > limit:
+            raise ValueError(
+                f"artifact exceeds the {limit}-byte limit "
+                "(set TRACEGRAPH_MAX_ARTIFACT_BYTES to raise it, 0 to disable)"
             )
-            chunk = handle.read(want)
-            if not chunk:
-                break
-            buf += chunk
-            if limit and len(buf) > limit:
-                raise ValueError(
-                    f"artifact exceeds the {limit}-byte limit "
-                    "(set TRACEGRAPH_MAX_ARTIFACT_BYTES to raise it, 0 to disable)"
-                )
     return buf
 
 
@@ -206,15 +211,115 @@ def _load_validated(path: Path) -> NormalizedTrace:
 
 
 def _read_source(source: str) -> str:
+    """Read a file or stdin (``-``) through the same byte ceiling."""
     if source == "-":
-        return typer.get_text_stream("stdin").read()
+        return _read_bounded(typer.get_binary_stream("stdin")).decode("utf-8")
     return _read_artifact_bytes(Path(source)).decode("utf-8")
 
 
 @dataclass(frozen=True)
 class _AnalysisInput:
     trace: NormalizedTrace
-    is_artifact: bool
+    #: "artifact", "otlp" or "phoenix": which reader produced ``trace``.
+    source: str
+
+
+_OTLP_KEYS = ("resourceSpans", "resource_spans")
+_PHOENIX_ROOT_KEYS = ("traces", "data")
+_SHAPES_HELP = (
+    "expected a tracegraph artifact (schema_version), an OTLP span export (resourceSpans), "
+    "or a Phoenix CLI trace export (spans/traces/data)"
+)
+
+
+def _families(record: Any, *, root: bool) -> set[str]:
+    """Which readers' top-level keys one JSON value carries: "otlp", "phoenix", "artifact".
+
+    Only routing is decided here; whether a record is *valid* for its reader is the adapter's
+    call, so the direct path accepts and rejects exactly what the explicit ingest commands do.
+    Phoenix's ``traces``/``data`` envelopes count only at a document root, where the adapter
+    accepts them.
+    """
+    if not isinstance(record, dict):
+        return set()
+    found = set()
+    if "schema_version" in record:
+        found.add("artifact")
+    if any(key in record for key in _OTLP_KEYS):
+        found.add("otlp")
+    phoenix_keys = ("spans", *_PHOENIX_ROOT_KEYS) if root else ("spans",)
+    if any(isinstance(record.get(key), list) for key in phoenix_keys):
+        found.add("phoenix")
+        for key in _PHOENIX_ROOT_KEYS if root else ():
+            if isinstance(record.get(key), list):
+                nested = set().union(*(_families(item, root=False) for item in record[key]))
+                found |= {"nested-artifact" if k == "artifact" else k for k in nested} - {"phoenix"}
+    return found
+
+
+def _route(records: list[Any], *, root: bool, container: str | None) -> str:
+    """The one reader for these records, or a ValueError whose advice is always executable."""
+    found = set().union(*(_families(item, root=root) for item in records)) if records else set()
+    if "nested-artifact" in found or ("artifact" in found and container is not None):
+        raise ValueError(
+            "unsupported shape; a tracegraph artifact (schema_version) must be the whole "
+            "document, not a record inside a list, JSON Lines, or a Phoenix envelope"
+        )
+    if {"otlp", "phoenix"} <= found:
+        how = (
+            "extract the records of one format into their own file and read it with "
+            "ingest-otlp (OTLP) or ingest-phoenix (Phoenix)"
+            if container is not None or any(
+                isinstance(records[0].get(k), list) for k in _PHOENIX_ROOT_KEYS)
+            else "ingest-otlp reads it as OTLP and ingest-phoenix reads it as Phoenix"
+        )
+        raise ValueError(
+            "ambiguous input: carries both OTLP (resourceSpans) and Phoenix (spans/traces/data) "
+            f"records; {how}"
+        )
+    for kind in ("otlp", "phoenix"):
+        if kind in found:
+            return kind
+    raise ValueError(f"unsupported shape; {_SHAPES_HELP}")
+
+
+def _parse_analysis_text(text: str) -> tuple[str, Any]:
+    """Identify an artifact, OTLP export (JSON or Collector JSONL) or Phoenix export by shape.
+
+    Routing is decided before any adapter runs, so no payload is ever tried as one format
+    and then guessed as another. Returns the kind and the parsed payload (a list of line
+    documents for JSONL).
+    """
+    try:
+        payload = load_json(text)
+    except json.JSONDecodeError:
+        # The Collector file exporter writes one TracesData object per line; nothing else
+        # has a line format. A line that is not JSON re-raises as "not valid JSON".
+        documents = [load_json(line) for line in text.splitlines() if line.strip()]
+        if _route(documents, root=True, container="JSON Lines") != "otlp":
+            raise ValueError(
+                "unsupported shape; JSON Lines input is read as an OTLP span export only; "
+                + _SHAPES_HELP
+            ) from None
+        return "otlp", documents
+    if isinstance(payload, dict) and "schema_version" in payload:
+        return "artifact", payload
+    if isinstance(payload, list):
+        return _route(payload, root=False, container="list"), payload
+    return _route([payload], root=True, container=None), payload
+
+
+def _select_trace(adapter: Any, trace_id: str | None, *, what: str) -> str:
+    if trace_id is not None:
+        return trace_id
+    ids = adapter.discover()
+    if not ids:
+        raise ValueError(f"{what} holds no traces: it contains no spans with a trace id")
+    if len(ids) != 1:
+        raise ValueError(
+            f"{what} holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
+        )
+    return ids[0]
 
 
 def _load_analysis_source(source: str, trace_id: str | None = None) -> NormalizedTrace:
@@ -222,29 +327,29 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
 
 
 def _load_analysis_input(source: str, trace_id: str | None = None) -> _AnalysisInput:
-    """Strictly identify a tracegraph artifact or Phoenix CLI trace export."""
+    """Strictly identify a tracegraph artifact, OTLP span export or Phoenix CLI trace export."""
     try:
-        text = _read_source(source)
-        payload = load_json(text)
-        is_artifact = isinstance(payload, dict) and "schema_version" in payload
-        if is_artifact:
+        kind, payload = _parse_analysis_text(_read_source(source))
+        if kind == "artifact":
             nt = artifact.from_obj(payload)
+        elif kind == "otlp":
+            from tracegraph.adapters import OTLPSpanAdapter
+
+            # Defaults identical to ingest-otlp: links are causes, error text is kept in the
+            # normalized trace, UNSET reads as ok. Reports still apply safe-v1.
+            adapter = OTLPSpanAdapter.from_documents(
+                payload if isinstance(payload, list) else [payload]
+            )
+            nt = _normalize_read(adapter.ingest(_select_trace(adapter, trace_id, what="OTLP export")))
         else:
             from tracegraph.adapters import PhoenixExportAdapter
 
-            adapter = PhoenixExportAdapter(payload)
-            ids = adapter.discover()
-            selected = trace_id
-            if selected is None:
-                if len(ids) != 1:
-                    raise ValueError(
-                        f"Phoenix export holds {len(ids)} traces; pass --trace. "
-                        f"Found: {', '.join(ids) or 'none'}"
-                    )
-                selected = ids[0]
-            nt = _normalize_read(adapter.ingest(selected))
+            phoenix = PhoenixExportAdapter(payload)
+            nt = _normalize_read(
+                phoenix.ingest(_select_trace(phoenix, trace_id, what="Phoenix export"))
+            )
         validate_normalized(nt)
-        return _AnalysisInput(nt, is_artifact)
+        return _AnalysisInput(nt, kind)
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot load analysis input {source}: {_load_reason(exc)}") from exc
 
@@ -449,7 +554,7 @@ def _render_next_steps(
     *,
     limit: int,
     source: str | None = None,
-    is_artifact: bool = False,
+    source_kind: str | None = None,
     saved_artifact: Path | None = None,
     json_out: Path | None = None,
     project: str | None = None,
@@ -468,6 +573,7 @@ def _render_next_steps(
     if json_out is None and len(report.primary_failures) > limit:
         console.print("  No JSON report saved. Request --json-out with a chosen report path.")
 
+    is_artifact = source_kind == "artifact"
     # Checking a named pipe's type does not open or read it again.
     replay = source is not None and (
         source == "-" or not Path(source).is_file() or _is_descriptor_alias(source)
@@ -495,10 +601,13 @@ def _render_next_steps(
                 "this consumed stream cannot be recovered by tracegraph."
             )
         else:
+            ingest, label = (
+                ("ingest-otlp", "OTLP") if source_kind == "otlp" else ("ingest-phoenix", "Phoenix")
+            )
             if replay:
-                console.print("  Replay the original Phoenix export on stdin for this ingest command.")
+                console.print(f"  Replay the original {label} export on stdin for this ingest command.")
             _show_investigation_command([
-                "tracegraph", "ingest-phoenix", "--file=" + ("-" if replay else source),
+                "tracegraph", ingest, "--file=" + ("-" if replay else source),
                 "--trace=" + report.trace_id, "--out=" + target,
             ])
         console.print("  After saving, use the step IDs below.")
@@ -940,7 +1049,7 @@ def ingest(
 
 @app.command(name="ingest-otlp")
 def ingest_otlp(
-    file: Path = typer.Option(..., "--file", "-f", help="OTLP JSON/JSONL span export (resourceSpans)."),
+    file: str = typer.Option(..., "--file", "-f", help="OTLP JSON/JSONL span export (resourceSpans), or '-' for stdin."),
     trace: str = typer.Option(None, "--trace", "-t", help="traceId to ingest (default: the file's only trace)."),
     out: Path = typer.Option(None, "--out", "-o", help="Artifact path (default <traceId>.json)."),
 ) -> None:
@@ -951,19 +1060,13 @@ def ingest_otlp(
         # Bounded read through the common size-limited boundary (from_file would
         # read_text the whole file with no ceiling). KeyError joins the usual load
         # errors: the adapter raises it for an unknown/missing trace id.
-        adapter = OTLPSpanAdapter.from_json(_read_artifact_bytes(file).decode("utf-8"))
-        if trace is None:
-            ids = adapter.discover()
-            if len(ids) != 1:
-                raise typer.BadParameter(
-                    f"file holds {len(ids)} traces; pass --trace. Found: {', '.join(ids) or 'none'}"
-                )
-            trace = ids[0]
+        adapter = OTLPSpanAdapter.from_json(_read_source(file))
+        trace = _select_trace(adapter, trace, what="file")
         nt = _normalize_read(adapter.ingest(trace))
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest OTLP export {file}: {_load_reason(exc)}") from exc
     target = out or artifact.default_path(trace)
-    _distinct_paths([file], [target])
+    _distinct_paths([Path(file)] if file != "-" else [], [target])
     _save_ingested(nt, target, explicit=out is not None)
     console.print(f"[green]ingested {len(nt.steps)} spans[/] → {escape(str(target))}")
 
@@ -975,7 +1078,20 @@ def ingest_phoenix(
     out: Path = typer.Option(None, "--out", "-o", help="Body-free artifact path."),
 ) -> None:
     """Ingest one Phoenix CLI trace export into a body-free portable artifact."""
-    nt = _load_analysis_source(file, trace)
+    try:
+        payload = load_json(_read_source(file))
+        if isinstance(payload, dict) and "schema_version" in payload:
+            nt = artifact.from_obj(payload)
+        else:
+            # Forced adapter: this command names the format, so no shape routing. A document
+            # that analyze would call ambiguous is read here as Phoenix, by ingest-otlp as OTLP.
+            from tracegraph.adapters import PhoenixExportAdapter
+
+            adapter = PhoenixExportAdapter(payload)
+            nt = _normalize_read(adapter.ingest(_select_trace(adapter, trace, what="Phoenix export")))
+        validate_normalized(nt)
+    except (*_LOAD_ERRORS, KeyError) as exc:
+        raise typer.BadParameter(f"cannot load analysis input {file}: {_load_reason(exc)}") from exc
     if nt.trace.source_kind != "phoenix_cli":
         raise typer.BadParameter("--file must contain a Phoenix CLI trace export")
     target = out or artifact.default_path(nt.trace.trace_id)
@@ -986,10 +1102,10 @@ def ingest_phoenix(
 
 @app.command(name="analyze")
 def analyze_command(
-    source: str = typer.Argument(..., help="Tracegraph artifact, Phoenix export, or '-' for stdin."),
-    trace: str = typer.Option(None, "--trace", "-t", help="Trace id for a multi-trace Phoenix input."),
-    baseline: str = typer.Option(None, "--baseline", help="Explicit artifact/Phoenix baseline."),
-    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace baseline."),
+    source: str = typer.Argument(..., help="Tracegraph artifact, OTLP span export (JSON or Collector JSONL), Phoenix CLI export, or '-' for stdin."),
+    trace: str = typer.Option(None, "--trace", "-t", help="Trace id for a multi-trace OTLP or Phoenix input."),
+    baseline: str = typer.Option(None, "--baseline", help="Explicit artifact, OTLP export, or Phoenix export baseline."),
+    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace OTLP or Phoenix baseline."),
     json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
     limit: int = typer.Option(3, "--limit", "-l", help="Failure candidates to investigate rendered in the terminal."),
 ) -> None:
@@ -1005,7 +1121,7 @@ def analyze_command(
     if json_out:
         _save_report(report, json_out)
     _render_next_steps(report, limit=limit, source=source,
-                       is_artifact=loaded.is_artifact, json_out=json_out)
+                       source_kind=loaded.source, json_out=json_out)
 
 
 @phoenix_app.command(name="diagnose")

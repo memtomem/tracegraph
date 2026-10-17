@@ -397,6 +397,11 @@ class OTLPSpanAdapter:
         except json.JSONDecodeError:
             # The Collector file exporter writes one top-level TracesData object per line.
             documents = [loads(line) for line in text.splitlines() if line.strip()]
+        return cls.from_documents(documents, **kwargs)
+
+    @classmethod
+    def from_documents(cls, documents: list[Any], **kwargs: Any) -> "OTLPSpanAdapter":
+        """Merge already-parsed TracesData objects (one per Collector JSONL line) into one adapter."""
         if not documents or not all(isinstance(item, dict) for item in documents):
             raise ValueError("OTLP input must contain one or more JSON trace objects")
         merged: dict[str, Any] = {"resourceSpans": []}

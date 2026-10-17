@@ -1919,3 +1919,321 @@ def test_investigation_consumed_pipe_requires_replay(tmp_path, phoenix, regular_
         os.close(read_fd)
         if write_fd is not None:
             os.close(write_fd)
+
+
+# --- analyze source routing: artifact / OTLP / Phoenix by shape (#57) --------------------
+
+from pathlib import Path  # noqa: E402  (section-local; the file imports Path inside tests)
+
+_SYNCMILL_OTLP = sorted(Path("tests/fixtures/syncmill").glob("*.otlp.json"))
+
+
+def _flat(output):
+    """Error panels wrap at 80 columns with box-drawing borders; compare on the words only."""
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", output).split())
+
+
+def _otlp_spans(trace_id, *, failed=True, prefix="demo"):
+    spans = [{"traceId": trace_id, "spanId": f"{prefix}-first", "name": f"{prefix}::tool",
+              "status": {"code": 1}, "attributes": {"openinference.span.kind": "TOOL"}}]
+    if failed:
+        spans.append({"traceId": trace_id, "spanId": f"{prefix}-last", "parentSpanId": f"{prefix}-first",
+                      "name": f"{prefix}::tool", "status": {"code": 2, "message": "PRIVATE BODY"},
+                      "attributes": {"openinference.span.kind": "TOOL"}})
+    return spans
+
+
+def _otlp_export(*trace_ids, failed=True):
+    spans = [span for tid in (trace_ids or ("otlp-1",)) for span in _otlp_spans(tid, failed=failed, prefix=tid)]
+    return {"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}
+
+
+def _analysis_artifact_text(path):
+    _write_linear_trace(path, "art-1", ("agent", StepKind.AGENT, StepStatus.ERROR))
+    return path.read_text()
+
+
+_ROUTING_OK = {
+    "artifact": lambda tmp: (_analysis_artifact_text(tmp / "seed.json"), "art-1"),
+    "phoenix-dict": lambda tmp: (json.dumps(_phoenix_export("px-1")), "px-1"),
+    "phoenix-root-traces": lambda tmp: (json.dumps({"traces": [_phoenix_export("px-1")]}), "px-1"),
+    "phoenix-root-data": lambda tmp: (json.dumps({"data": [_phoenix_export("px-1")]}), "px-1"),
+    "phoenix-list": lambda tmp: (json.dumps([_phoenix_export("px-1")]), "px-1"),
+    "otlp-dict": lambda tmp: (json.dumps(_otlp_export("otlp-1")), "otlp-1"),
+    "otlp-list": lambda tmp: (json.dumps([_otlp_export("otlp-1"), {"resourceSpans": []}]), "otlp-1"),
+    "otlp-jsonl": lambda tmp: (
+        json.dumps(_otlp_export("otlp-1")) + "\n" + json.dumps({"resource_spans": []}) + "\n", "otlp-1"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ROUTING_OK))
+def test_analyze_routes_each_supported_shape(tmp_path, shape):
+    text, trace_id = _ROUTING_OK[shape](tmp_path)
+    source = tmp_path / "input.json"
+    source.write_text(text)
+    result = runner.invoke(app, ["analyze", str(source)])
+    assert result.exit_code == 0, result.output
+    assert trace_id in result.output and "What failed" in result.output
+
+
+_ROUTING_REJECTED = {
+    "not-json": ("{not json", "not valid JSON"),
+    "jsonl-bad-line": (json.dumps(_otlp_export()) + "\n{nope\n", "not valid JSON"),
+    "empty-object": ("{}", "unsupported shape"),
+    "empty-objects-jsonl": ("{}\n{}\n", "unsupported shape"),
+    "empty-list": ("[]", "unsupported shape"),
+    "scalar": ("1", "unsupported shape"),
+    "unknown-keys": (json.dumps({"foo": 1}), "unsupported shape"),
+    "non-list-phoenix-key": (json.dumps({"data": {}}), "unsupported shape"),
+    "wrapper-list-traces": (json.dumps([{"traces": [_phoenix_export()]}]), "unsupported shape"),
+    "wrapper-list-data": (json.dumps([{"data": [_phoenix_export()]}]), "unsupported shape"),
+    "jsonl-phoenix-lines": (json.dumps(_phoenix_export("a")) + "\n" + json.dumps(_phoenix_export("b")) + "\n",
+                            "JSON Lines input is read as an OTLP"),
+    "hybrid-dict": (json.dumps({**_otlp_export(), **_phoenix_export()}), "ambiguous input"),
+    "hybrid-list-item": (json.dumps([{**_otlp_export(), **_phoenix_export()}]), "ambiguous input"),
+    "hybrid-jsonl-line": (json.dumps({**_otlp_export(), **_phoenix_export()}) + "\n"
+                          + json.dumps({"resourceSpans": []}) + "\n", "ambiguous input"),
+    "hybrid-jsonl-traces-envelope": (json.dumps({**_otlp_export(), "traces": [_phoenix_export()]}) + "\n"
+                                     + json.dumps({"resourceSpans": []}) + "\n", "ambiguous input"),
+    "hybrid-jsonl-data-envelope": (json.dumps({**_otlp_export(), "data": [_phoenix_export()]}) + "\n"
+                                   + json.dumps({"resourceSpans": []}) + "\n", "ambiguous input"),
+    "hybrid-dict-traces-envelope": (json.dumps({**_otlp_export(), "traces": [_phoenix_export()]}), "ambiguous input"),
+    "envelope-traces-hybrid-record": (json.dumps({"traces": [{**_otlp_export(), **_phoenix_export()}]}),
+                                      "ambiguous input"),
+    "envelope-data-hybrid-record": (json.dumps({"data": [{**_otlp_export(), **_phoenix_export()}]}),
+                                    "ambiguous input"),
+    "envelope-with-otlp-record": (json.dumps({"traces": [_phoenix_export(), _otlp_export()]}), "ambiguous input"),
+    "artifact-in-list": (json.dumps([{"schema_version": 99, **_otlp_export()}]), "must be the whole document"),
+    "artifact-in-jsonl": (json.dumps({"schema_version": 99, **_otlp_export()}) + "\n"
+                          + json.dumps({"resourceSpans": []}) + "\n", "must be the whole document"),
+    "artifact-in-envelope": (json.dumps({"traces": [{"schema_version": 99, **_phoenix_export()}]}),
+                             "must be the whole document"),
+    "mixed-list": (json.dumps([_otlp_export(), _phoenix_export()]), "ambiguous input"),
+    "mixed-jsonl": (json.dumps(_otlp_export()) + "\n" + json.dumps(_phoenix_export()) + "\n", "ambiguous input"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_ROUTING_REJECTED))
+def test_analyze_rejects_unsupported_and_colliding_shapes(tmp_path, shape):
+    text, expected = _ROUTING_REJECTED[shape]
+    source = tmp_path / "input.json"
+    source.write_text(text)
+    result = runner.invoke(app, ["analyze", str(source)])
+    assert result.exit_code == 2, result.output
+    flat = _flat(result.output)
+    assert "cannot load analysis input" in flat and expected in flat, flat
+    # Never the old behaviour: an unknown payload tried as Phoenix and failing there.
+    assert "Phoenix export must be" not in flat and "every Phoenix trace" not in flat
+
+
+def test_analyze_collision_advice_is_executable(tmp_path):
+    hybrid = tmp_path / "hybrid.json"
+    hybrid.write_text(json.dumps({**_otlp_export("otlp-1"), **_phoenix_export("px-1")}))
+    assert runner.invoke(app, ["analyze", str(hybrid)]).exit_code == 2
+    as_otlp = runner.invoke(app, ["ingest-otlp", "--file", str(hybrid), "--out", str(tmp_path / "o.json")])
+    as_phoenix = runner.invoke(app, ["ingest-phoenix", "--file", str(hybrid), "--out", str(tmp_path / "p.json")])
+    assert as_otlp.exit_code == 0 and as_phoenix.exit_code == 0, (as_otlp.output, as_phoenix.output)
+    assert artifact.load(tmp_path / "o.json").trace.trace_id == "otlp-1"
+    assert artifact.load(tmp_path / "p.json").trace.trace_id == "px-1"
+    mixed = tmp_path / "mixed.json"
+    mixed.write_text(json.dumps([_otlp_export("otlp-1"), _phoenix_export("px-1")]))
+    flat = _flat(runner.invoke(app, ["analyze", str(mixed)]).output)
+    assert "ambiguous input" in flat and "extract the records of one format" in flat
+    (tmp_path / "only-otlp.json").write_text(json.dumps(_otlp_export("otlp-1")))
+    only_otlp = runner.invoke(app, ["ingest-otlp", "--file", str(tmp_path / "only-otlp.json"),
+                                    "--out", str(tmp_path / "m.json")])
+    assert only_otlp.exit_code == 0, only_otlp.output
+    assert artifact.load(tmp_path / "m.json").trace.trace_id == "otlp-1"
+
+
+@pytest.mark.parametrize("jsonl", [False, True])
+def test_analyze_container_collision_advice_holds_with_invalid_records(tmp_path, jsonl):
+    # A null record makes whole-file ingest-otlp fail, so the advice must be extraction.
+    records = [_otlp_export("otlp-1"), _phoenix_export("px-1"), None]
+    source = tmp_path / "records.json"
+    source.write_text("\n".join(json.dumps(r) for r in records) + "\n" if jsonl else json.dumps(records))
+    flat = _flat(runner.invoke(app, ["analyze", str(source)]).output)
+    assert "ambiguous input" in flat and "extract the records of one format" in flat, flat
+    assert "reads only" not in flat
+
+
+@pytest.mark.parametrize("jsonl", [False, True])
+def test_analyze_otlp_container_validity_matches_ingest_otlp(tmp_path, jsonl):
+    # Record validity is the adapter's call: the direct path accepts and rejects what
+    # ingest-otlp does, so an empty object beside an OTLP document is fine for both and a
+    # null record is refused by both.
+    for records, ok in (([{}, _otlp_export("otlp-1")], True), ([_otlp_export("otlp-1"), None], False)):
+        source = tmp_path / "records.json"
+        source.write_text("\n".join(json.dumps(r) for r in records) + "\n" if jsonl else json.dumps(records))
+        direct = runner.invoke(app, ["analyze", str(source)])
+        ingested = runner.invoke(app, ["ingest-otlp", "--file", str(source), "--out", str(tmp_path / "a.json")])
+        assert (direct.exit_code == 0) is ok and (ingested.exit_code == 0) is ok, (direct.output, ingested.output)
+        if ok:
+            assert "otlp-1" in direct.output
+
+
+def test_analyze_otlp_without_traces_says_so(tmp_path):
+    source = tmp_path / "empty.json"
+    source.write_text(json.dumps({"resourceSpans": []}))
+    flat = _flat(runner.invoke(app, ["analyze", str(source)]).output)
+    assert "holds no traces" in flat and "pass --trace" not in flat, flat
+
+
+@pytest.mark.parametrize("envelope", ["traces", "data"])
+def test_analyze_envelope_collision_advice_is_executable(tmp_path, envelope):
+    # ingest-otlp cannot see resourceSpans nested in a Phoenix envelope, so the advice must be
+    # to extract the record, and extracting it must work.
+    hybrid = {**_otlp_export("otlp-1"), **_phoenix_export("px-1")}
+    source = tmp_path / "env.json"
+    source.write_text(json.dumps({envelope: [hybrid]}))
+    flat = _flat(runner.invoke(app, ["analyze", str(source)]).output)
+    assert "ambiguous input" in flat and "extract the records of one format" in flat
+    assert runner.invoke(app, ["ingest-otlp", "--file", str(source), "--out", str(tmp_path / "no.json")]).exit_code == 2
+    extracted = tmp_path / "record.json"
+    extracted.write_text(json.dumps(hybrid))
+    assert runner.invoke(app, ["ingest-otlp", "--file", str(extracted), "--out", str(tmp_path / "o.json")]).exit_code == 0
+    assert runner.invoke(app, ["ingest-phoenix", "--file", str(extracted), "--out", str(tmp_path / "p.json")]).exit_code == 0
+    assert artifact.load(tmp_path / "o.json").trace.trace_id == "otlp-1"
+    assert artifact.load(tmp_path / "p.json").trace.trace_id == "px-1"
+    source.write_text(json.dumps({envelope: [_phoenix_export("px-1"), _otlp_export("otlp-1")]}))
+    flat = _flat(runner.invoke(app, ["analyze", str(source)]).output)
+    assert "ambiguous input" in flat and "extract the records of one format" in flat
+    assert "reads only" not in flat
+
+
+def test_analyze_keeps_artifact_validation_without_adapter_fallback(tmp_path):
+    good = json.loads(_analysis_artifact_text(tmp_path / "seed.json"))
+    cases = {
+        "unsupported artifact schema_version": {**good, "schema_version": 99},
+        'missing the required "trace"': {"schema_version": good["schema_version"]},
+        "disagrees with its steps": {**good, "trace": {**good["trace"],
+                                                       "trace": {**good["trace"]["trace"], "status": "ok"}}},
+    }
+    for expected, payload in cases.items():
+        source = tmp_path / "bad.json"
+        source.write_text(json.dumps(payload))
+        result = runner.invoke(app, ["analyze", str(source)])
+        flat = _flat(result.output)
+        assert result.exit_code == 2 and expected in flat, flat
+        assert "OTLP" not in flat and "Phoenix" not in flat
+
+
+@pytest.mark.parametrize("fixture", _SYNCMILL_OTLP, ids=lambda p: p.stem)
+def test_analyze_direct_otlp_equals_ingest_then_analyze(tmp_path, fixture):
+    direct = runner.invoke(app, ["analyze", str(fixture), "--json-out", str(tmp_path / "direct.json")])
+    assert direct.exit_code == 0, direct.output
+    ingested = runner.invoke(app, ["ingest-otlp", "--file", str(fixture), "--out", str(tmp_path / "art.json")])
+    assert ingested.exit_code == 0, ingested.output
+    via_artifact = runner.invoke(app, ["analyze", str(tmp_path / "art.json"), "--json-out", str(tmp_path / "via.json")])
+    assert via_artifact.exit_code == 0, via_artifact.output
+    assert (tmp_path / "direct.json").read_bytes() == (tmp_path / "via.json").read_bytes()
+    if fixture.name == "compete-gate-reject.otlp.json":
+        assert "gate-failure-after-success" in direct.output  # UNSET read as ok, as ingest-otlp does
+    if fixture.name == "route-fallback.otlp.json":
+        assert "declared_dag" in direct.output and "links_preserved=True" in direct.output
+
+
+@pytest.mark.parametrize("via_stdin", [False, True])
+def test_analyze_direct_otlp_writes_nothing_but_the_requested_report(tmp_path, monkeypatch, via_stdin):
+    monkeypatch.chdir(tmp_path)
+    text = json.dumps(_otlp_export("otlp-1"))
+    Path("input.json").write_text(text)
+    args = ["analyze", "-"] if via_stdin else ["analyze", "input.json"]
+    result = runner.invoke(app, args, input=text if via_stdin else None)
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["input.json"]
+    assert Path("input.json").read_text() == text
+    result = runner.invoke(app, [*args, "--json-out", "report.json"], input=text if via_stdin else None)
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["input.json", "report.json"]
+
+
+def test_analyze_multi_trace_otlp_requires_explicit_selection(tmp_path):
+    multi = tmp_path / "multi.json"
+    multi.write_text(json.dumps(_otlp_export("otlp-a", "otlp-b")))
+    result = runner.invoke(app, ["analyze", str(multi)])
+    flat = _flat(result.output)
+    assert result.exit_code == 2 and "holds 2 traces" in flat and "otlp-a, otlp-b" in flat, flat
+    result = runner.invoke(app, ["analyze", str(multi), "--trace", "otlp-b"])
+    assert result.exit_code == 0 and "otlp-b" in result.output, result.output
+    assert runner.invoke(app, ["analyze", str(multi), "--trace", "missing"]).exit_code == 2
+
+
+def test_analyze_otlp_baseline_selection_and_limit(tmp_path, monkeypatch):
+    current = tmp_path / "current.json"
+    current.write_text(json.dumps(_otlp_export("otlp-cur")))
+    multi = tmp_path / "multi.json"
+    multi.write_text(json.dumps(_otlp_export("otlp-a", "otlp-b")))  # 4 spans: larger than current
+    result = runner.invoke(app, ["analyze", str(current), "--baseline", str(multi)])
+    assert result.exit_code == 2 and "holds 2 traces" in _flat(result.output), result.output
+    result = runner.invoke(app, ["analyze", str(current), "--baseline", str(multi), "--baseline-trace", "otlp-a"])
+    assert result.exit_code == 0 and "baseline" in result.output.lower(), result.output
+    assert runner.invoke(app, ["analyze", str(current), "--baseline", str(multi),
+                               "--baseline-trace", "missing"]).exit_code == 2
+    assert multi.stat().st_size > current.stat().st_size
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(current.stat().st_size))
+    result = runner.invoke(app, ["analyze", str(current), "--baseline", str(multi), "--baseline-trace", "otlp-a"])
+    assert result.exit_code == 2 and "byte limit" in _flat(result.output), result.output
+    result = runner.invoke(app, ["analyze", str(multi), "--trace", "otlp-a"])
+    assert result.exit_code == 2 and "byte limit" in _flat(result.output), result.output
+
+
+@pytest.mark.parametrize("via_stdin", [False, True])
+def test_analyze_direct_otlp_next_steps_name_ingest_otlp(tmp_path, via_stdin):
+    text = json.dumps(_otlp_export("otlp-1"))
+    source = tmp_path / "input.json"
+    source.write_text(text)
+    args = ["analyze", "-"] if via_stdin else ["analyze", str(source)]
+    result = runner.invoke(app, args, input=text if via_stdin else None)
+    assert result.exit_code == 0, result.output
+    commands = _investigation_commands(result.output)
+    assert commands[0][:2] == ["tracegraph", "ingest-otlp"]
+    assert "--trace=otlp-1" in commands[0] and "--out=CHOOSE_NEW_ARTIFACT_PATH" in commands[0]
+    assert ("--file=-" if via_stdin else f"--file={source}") in commands[0]
+    assert ("Replay the original OTLP export" in result.output) is via_stdin
+    assert "Phoenix" not in result.output
+    assert commands[-1][:3] == ["tracegraph", "explain", "--"]
+
+
+def test_ingest_otlp_reads_stdin_and_ingest_phoenix_keeps_its_inputs(tmp_path):
+    out = tmp_path / "from-stdin.json"
+    result = runner.invoke(app, ["ingest-otlp", "--file", "-", "--out", str(out)],
+                           input=json.dumps(_otlp_export("otlp-1")))
+    assert result.exit_code == 0, result.output
+    assert artifact.load(out).trace.trace_id == "otlp-1"
+    otlp_file = tmp_path / "otlp.json"
+    otlp_file.write_text(json.dumps(_otlp_export("otlp-1")))
+    result = runner.invoke(app, ["ingest-phoenix", "--file", str(otlp_file), "--out", str(tmp_path / "x.json")])
+    assert result.exit_code == 2 and "Phoenix export must be" in _flat(result.output)
+    px_file = tmp_path / "px.json"
+    px_file.write_text(json.dumps(_phoenix_export("px-1")))
+    first = tmp_path / "px-art.json"
+    assert runner.invoke(app, ["ingest-phoenix", "--file", str(px_file), "--out", str(first)]).exit_code == 0
+    resaved = runner.invoke(app, ["ingest-phoenix", "--file", str(first), "--out", str(tmp_path / "px-art2.json")])
+    assert resaved.exit_code == 0, resaved.output
+    assert (tmp_path / "px-art2.json").read_bytes() == first.read_bytes()
+    seed = tmp_path / "seed.json"
+    _analysis_artifact_text(seed)
+    rejected = runner.invoke(app, ["ingest-phoenix", "--file", str(seed), "--out", str(tmp_path / "y.json")])
+    assert rejected.exit_code == 2 and "must contain a Phoenix CLI trace export" in _flat(rejected.output)
+
+
+def test_fixture_pins_in_equivalence_test_are_reachable():
+    names = {p.name for p in _SYNCMILL_OTLP}
+    assert {"compete-gate-reject.otlp.json", "route-fallback.otlp.json"} <= names
+
+
+@pytest.mark.parametrize("command", [["analyze", "-"], ["ingest-otlp", "--file", "-", "--out", "OUT"],
+                                     ["ingest-phoenix", "--file", "-", "--out", "OUT"]])
+def test_stdin_inputs_respect_the_byte_limit(tmp_path, monkeypatch, command):
+    phoenix = command[0] == "ingest-phoenix"
+    text = json.dumps(_phoenix_export("px-1") if phoenix else _otlp_export("otlp-1"))
+    out = tmp_path / "out.json"
+    args = [str(out) if a == "OUT" else a for a in command]
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(len(text.encode()) - 1))
+    result = runner.invoke(app, args, input=text)
+    assert result.exit_code == 2 and "byte limit" in _flat(result.output), result.output
+    assert not out.exists()
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(len(text.encode())))
+    result = runner.invoke(app, args, input=text)
+    assert result.exit_code == 0, result.output

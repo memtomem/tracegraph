@@ -169,9 +169,20 @@ For link-preserving analysis, use the optional Collector fan-out example at
 It sends the normal stream to Phoenix and an allowlisted JSONL copy to tracegraph. Then run:
 
 ```bash
+tracegraph analyze /tmp/tracegraph-otlp.jsonl --trace <trace-id>             # diagnose in memory
 tracegraph ingest-otlp --file /tmp/tracegraph-otlp.jsonl --trace <trace-id> -o full-dag.json
 tracegraph analyze full-dag.json
 ```
+
+`analyze` reads an OTLP span export (JSON or Collector JSONL) directly, with the same adapter
+settings as `ingest-otlp`, so the report is byte-identical to analysing the ingested artifact;
+nothing is written unless `--json-out` asks for a report. The input is identified by shape alone
+(`schema_version` → artifact, `resourceSpans` → OTLP, `spans`/`traces`/`data` → Phoenix); a
+payload carrying both OTLP and Phoenix records is refused, naming the explicit ingest command
+for each format (or, for a list, JSONL or envelope, asking you to extract one format's records). Already have an export? The shortest offline first run is
+`tracegraph analyze your-export.otlp.json` (add `--trace <id>` when the file holds several), then
+copy the `explain` command it prints after saving the artifact it names. The artifact caveat
+above still applies: `ingest-otlp` keeps error text, reports stay `safe-v1`.
 
 The JSON analysis-report contract is versioned at
 [`contracts/analysis-report.schema.json`](contracts/analysis-report.schema.json).

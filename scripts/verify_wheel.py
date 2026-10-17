@@ -126,6 +126,11 @@ print(json.dumps({
         cli("diff", "failure.json", "failure.json")
         cli("diff", "baseline.json", "failure.json", expected=1, expected_line="NOT IDENTICAL")
         cli("analyze", "failure.json", "--baseline", "baseline.json", "--json-out", "analysis.json")
+        # The direct OTLP path must diagnose the same evidence as the ingested artifact.
+        cli("analyze", "failure.otlp.json", "--baseline", "baseline.otlp.json",
+            "--json-out", "analysis-direct.json")
+        require((work / "analysis-direct.json").read_bytes() == (work / "analysis.json").read_bytes(),
+                "direct OTLP analysis differs from the ingested artifact's")
         report_text = (work / "analysis.json").read_text(encoding="utf-8")
         report = json.loads(report_text)
         require(report["schema_version"] == 2 and report["privacy_profile"] == "safe-v1",
