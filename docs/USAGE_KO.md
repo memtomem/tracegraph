@@ -272,16 +272,28 @@ px trace get <trace-id> --format raw --no-progress \
 ## OTLP/OpenInference span export 사용하기
 
 LangGraph checkpoint가 아니라 OTLP JSON 또는 Collector JSONL span export가 있다면
-`ingest-otlp`를 씁니다.
+`analyze`에 바로 넘겨 진단할 수 있고, artifact로 보관하려면 `ingest-otlp`를 씁니다.
 
 ```bash
+uv run tracegraph analyze otlp_trace.json
 uv run tracegraph ingest-otlp --file otlp_trace.json --out otlp.json
 uv run tracegraph inspect otlp.json
 ```
 
-파일 안에 trace가 여러 개 있으면 `--trace`로 trace id를 지정합니다.
+`analyze`는 입력을 형태로만 판별합니다. `schema_version`이 있으면 artifact, `resourceSpans`가
+있으면 OTLP, `spans`(또는 최상위 `traces`/`data`)가 있으면 Phoenix입니다. 두 형태를 함께 가진
+입력은 추측하지 않고 거절합니다. 단일 객체라면 각 형식을 명시적으로 읽는
+`ingest-otlp`/`ingest-phoenix`를 안내하고, 리스트·JSONL·Phoenix envelope라면 한 형식의
+레코드만 별도 파일로 추출하라고 안내합니다. 레코드가 유효한지는 adapter가 판정하므로 직접
+진단과 명시적 ingest 명령이 받아들이는 입력은 같습니다. 직접 진단은 `ingest-otlp`와 같은 adapter 설정을 쓰므로 보고서가 artifact를 거친
+결과와 바이트 단위로 같고, `--json-out`을 요청하지 않으면 파일을 쓰지 않습니다. OTLP artifact가
+오류 문자열을 그대로 보존한다는 점은 변하지 않습니다(보고서는 `safe-v1`).
+
+파일 안에 trace가 여러 개 있으면 `--trace`로 trace id를 지정합니다. 지정하지 않으면 발견된
+trace id 목록과 함께 종료 코드 2로 끝납니다.
 
 ```bash
+uv run tracegraph analyze otlp_trace.json --trace agent-trace-1
 uv run tracegraph ingest-otlp --file otlp_trace.json --trace agent-trace-1 --out otlp.json
 ```
 

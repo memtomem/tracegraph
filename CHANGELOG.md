@@ -10,6 +10,23 @@ explicitly.
 
 ### Added
 
+- **`analyze` reads OTLP span exports directly** (#57): a JSON or Collector JSONL export
+  (`resourceSpans`) is diagnosed in memory with the same adapter settings as `ingest-otlp`, so
+  the report is byte-identical to analysing the ingested artifact; `--trace` selects one trace of
+  a multi-trace export and `--baseline` accepts an OTLP export too. Inputs are routed by shape
+  before any adapter runs (`schema_version` → artifact, `resourceSpans` → OTLP, `spans` or a
+  root `traces`/`data` list → Phoenix); record validity stays the adapter's call, so the direct
+  path accepts and rejects what the explicit ingest commands do. A payload carrying both OTLP
+  and Phoenix records exits 2: a single object names the ingest command that reads each format,
+  and a list, JSONL or Phoenix envelope says to extract one format's records first. An unknown
+  shape exits 2 listing the supported ones instead of failing as a Phoenix export.
+  `ingest-otlp --file -` reads stdin, and stdin now goes through the same
+  `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling as files for `analyze`, `ingest-otlp` and
+  `ingest-phoenix` (the stdin half of #53; Phoenix subprocess output is still unbounded);
+  `ingest-phoenix` reads its input with the Phoenix adapter only (its accepted inputs are
+  unchanged). Next investigation steps after a direct OTLP
+  diagnosis print an `ingest-otlp` save template. No file is written without `--json-out`;
+  analysis JSON schemas, exit codes and privacy boundaries are unchanged.
 - **Guided investigation after `analyze` and `phoenix diagnose`** (#58): displayed failure
   candidates include full step IDs, with POSIX-quoted `explain` commands for existing artifacts
   or explicitly labelled save/replay templates for exports, stdin, and unsaved Phoenix traces.
