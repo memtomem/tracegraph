@@ -14,8 +14,9 @@ explicitly.
   candidates include full step IDs, with POSIX-quoted `explain` commands for existing artifacts
   or explicitly labelled save/replay templates for exports, stdin, and unsaved Phoenix traces.
   Evidence IDs, paths and commands preserve literal emoji-like tokens and are not forcibly
-  line-wrapped; consumed pipe inputs and process-bound `/dev/` or `/proc/` paths require
-  replay, including regular-file stdin redirects. Nonprinting arguments are shown as
+  line-wrapped; consumed pipe inputs and descriptor aliases (`/dev/stdin`, `/dev/fd/N`,
+  `/proc/<pid>/fd/N`, or a symlink to one, including regular-file stdin redirects; a symlink
+  to a directory descriptor is not detected) require replay. Nonprinting arguments are shown as
   escaped data instead of copyable commands. Hidden
   candidates show the required `--limit`; report paths are acknowledged only after successful
   writes, without duplicate report-path notices. Existing edge-origin/fidelity warnings and
