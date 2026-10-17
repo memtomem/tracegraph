@@ -409,6 +409,41 @@ def _show_investigation_command(args: list[str]) -> None:
     _print_evidence("  " + shlex.join(args))
 
 
+_DESCRIPTOR_ALIAS = re.compile(r"^/(dev/(fd/|std(in|out|err)$)|proc/[^/]+(/task/[^/]+)?/fd/)")
+
+
+def _is_descriptor_alias(source: str) -> bool:
+    """Whether ``source`` names a file descriptor of this process rather than a file.
+
+    ``/dev/stdin``, ``/dev/fd/N`` and ``/proc/<pid>/fd/N`` pass ``is_file()`` when the
+    descriptor is a regular file, yet another process opening the same path gets its own
+    descriptor, so a copied command would not read this input. ``realpath`` cannot tell:
+    on Linux ``/proc/self/fd/0`` resolves straight through to the redirected file, and on
+    macOS ``/dev/fd/0`` reports a virtual inode unrelated to ``fstat(0)``. So test the
+    spelling the loader opens (``Path`` drops ``.`` and trailing slashes, and a directory
+    descriptor such as ``/proc/self/fd/N/trace.json`` is an alias too), then resolve the
+    directory with ``realpath`` (a symlinked directory into ``/dev/fd`` shows that spelling,
+    and ``..`` applies after the link it follows, not before) and follow the final
+    component's symlink chain one hop at a time. Hops are bounded like the kernel's limit;
+    a loop or a dangling link stops the walk and is left to ``is_file``. Known gap: a symlink
+    to a directory descriptor (``link -> /proc/self/fd/N``, then ``link/trace.json``) resolves
+    past the alias; closing it means re-implementing realpath's component walk with a hook.
+    """
+    path = os.path.join(os.getcwd(), source)
+    for _ in range(40):
+        path = str(Path(path))
+        if _DESCRIPTOR_ALIAS.match("/" + path.lstrip("/")):
+            return True
+        path = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+        if _DESCRIPTOR_ALIAS.match(path):
+            return True
+        try:
+            target = os.readlink(path)
+        except OSError:
+            return False
+        path = os.path.join(os.path.dirname(path), target)
+    return False
+
 def _render_next_steps(
     report: AnalysisReport,
     *,
@@ -433,13 +468,9 @@ def _render_next_steps(
     if json_out is None and len(report.primary_failures) > limit:
         console.print("  No JSON report saved. Request --json-out with a chosen report path.")
 
-    # Device/proc paths are process-bound even when backed by a regular file.
-    # Do not resolve symlinks: Linux fd aliases can resolve to that backing file.
     # Checking a named pipe's type does not open or read it again.
     replay = source is not None and (
-        source == "-"
-        or os.path.abspath(source).startswith(("/dev/", "/proc/"))
-        or not Path(source).is_file()
+        source == "-" or not Path(source).is_file() or _is_descriptor_alias(source)
     )
     target = str(saved_artifact) if saved_artifact is not None else (
         source if is_artifact and not replay else None

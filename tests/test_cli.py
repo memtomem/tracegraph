@@ -1772,22 +1772,58 @@ def test_investigation_literal_report_and_long_id_at_narrow_width(tmp_path, monk
 
 
 @pytest.mark.parametrize("phoenix", [False, True])
-@pytest.mark.parametrize("source", ["/dev/stdin", "/dev/../dev/stdin", "/proc/self/fd/0"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "/dev/stdin", "//dev/stdin", "/dev/../dev/stdin", "/dev/stdin/", "/dev/stdin/.",
+        "/proc/self/fd/0", "/proc/self/fd/0/", "/proc/self/fd/0/.", "/proc/thread-self/fd/0",
+        "symlink", "chain", "dir-symlink", "dotdot-through-symlink", "dirfd",
+    ],
+)
 def test_investigation_redirected_stdin_alias_requires_replay(tmp_path, phoenix, source):
     from pathlib import Path
-    if not Path(source).exists():
-        pytest.skip("requires stdin descriptor alias")
+    pass_fds = ()
+    if source == "dirfd":
+        # A directory descriptor: the alias is an intermediate component, not the leaf.
+        dir_fd = os.open(tmp_path, os.O_RDONLY)
+        pass_fds = (dir_fd,)
+        source = f"/proc/self/fd/{dir_fd}/input.json"
+        if not Path(f"/proc/self/fd/{dir_fd}").is_dir():
+            os.close(dir_fd)
+            pytest.skip("requires /proc directory descriptors")
+    if source == "symlink":
+        # A user-made link to the alias: realpath would resolve it to the backing file.
+        (tmp_path / "trace.json").symlink_to("/dev/stdin")
+        source = str(tmp_path / "trace.json")
+    elif source == "chain":
+        (tmp_path / "hop.json").symlink_to("/dev/stdin")
+        (tmp_path / "trace.json").symlink_to(tmp_path / "hop.json")
+        source = str(tmp_path / "trace.json")
+    elif source == "dir-symlink":
+        # The alias spelling is only visible after resolving the directory.
+        (tmp_path / "descriptors").symlink_to("/dev/fd")
+        source = str(tmp_path / "descriptors" / "0")
+    elif source == "dotdot-through-symlink":
+        # ".." applies to the link target's parent, so this is target/trace.json.
+        (tmp_path / "target" / "deep").mkdir(parents=True)
+        (tmp_path / "target" / "trace.json").symlink_to("/dev/stdin")
+        (tmp_path / "bridge").symlink_to(tmp_path / "target" / "deep")
+        source = str(tmp_path / "bridge" / ".." / "trace.json")
     path = tmp_path / "input.json"
     _investigation_artifact(path, count=1)
     if phoenix:
         path.write_text(json.dumps(_phoenix_export()))
+    if not pass_fds and not Path(source).exists():
+        pytest.skip("requires stdin descriptor alias")
     # A real regular-file stdin redirect matters: is_file() is true on these aliases,
     # and Linux realpath() follows /proc/self/fd/0 all the way to the input file.
     with path.open("rb") as stdin:
         result = subprocess.run(
             [sys.executable, "-c", "from tracegraph.cli import app; app()", "analyze", source],
-            stdin=stdin, capture_output=True, text=True, timeout=30,
+            stdin=stdin, capture_output=True, text=True, timeout=30, pass_fds=pass_fds,
         )
+    for fd in pass_fds:
+        os.close(fd)
     assert result.returncode == 0, result.stderr
     commands = _investigation_commands(result.stdout)
     assert commands
@@ -1797,6 +1833,55 @@ def test_investigation_redirected_stdin_alias_requires_replay(tmp_path, phoenix,
         assert "--file=-" in commands[0]
     else:
         assert "consumed stream cannot be recovered" in " ".join(result.stdout.split())
+
+
+def test_investigation_dev_shm_regular_file_keeps_direct_command(tmp_path):
+    # Only descriptor aliases are process-bound; a regular file under /dev/ is reusable.
+    from pathlib import Path
+    shm = Path("/dev/shm")
+    if not (shm.is_dir() and os.access(shm, os.W_OK)):
+        pytest.skip("requires a writable /dev/shm")
+    path = shm / f"tracegraph-test-{os.getpid()}.json"
+    try:
+        _investigation_artifact(path, count=1)
+        result = runner.invoke(app, ["analyze", str(path)])
+        assert result.exit_code == 0, result.output
+        commands = _investigation_commands(result.output)
+        assert commands and str(path) in commands[0]
+        assert "Template only" not in result.output
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_investigation_dotdot_through_symlink_to_regular_file_keeps_command(tmp_path):
+    # The mirror of the replay case: lexically, "bridge/../trace.json" is tmp_path/trace.json,
+    # which is the alias; on the filesystem it is target/trace.json, a regular artifact.
+    from pathlib import Path
+    (tmp_path / "trace.json").symlink_to("/dev/stdin")
+    (tmp_path / "target" / "deep").mkdir(parents=True)
+    _investigation_artifact(tmp_path / "target" / "trace.json", count=1)
+    (tmp_path / "bridge").symlink_to(tmp_path / "target" / "deep")
+    source = str(tmp_path / "bridge" / ".." / "trace.json")
+    assert Path(source).is_file()
+    result = runner.invoke(app, ["analyze", source])
+    assert result.exit_code == 0, result.output
+    commands = _investigation_commands(result.output)
+    assert commands and source in commands[0]
+    assert "Template only" not in result.output
+
+
+def test_is_descriptor_alias_spellings():
+    from tracegraph.cli import _is_descriptor_alias
+    assert _is_descriptor_alias("//proc/1234/fd/3")
+    assert _is_descriptor_alias("/proc/1234/fd/3/")
+    assert _is_descriptor_alias("/proc/1234/fd/3/./trace.json")
+    assert _is_descriptor_alias("/proc/1234/task/5678/fd/3")
+    assert _is_descriptor_alias("/dev/stdout")
+    assert _is_descriptor_alias("/dev/stdout/")
+    assert not _is_descriptor_alias("/dev/shm/trace.json")
+    assert not _is_descriptor_alias("/dev/stdin.json")
+    assert not _is_descriptor_alias("/devices/fd/0")
+    assert not _is_descriptor_alias("/proc/self/cmdline")
 
 
 @pytest.mark.parametrize("phoenix", [False, True])
