@@ -112,8 +112,8 @@ explicitly.
   field is omitted, not written as `null`. (A fresh ingest by this release declares 7 for its
   capture record, which outranks 6.)
 - **A hands-on getting-started notebook in Korean**, `examples/getting_started_ko.ipynb`, for
-  first-time users working from a repository checkout. It runs the example agent and every
-  core command offline, interprets each output, and works through two applied scenarios:
+  first-time users working from a repository checkout. It runs the example agent and the
+  offline commands other than `check` and `export-review-candidates`, interprets each output, and works through two applied scenarios:
   checking a change against a baseline, and aggregating failures across many runs from
   `analyze --json-out` reports. Its outputs are committed, and `tests/test_notebooks.py`
   executes it so its commands and exit codes cannot drift from the CLI. `nbclient` and
@@ -142,7 +142,7 @@ explicitly.
   `seq` is #82).
 - `inspect` marks a step paused by `interrupt()` as `⏸ interrupted`, in yellow rather than
   the green used for finished steps, and the summary line gains `· N interrupted` when there
-  is one. The output for every trace without interrupt steps is unchanged.
+  is one. The output for every trace with neither interrupted nor scheduled steps is unchanged.
 
 ### Fixed
 
