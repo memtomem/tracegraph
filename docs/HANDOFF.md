@@ -60,20 +60,25 @@
 | 성능 guard `pytest -m perf` | **4 passed** |
 | lint `uvx ruff@0.14.2 check src tests scripts examples` | 통과 |
 | 타입 `mypy`(CI와 같은 `--extra cypher --group typing` 환경) | 0 errors |
-| 골든 하네스 | 코드를 바꾼 PR #70·#71·#72·#76마다 직전 merge와 비교해 커밋된 fixture 출력 265개가 바이트 동일. #74(테스트만)·#75(문서만)는 돌리지 않았다 |
+| 골든 하네스 | 코드를 바꾼 PR #70·#71·#72·#76 모두 직전 merge와 비교해 커밋된 fixture 출력 265개 중 다른 파일 0개. **세션 중 PR 본문에 적은 비교는 무효였다**: 스크립트에 `<checkout>/src`를 넘겨 두 실행 모두 현재 checkout을 import한 자기 비교였다. 위 수치는 2026-10-18에 저장소 루트를 넘겨 다시 잰 것이고, 대조군 #65(`0bbe9e6`→`43f5ccb`, artifact v7)는 같은 방법으로 39개 파일이 달라 하네스가 변화를 잡는 것을 확인했다(잘못된 형태로는 0개). #74(테스트만)·#75(문서만)는 돌리지 않았다 |
 | 회귀 테스트 판별력 | 테스트를 더한 PR마다 새 테스트가 수정 전 소스에서 실패함을 확인(seam이 옮겨져서만 실패하는 것은 PR 본문에 따로 적었다) |
 | CI | PR #70·#71·#72·#74·#75·#76 모두 check 15개 통과(required 8개 포함), `b18fd1a`의 `tests` 통과 |
 | 리뷰 게이트 | PR당 4~8라운드(계획, 구현, PR 범위). #75는 계획 없이 문서 리뷰 3라운드 + PR 범위 1라운드, #76은 설계 교체와 범위 결정을 거쳐 8라운드. 모든 지적을 반영하거나 결정으로 범위를 정했다 |
 
-골든 비교 절차(저장소 밖 스크립트 `~/.claude/plans/tracegraph-golden/golden.sh <src-root> <out-dir>`,
-한쪽 출력만 만들고 out-dir을 지운 뒤 다시 쓴다. fixture와 Python은 현재 checkout의 것을 쓴다):
+골든 비교 절차. 저장소 밖 스크립트 `~/.claude/plans/tracegraph-golden/golden.sh <checkout-root> <out-dir>`를
+쓴다. **첫 인자는 checkout 루트이고 `src`가 아니다.** 스크립트가 `PYTHONPATH="$1/src"`를 만들기 때문에,
+`.../src`를 넘기면 없는 경로가 되어 editable 설치된 현재 checkout을 import한다. 스크립트는 한쪽 출력만
+만들고, out-dir을 지운 뒤 다시 쓴다. fixture와 Python은 현재 checkout의 것을 쓴다. 비교 결과가 모두 같으면
+대조군 쌍부터 돌려 하네스를 의심한다:
 
 ```bash
 git worktree add /tmp/tg-base <base-sha>
-~/.claude/plans/tracegraph-golden/golden.sh /tmp/tg-base/src /tmp/g-base
-~/.claude/plans/tracegraph-golden/golden.sh "$PWD/src" /tmp/g-new
+PYTHONPATH=/tmp/tg-base/src .venv/bin/python -c 'import tracegraph; print(tracegraph.__file__)'  # /tmp/tg-base 아래여야 한다
+~/.claude/plans/tracegraph-golden/golden.sh /tmp/tg-base /tmp/g-base
+~/.claude/plans/tracegraph-golden/golden.sh "$PWD" /tmp/g-new
 diff -r /tmp/g-base /tmp/g-new && echo identical
 git worktree remove --force /tmp/tg-base
+# 대조군: 0bbe9e6 → 43f5ccb(artifact v7)는 39개 파일이 달라야 한다
 ```
 
 기록 위치: 결정 근거는 PR #70·#71·#72·#74·#75·#76의 본문과 이슈 닫는 댓글(#46, #58)에 있다. 이번 세션의 계획·범위
