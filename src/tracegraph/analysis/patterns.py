@@ -336,13 +336,14 @@ def _match_two_step_unbounded(
     window ``[earliest eligible candidate, e]``, so the walk never leaves that window. Work is
     ``O(n + edges)``, plus for each endpoint with an earlier eligible candidate its ancestors
     inside that window and their cause edges (times a log for the sort), plus sorting the
-    matches. With a back-reference that is linear when no names repeat, or more generally when
-    each endpoint's earliest same-named candidate is a bounded seq distance back; it grows
-    quadratic when windows overlap heavily, e.g. many steps sharing one name (every window then
-    starts at the first of them), or, without a back-reference, many candidates ahead of many
-    endpoints, which is also where the output can be quadratic. It is not output-optimal in
-    general: an eligible candidate on a parallel branch still costs its endpoint a walk that
-    finds nothing.
+    matches. With a back-reference that is linear when no names repeat, or when each such
+    window holds a bounded number of ancestors and cause edges (a chain of distinct names with
+    disjoint adjacent repeats, say). It is quadratic when many endpoints share large windows:
+    many steps sharing one name (every window then starts at the first of them, and the output
+    is quadratic too), or, without a back-reference, many candidates ahead of many endpoints.
+    It is not output-optimal in general: a window counts steps, not reachability, so an eligible
+    candidate on a parallel branch, or many steps sharing one ``seq``, still cost each endpoint
+    a walk that may find nothing.
     """
     steps, children = index  # children: cause -> [effect, ...]
     parents: dict[str, list[str]] = {}  # effect -> [cause, ...]
