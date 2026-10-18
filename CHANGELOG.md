@@ -13,8 +13,8 @@ explicitly.
 - **Dropped OTLP span links are disclosed** (#49). A link the OTLP importer could not record as a
   cause was skipped silently, while the header still read `causal_fidelity=declared_dag` and
   `links_preserved=true`. Each kind now prints one stderr line with its count and becomes a
-  capture gap: `otlp.unresolved_span_link` (names this trace but no span in the export, a
-  partial export), `otlp.unscoped_span_link` (names no trace, missing or empty `traceId`; it may
+  capture gap: `otlp.unresolved_span_link` (names this trace but no span in the export,
+  possibly a partial export), `otlp.unscoped_span_link` (names no trace, missing or empty `traceId`; it may
   refer to a span of this trace, so it is no longer treated as foreign) and
   `otlp.foreign_trace_link` (names another trace). `check` treats the first two as gaps that may
   have left a step out (one-sided for the count rules, insufficient for topology) and the third
