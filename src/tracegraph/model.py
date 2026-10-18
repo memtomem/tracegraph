@@ -239,6 +239,7 @@ class ScheduleGraph(BaseModel):
 CAPTURE_GAP_CODES = frozenset(
     {
         "langgraph.malformed_pending_writes",
+        "langgraph.rewritten_error_channel",
         "langgraph.unapplied_command_goto",
         "langgraph.unattributed_failed_task",
         "langgraph.unattributed_interrupted_task",

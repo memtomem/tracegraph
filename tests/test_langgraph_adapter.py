@@ -521,3 +521,285 @@ def test_explicit_return_from_a_nested_subgraph_continues_the_outer_invocation()
         assert ("007-root-after", "outer:002-outer-in") not in caused, sorted(caused)
         assert ("007-root-after", "001-root") not in caused, sorted(caused)
         normalize(raw)
+
+
+# --- repeated failures while the error channel is still set (#47) -----------------------------
+
+import sqlite3  # noqa: E402 - kept with the section that needs it
+from decimal import Decimal  # noqa: E402
+
+from langgraph.checkpoint.memory import InMemorySaver  # noqa: E402
+
+
+class _RetryState(TypedDict):
+    error: str | None
+    attempts: int
+    log: Annotated[list, add]
+
+
+def _retry_graph(*, clear: bool, same_message: bool, passthrough: bool = False):
+    """call_tool fails twice; between attempts prepare_retry clears the key, leaves it, or
+    returns the whole state (re-writing the error it holds)."""
+    def call_tool(state):
+        n = state["attempts"] + 1
+        return {"error": "tool failed" if same_message else f"tool failed ({n})", "attempts": n}
+
+    def prepare_retry(state):
+        if clear:
+            return {"error": None}
+        if passthrough:
+            return {**state, "log": ["retrying"]}
+        return {"log": ["retrying"]}
+
+    g = StateGraph(_RetryState)
+    g.add_node("call_tool", call_tool)
+    g.add_node("prepare_retry", prepare_retry)
+    g.add_edge(START, "call_tool")
+    g.add_conditional_edges(
+        "call_tool", lambda s: "prepare_retry" if s["attempts"] < 2 else END, ["prepare_retry", END]
+    )
+    g.add_edge("prepare_retry", "call_tool")
+    return g
+
+
+def _new_saver(kind):
+    if kind == "memory":
+        return InMemorySaver()
+    return SqliteSaver(sqlite3.connect(":memory:", check_same_thread=False))
+
+
+def _ingest_run(graph, saver_kind="memory", inputs=({"error": None, "attempts": 0, "log": []},)):
+    saver = _new_saver(saver_kind)
+    app = graph.compile(checkpointer=saver)
+    for value in inputs:
+        app.invoke(value, {"configurable": {"thread_id": "t"}})
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    errors = [(s.name, s.error_msg) for s in raw.steps if s.status is StepStatus.ERROR]
+    gaps = {g.code: g.count for g in raw.trace.capture.gaps}
+    return errors, gaps, raw
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("clear, same_message, n_errors, rewritten", [
+    (True, True, 2, None),
+    (True, False, 2, None),
+    # The key still set: the second attempt is not recorded (the value cannot prove a failure)
+    # but disclosed, whatever its message.
+    (False, False, 1, 1),
+    (False, True, 1, 1),
+])
+def test_a_retry_that_fails_again_is_recorded_or_disclosed(saver_kind, clear, same_message,
+                                                         n_errors, rewritten):
+    errors, gaps, raw = _ingest_run(_retry_graph(clear=clear, same_message=same_message), saver_kind)
+    assert [name for name, _ in errors] == ["call_tool"] * n_errors
+    assert gaps.get("langgraph.rewritten_error_channel") == rewritten
+    if rewritten:
+        assert any("wrote the error channel while it already held an error" in w
+                   for w in raw.ingest_warnings)
+        from tracegraph import artifact
+
+        reread = artifact.loads(artifact.dumps(normalize(raw)))
+        assert {g.code: g.count for g in reread.trace.capture.gaps} == gaps
+
+
+@pytest.mark.parametrize("same_message, n_errors, rewritten", [(True, 1, 2), (False, 1, 2)])
+def test_a_node_returning_the_whole_state_is_never_a_failure(same_message, n_errors, rewritten):
+    errors, gaps, _ = _ingest_run(
+        _retry_graph(clear=False, same_message=same_message, passthrough=True)
+    )
+    assert [name for name, _ in errors] == ["call_tool"] * n_errors
+    assert gaps["langgraph.rewritten_error_channel"] == rewritten
+
+
+def _handled_graph(handler):
+    g = StateGraph(_RetryState)
+    g.add_node("call_tool", lambda s: {"error": "tool failed", "attempts": 1})
+    g.add_node("handler", handler)
+    g.add_edge(START, "call_tool")
+    g.add_edge("call_tool", "handler")
+    g.add_edge("handler", END)
+    return g
+
+
+def test_a_handler_passing_the_state_through_is_disclosed_not_failed():
+    errors, gaps, _ = _ingest_run(_handled_graph(lambda s: {**s, "log": ["handled"]}))
+    assert errors == [("call_tool", "tool failed")]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
+
+
+def test_a_handler_that_rewords_the_error_is_disclosed_not_failed():
+    errors, gaps, _ = _ingest_run(_handled_graph(lambda s: {"error": "handled: " + s["error"]}))
+    assert errors == [("call_tool", "tool failed")]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
+
+
+class _ListErrorState(TypedDict):
+    error: Annotated[list[str], add]
+    log: Annotated[list, add]
+
+
+def test_a_reducer_that_grows_the_error_is_disclosed_not_failed():
+    # A healthy handler returning the whole state doubles a list-reducer error channel: the
+    # value changes although nothing failed again.
+    g = StateGraph(_ListErrorState)
+    g.add_node("call_tool", lambda s: {"error": ["tool failed"]})
+    g.add_node("handler", lambda s: dict(s))
+    g.add_edge(START, "call_tool")
+    g.add_edge("call_tool", "handler")
+    g.add_edge("handler", END)
+    errors, gaps, _ = _ingest_run(g, inputs=({"error": [], "log": []},))
+    assert [name for name, _ in errors] == ["call_tool"]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
+
+
+def test_continuation_input_is_never_a_failure_or_a_rewrite():
+    g = StateGraph(_RetryState)
+    g.add_node("noop", lambda s: {"log": ["noop"]})
+    g.add_edge(START, "noop")
+    g.add_edge("noop", END)
+    for second in ("A", "B"):
+        errors, gaps, _ = _ingest_run(g, inputs=(
+            {"error": "A", "attempts": 0, "log": []}, {"error": second, "attempts": 0, "log": []}
+        ))
+        assert len(errors) == 1  # the first input carried an error, as before
+        assert "langgraph.rewritten_error_channel" not in gaps
+
+
+class _OuterState(TypedDict):
+    error: str | None
+    log: Annotated[list, add]
+
+
+class _InnerOut(TypedDict):
+    log: Annotated[list, add]
+
+
+def test_an_outer_error_is_not_a_new_failure_after_a_subgraph_returns():
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("inner_fail", lambda s: {"error": "inner-error", "log": ["inner"]})
+    inner.add_edge(START, "inner_fail")
+    inner.add_edge("inner_fail", END)
+    outer = StateGraph(_OuterState)
+    outer.add_node("fail_outer", lambda s: {"error": "outer-error"})
+    outer.add_node("sub", inner.compile())
+    outer.add_node("after", lambda s: {"log": ["after"]})
+    outer.add_edge(START, "fail_outer")
+    outer.add_edge("fail_outer", "sub")
+    outer.add_edge("sub", "after")
+    outer.add_edge("after", END)
+    _, gaps, raw = _ingest_run(outer, "sqlite", ({"error": None, "log": []},))
+    root = [s for s in raw.steps if ":" not in s.step_id]
+    # In the outer namespace the error is recorded once, where it was written: the return from
+    # the subgraph (whose exit parent holds another namespace's error) is not a new failure.
+    assert [(s.name, s.error_msg) for s in root if s.status is StepStatus.ERROR] == [
+        ("fail_outer", "outer-error")
+    ]
+    # Inside the subgraph, the node that wrote another error over the propagated one is
+    # disclosed, not recorded; the return to the outer namespace discloses nothing.
+    assert not [s for s in raw.steps if s.error_msg == "inner-error"]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
+
+
+def _linear(*values, versions=None):
+    cks = []
+    for i, value in enumerate(values):
+        cks.append(_ck(f"00{i}", "", i, f"00{i - 1}" if i else None,
+                       channel_values={"error": value} if value is not None else {},
+                       channel_versions=({"error": versions[i]} if versions else None)))
+    raw = LangGraphCheckpointAdapter(_StubSaver(cks[::-1])).ingest("A")
+    errors = [s.step_id for s in raw.steps if s.status is StepStatus.ERROR]
+    gaps = {g.code: g.count for g in raw.trace.capture.gaps}
+    return errors, gaps
+
+
+@pytest.mark.parametrize("falsy, text", [(None, "None"), (False, "False"), (0, "0"), ([], "[]")])
+def test_a_falsy_parent_never_suppresses_its_string_rendering(falsy, text):
+    errors, _ = _linear("x", falsy, text)
+    assert errors[-1:] == ["002"]
+
+
+def test_values_that_raise_on_comparison_are_compared_by_text():
+    errors, gaps = _linear(None, Decimal("sNaN"), Decimal("sNaN"))
+    assert errors == ["001"] and gaps == {}
+
+
+def test_a_value_that_can_be_neither_compared_nor_rendered_counts_as_persisted():
+    class Opaque:
+        def __bool__(self):
+            return True
+
+        def __eq__(self, other):
+            raise RuntimeError("no")
+
+        def __str__(self):
+            raise RuntimeError("no")
+
+        __hash__ = None
+
+    adapter = LangGraphCheckpointAdapter(_StubSaver([]))
+    cp = {"channel_values": {"error": Opaque()}, "channel_versions": {"error": "2"}}
+    parent = {"channel_values": {"error": Opaque()}, "channel_versions": {"error": "1"}}
+    assert adapter._error_introduced(cp, [parent]) is None
+    assert adapter._rewrote_error(cp, [parent]) is True
+    del cp["channel_versions"]  # without versions, an incomparable value is the same one
+    assert adapter._rewrote_error(cp, [parent]) is False
+
+
+def test_without_versions_a_new_value_is_disclosed_and_the_same_one_is_not():
+    errors, gaps = _linear(None, "A", "B")
+    assert errors == ["001"] and gaps == {"langgraph.rewritten_error_channel": 1}
+    errors, gaps = _linear(None, "A", "A")
+    assert errors == ["001"] and gaps == {}
+    errors, gaps = _linear(None, "A", "A", versions=["1", "2", "3"])
+    assert errors == ["001"] and gaps == {"langgraph.rewritten_error_channel": 1}
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("second, n_errors, rewritten", [("B", 1, 1), ("A", 1, 1)])
+def test_a_fork_copy_is_neither_a_failure_nor_a_rewrite(saver_kind, second, n_errors, rewritten):
+    # update_state(..., as_node="__copy__") runs no node: it copies a checkpoint and links the
+    # copy to that checkpoint's parent, so comparing it by value would read copied state as a
+    # new write.
+    g = StateGraph(_RetryState)
+    g.add_node("first", lambda s: {"error": "A"})
+    g.add_node("second", lambda s: {"error": second})
+    g.add_edge(START, "first")
+    g.add_edge("first", "second")
+    g.add_edge("second", END)
+    saver = _new_saver(saver_kind)
+    app = g.compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "attempts": 0, "log": []}, cfg)
+
+    def counts():
+        raw = LangGraphCheckpointAdapter(saver).ingest("t")
+        return (sum(s.status is StepStatus.ERROR for s in raw.steps),
+                {g.code: g.count for g in raw.trace.capture.gaps}.get("langgraph.rewritten_error_channel"))
+
+    assert counts() == (n_errors, rewritten)
+    app.update_state(app.get_state(cfg).config, None, as_node="__copy__")
+    assert counts() == (n_errors, rewritten)
+
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("second", ["A", "B"])
+def test_a_rewrite_alongside_a_subgraph_is_still_disclosed(saver_kind, second):
+    # The checkpoint after second_fail and a parallel subgraph has the subgraph's exit as its
+    # expanded causal parent; the rewrite is detected against the channel's own history, the
+    # declared same-namespace parent.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("inner_step", lambda s: {"log": ["inner"]})
+    inner.add_edge(START, "inner_step")
+    inner.add_edge("inner_step", END)
+    g = StateGraph(_OuterState)
+    g.add_node("first_fail", lambda s: {"error": "A"})
+    g.add_node("second_fail", lambda s: {"error": second})
+    g.add_node("sub", inner.compile())
+    g.add_edge(START, "first_fail")
+    g.add_edge("first_fail", "second_fail")
+    g.add_edge("first_fail", "sub")
+    g.add_edge(["second_fail", "sub"], END)
+    errors, gaps, _ = _ingest_run(g, saver_kind, ({"error": None, "log": []},))
+    assert [m for _, m in errors if m == "B"] == []  # never recorded
+    assert gaps["langgraph.rewritten_error_channel"] == 1  # 0 before: the exit hid the history

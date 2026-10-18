@@ -21,7 +21,10 @@ langgraph-checkpoint 4.x):
   adapter re-sequences globally when declared cross-namespace parentage needs it.
 * ``metadata["writes"]`` is **not** reliably populated by ``list()``; instead we read the
   serialized ``channel_values``. A step "introduced" an error when a designated error
-  channel (default ``"error"``) is truthy at that checkpoint but falsy at its parent.
+  channel (default ``"error"``) is truthy at that checkpoint but falsy at its parent. A node
+  writing the channel again while it still holds an error may have failed again, or may only
+  have passed the state through (a reducer can change the value either way); a checkpoint
+  cannot tell which, so such a write is disclosed, not recorded (``_rewrote_error``).
 * the producing node's name is recovered best-effort from the parent checkpoint's
   internal ``branch:to:<node>`` channel; absent that, ``name`` is left unset.
 
@@ -334,6 +337,7 @@ class LangGraphCheckpointAdapter:
             for parent_id in parents
         ]
 
+        rewritten_errors = 0
         for step_id, step in steps.items():
             display_parent_id = display_parent_by_step.get(step_id)
             parent_cp = checkpoints.get(display_parent_id) if display_parent_id else None
@@ -344,7 +348,8 @@ class LangGraphCheckpointAdapter:
                 step.name = name
                 if _looks_like_tool_node(name):
                     step.kind = StepKind.TOOL
-            if not self._has_no_producing_node(step, steps.get(display_parent_id or "")):
+            no_producer = self._has_no_producing_node(step, steps.get(display_parent_id or ""))
+            if not no_producer:
                 # A checkpoint does not record which node wrote it. The name is read off the
                 # parent's routing channels — the first of several when nodes ran in parallel,
                 # none for a Send or an update — and the kind is inferred from that name, so
@@ -354,6 +359,16 @@ class LangGraphCheckpointAdapter:
             causal_parent_ids = parents_by_step.get(step_id, [])
             error_parent_cps = [checkpoints[parent_id] for parent_id in causal_parent_ids]
             err = self._error_introduced(checkpoints[step_id], error_parent_cps)
+            # Only a checkpoint a node wrote can disclose a rewrite: an input, an update and a
+            # fork (``update_state(..., as_node="__copy__")`` copies state, linked to the copied
+            # checkpoint's parent) carry what the caller supplied. The channel's own history is
+            # its declared parents in the same namespace, not the expanded causal parents, which
+            # replace a predecessor with the exits of subgraphs that ran alongside.
+            if err is None and step.source is StepSource.LOOP and not no_producer:
+                ns = key_by_step_id[step_id][0]
+                history = [checkpoints[pid] for key in parent_keys.get(step_id, [])
+                           if key[0] == ns and (pid := step_id_by_key.get(key)) is not None]
+                rewritten_errors += self._rewrote_error(checkpoints[step_id], history)
             if err is not None:
                 step.status = StepStatus.ERROR
                 step.error_msg = err
@@ -386,6 +401,14 @@ class LangGraphCheckpointAdapter:
                 f"{malformed_writes} pending write(s) are not a (task id, channel, value) "
                 "triple and were ignored; a task failure recorded in one would not be reported.",
                 malformed_writes,
+            )
+        if rewritten_errors:
+            disclosures.add(
+                "langgraph.rewritten_error_channel",
+                f"{rewritten_errors} checkpoint(s) wrote the error channel while it already held "
+                "an error; a repeated failure there cannot be told from a node passing the state "
+                "through, so none was recorded.",
+                rewritten_errors,
             )
 
         any_error = any(s.status is StepStatus.ERROR for s in steps.values())
@@ -1137,6 +1160,50 @@ class LangGraphCheckpointAdapter:
         if previous:  # error was already present upstream -> not introduced here
             return None
         return str(current)
+
+    def _rewrote_error(self, cp: dict, history: list[dict]) -> bool:
+        """Whether a node wrote the error channel here while it already held an error.
+
+        That node may have failed again or only have passed the state through, and a reducer
+        can change the value in either case, so the write is disclosed, never recorded as a
+        failure. ``history`` is the checkpoint's declared parents in its own namespace; a write
+        shows as a moved ``channel_versions`` entry, or, without versions, a different value.
+        """
+        channel = self._error_channel
+        current = cp.get("channel_values", {}).get(channel)
+        if not current:
+            return False
+        version = cp.get("channel_versions", {}).get(channel)
+        for parent in history:
+            before = parent.get("channel_values", {}).get(channel)
+            if not before:
+                continue
+            before_version = parent.get("channel_versions", {}).get(channel)
+            if version is not None and before_version is not None:
+                if before_version != version:
+                    return True
+            elif not _same_error(before, current):
+                return True
+        return False
+
+
+def _same_error(a: Any, b: Any) -> bool:
+    """Whether two error-channel values are the same error, leaning toward "same".
+
+    Used only where a checkpoint has no channel versions. Revived values are distinct objects,
+    so equality falls back to the rendered text, and a value that can be neither compared nor
+    rendered counts as the same, so a persisted error is not disclosed as a write at every
+    checkpoint of such a history.
+    """
+    try:
+        if (a == b) is True:
+            return True
+    except Exception:
+        pass
+    try:
+        return str(a) == str(b)
+    except Exception:
+        return True
 
 
 def _decoded(listing: Iterable[Any]) -> Iterator[Any]:

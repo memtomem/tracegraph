@@ -145,6 +145,23 @@ explicitly.
 
 ### Fixed
 
+- **A LangGraph node writing the error channel while it is still set is disclosed** (#47). A
+  checkpoint is an error only where the error channel is set and every causal parent's is
+  empty, so a node failing again before the key was cleared stayed `ok`, silently, and the
+  retry presets could not match. The rule is unchanged: a checkpoint does not record which
+  node raised, and both a value-change rule and the issue's version rule were measured to
+  invent failures (a node returning the whole state, a reducer that grows the value, a
+  handler rewording the error). Instead, a node-written checkpoint whose error channel was
+  written again while set (its `channel_versions` entry moved, or without versions its value
+  changed) counts toward a stderr disclosure and the capture gap
+  `langgraph.rewritten_error_channel`. `check` reads it for the count rules (one-sided on that
+  side) and for success-dependent patterns such as `gate-failure-after-success` (insufficient
+  on either side), not for topology. Input, `__start__`, update and fork-copy checkpoints, and
+  parents in another namespace (a subgraph's entry or exit), are not compared, so propagation
+  and a caller's input disclose nothing; a propagated error recorded again at a subgraph's
+  `__start__` is pre-existing and filed as #85. Measured on LangGraph 1.2.2 and 1.2.15 with
+  InMemorySaver and SqliteSaver. Artifacts change only for histories with such writes; the
+  committed fixture has none. Schema stays v7.
 - **`analyze --trace` and `--baseline-trace` no longer ignore the selector on an artifact**
   (#64). An artifact holds one trace, and a selector naming a different one was accepted: the
   command exited 0 with a report on the artifact's trace, not the one requested. It now exits 2

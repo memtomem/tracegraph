@@ -60,6 +60,11 @@ _MAY_OMIT_STEPS = frozenset({
     "otlp.unresolved_span_link",
     "otlp.unscoped_span_link",
 })
+#: Gaps that may hide a failure on a step that is in the artifact: a LangGraph error channel
+#: rewritten with the error it already held may be a repeated failure, not recorded. The tree
+#: is unaffected, so only the count rules read this set.
+_REWRITTEN_ERRORS = frozenset({"langgraph.rewritten_error_channel"})
+_MAY_HIDE_FAILURES = _MAY_OMIT_STEPS | _REWRITTEN_ERRORS
 _HEURISTIC_EDGES = frozenset({"otlp.graph_parent_by_timing", "otlp.graph_parent_fallback"})
 
 LANGGRAPH_LIMITATION = (
@@ -295,7 +300,7 @@ def _could_be_hidden(nt: NormalizedTrace, pattern: PathPattern) -> bool:
     between gap endpoints is constrained by nothing. A gap that may have omitted a step counts
     for every preset: nothing about the missing step is known.
     """
-    if _gap_hides(nt, _MAY_OMIT_STEPS):
+    if _gap_hides(nt, _MAY_HIDE_FAILURES):
         return True
     constrained = _constrained(pattern)
     for step in nt.steps:
@@ -358,6 +363,19 @@ def _causal_reasons(current: NormalizedTrace, baseline: NormalizedTrace) -> list
     return reasons
 
 
+def _success_reasons(
+    current: NormalizedTrace, baseline: NormalizedTrace, pattern: PathPattern
+) -> list[str]:
+    """A step recorded ok may have failed again where an error was rewritten, which can remove
+    a match that needs it to succeed as well as add one, so neither side's count bounds it."""
+    if not any(pred.status is StepStatus.OK for pred in pattern.steps):
+        return []
+    return [f"{label}: a step this preset needs to succeed may have failed again (an error "
+            "channel was rewritten with the error it held)"
+            for label, nt in (("current", current), ("baseline", baseline))
+            if _gap_codes(nt) & _REWRITTEN_ERRORS]
+
+
 # --- rules -----------------------------------------------------------------------------------
 
 
@@ -387,7 +405,7 @@ def _failure_counts(nt: NormalizedTrace) -> tuple[Counter, dict, int, bool]:
     open_ended = (
         unknown_signature > 0
         or any(step.status is StepStatus.UNSET for step in nt.steps)
-        or _gap_hides(nt, _MAY_OMIT_STEPS)
+        or _gap_hides(nt, _MAY_HIDE_FAILURES)
     )
     return by_signature, ids, unknown_signature, open_ended
 
@@ -538,6 +556,7 @@ def evaluate(current: NormalizedTrace, baseline: NormalizedTrace, rules: list[Ru
         elif spec.rule_id == "pattern-not-increased":
             pattern = PRESETS[str(params["preset"])]
             reasons = _causal_reasons(current, baseline) if len(pattern.steps) > 1 else []
+            reasons += _success_reasons(current, baseline, pattern)
             if reasons:
                 outcome = "INSUFFICIENT_EVIDENCE"
             else:

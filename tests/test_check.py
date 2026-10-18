@@ -783,3 +783,36 @@ def test_a_link_naming_no_trace_cannot_hide_a_plan_then_failure():
     rules = (pattern("plan-then-tool-failure"), TOPOLOGY, SHAPE)
     assert set(_outcomes(_run(scoped, baseline, *rules)).values()) == {"FAIL"}
     assert set(_outcomes(_run(unscoped, baseline, *rules)).values()) == {"INSUFFICIENT_EVIDENCE"}
+
+
+# --- a rewritten LangGraph error channel (#47) -------------------------------------------------
+
+
+def test_a_rewritten_error_channel_blocks_only_the_count_rules_on_its_side():
+    def lg(status, gaps=None):
+        return _trace("t", [("x", TOOL, "call_tool", status)], source="langgraph", links=None, gaps=gaps)
+    rewritten = {"langgraph.rewritten_error_channel": 1}
+    for rule in (FAILURES, pattern("tool-failure")):
+        assert _one(_run(lg(ERR, rewritten), lg(ERR), rule)) == "INSUFFICIENT_EVIDENCE"  # PASS impossible
+        assert _one(_run(lg(ERR), lg(OK, rewritten), rule)) == "INSUFFICIENT_EVIDENCE"   # FAIL impossible
+        assert _one(_run(lg(ERR, rewritten), lg(OK), rule)) == "FAIL"
+    for rule in (TOPOLOGY, SHAPE):  # a status the record may hide does not change the tree
+        assert _one(_run(lg(ERR, rewritten), lg(ERR), rule)) == "PASS"
+        assert _one(_run(lg(ERR), lg(ERR, rewritten), rule)) == "PASS"
+
+
+@pytest.mark.parametrize("gapped", ["current", "baseline"])
+def test_a_rewritten_error_makes_a_success_dependent_pattern_insufficient_either_way(gapped):
+    # gate-failure-after-success needs an AGENT that succeeded. If that ok may really be a
+    # repeated failure, the match may vanish, so neither count bounds the other.
+    def gate(agent_status, gaps=None):
+        return _trace("t", [("a", AGENT, "attempt", agent_status), ("g", TOOL, "gate:tests", ERR)],
+                      [("g", "a")], gaps=gaps)
+    rewritten = {"langgraph.rewritten_error_channel": 1}
+    rule = pattern("gate-failure-after-success")
+    cur = gate(OK, rewritten if gapped == "current" else None)
+    for base_status in (OK, ERR):
+        base = gate(base_status, rewritten if gapped == "baseline" else None)
+        report = _run(cur, base, rule)
+        assert _one(report) == "INSUFFICIENT_EVIDENCE"
+        assert any("needs to succeed" in r for r in report.rules[0].reasons)
