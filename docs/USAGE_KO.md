@@ -326,7 +326,7 @@ uv run tracegraph inspect otlp.json
 파일 안에 trace가 여러 개 있으면 `--trace`로 trace id를 지정합니다. 지정하지 않으면 발견된
 trace id 목록과 함께 종료 코드 2로 끝납니다. artifact는 trace를 하나만 담으므로, artifact에
 `--trace`(baseline이면 `--baseline-trace`)를 주면 그 artifact의 trace id와 같아야 합니다. 다르면
-보고서를 쓰지 않고 종료 코드 2로 끝납니다(`analyze`, `check` 공통).
+보고서나 artifact를 쓰지 않고 종료 코드 2로 끝납니다(`analyze`, `check`, `ingest-phoenix` 공통).
 
 ```bash
 uv run tracegraph analyze otlp_trace.json --trace agent-trace-1

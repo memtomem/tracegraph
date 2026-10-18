@@ -2254,6 +2254,49 @@ def test_ingest_otlp_reads_stdin_and_ingest_phoenix_keeps_its_inputs(tmp_path):
     assert rejected.exit_code == 2 and "must contain a Phoenix CLI trace export" in _flat(rejected.output)
 
 
+def _phoenix_artifact(tmp_path):
+    export = tmp_path / "px.json"
+    export.write_text(json.dumps(_phoenix_export("px-1")))
+    art = tmp_path / "px-art.json"
+    assert runner.invoke(app, ["ingest-phoenix", "--file", str(export), "--out", str(art)]).exit_code == 0
+    return art
+
+
+@pytest.mark.parametrize("via_stdin", [False, True])
+def test_ingest_phoenix_rejects_a_selector_naming_another_trace_on_an_artifact(tmp_path, monkeypatch, via_stdin):
+    monkeypatch.chdir(tmp_path)
+    art = _phoenix_artifact(tmp_path)
+    Path("out.json").write_text("previous artifact\n")
+    source = "-" if via_stdin else "px-art.json"
+    for out in (["--out", "out.json"], []):
+        result = runner.invoke(app, ["ingest-phoenix", "--file", source, "--trace", "other", *out],
+                               input=art.read_text() if via_stdin else None)
+        assert result.exit_code == 2, result.output
+        assert _panel_message(result.output) == f"Invalid value for --trace: {source} holds trace 'px-1', not 'other'"
+    assert Path("out.json").read_text() == "previous artifact\n"
+    assert not Path("px-1.json").exists()
+
+
+def test_ingest_phoenix_accepts_a_selector_naming_the_artifacts_own_trace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    art = _phoenix_artifact(tmp_path)
+    result = runner.invoke(app, ["ingest-phoenix", "--file", "px-art.json", "--trace", "px-1", "--out", "out.json"])
+    assert result.exit_code == 0, result.output
+    assert Path("out.json").read_bytes() == art.read_bytes()
+    result = runner.invoke(app, ["ingest-phoenix", "--file", "px-art.json", "--trace", "px-1"])
+    assert result.exit_code == 0, result.output
+    assert Path("px-1.json").read_bytes() == art.read_bytes()
+
+
+def test_ingest_phoenix_names_the_source_kind_before_a_selector_on_another_artifact(tmp_path):
+    seed = tmp_path / "seed.json"
+    _analysis_artifact_text(seed)
+    result = runner.invoke(app, ["ingest-phoenix", "--file", str(seed), "--trace", "other",
+                                 "--out", str(tmp_path / "y.json")])
+    assert result.exit_code == 2
+    assert _panel_message(result.output) == "Invalid value: --file must contain a Phoenix CLI trace export"
+
+
 def test_fixture_pins_in_equivalence_test_are_reachable():
     names = {p.name for p in _SYNCMILL_OTLP}
     assert {"compete-gate-reject.otlp.json", "route-fallback.otlp.json"} <= names
