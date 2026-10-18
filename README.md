@@ -91,9 +91,9 @@ Frequently-used options, beyond `--out` / `--json-out`:
 
 | option | commands | effect |
 |---|---|---|
-| `--trace`, `-t` | `ingest-otlp`, `ingest-phoenix`, `analyze` | Pick one trace out of a multi-trace export. |
+| `--trace`, `-t` | `ingest-otlp`, `ingest-phoenix`, `analyze`, `check` | Pick one trace out of a multi-trace export. For `analyze` and `check` on an artifact, it must name the artifact's own trace (exit 2 otherwise). |
 | `--error-channel` | `ingest` | LangGraph state channel that signals a step error (default `error`). |
-| `--baseline`, `--baseline-trace` | `analyze`, `phoenix diagnose` | Compare against a known-good run, and pick its trace out of a multi-trace file. |
+| `--baseline`, `--baseline-trace` | `analyze`, `check`, `phoenix diagnose` | Compare against a known-good run, and pick its trace out of a multi-trace file. On an artifact baseline, `--baseline-trace` must name its own trace (exit 2 otherwise). |
 | `--limit`, `-l` | `analyze`, `phoenix diagnose`, `query` | Cap how many failure candidates or matches are rendered (default 3 for diagnosis). |
 | `--explain` | `query` | Print each match's raw causal chain back to its root cause. |
 | `--structure` | `diff` | Compare topology only, ignoring labels. |

@@ -500,6 +500,18 @@ def test_invalid_input_exits_2_and_leaves_an_existing_report(files, case):
     assert (files / "base.json").exists()
 
 
+@pytest.mark.parametrize(("option", "expected"), [
+    ("--trace", "Invalid value for --trace: cur.json holds trace 'c', not 'other'"),
+    ("--baseline-trace", "Invalid value for --baseline-trace: base.json holds trace 'b', not 'other'"),
+])
+def test_a_selector_mismatch_names_the_option_and_both_traces(files, monkeypatch, option, expected):
+    monkeypatch.chdir(files)
+    result = _cli("cur.json", "--baseline", "base.json", "--rule", FAILURES, option, "other")
+    assert result.exit_code == 2, result.output
+    panel = [line.strip("│ ") for line in result.output.splitlines() if line.startswith("│")]
+    assert panel == [expected]
+
+
 def test_a_matching_selector_is_accepted(files):
     assert _cli(files / "cur.json", "--baseline", files / "base.json", "--rule", FAILURES,
                 "--trace", "c", "--baseline-trace", "b").exit_code == 1
