@@ -245,6 +245,7 @@ CAPTURE_GAP_CODES = frozenset(
         "langgraph.undecided_interrupt",
         "langgraph.undecodable_send_packets",
         "langgraph.unknown_send_target",
+        "otlp.foreign_trace_link",
         "otlp.graph_parent_by_timing",
         "otlp.graph_parent_fallback",
         "otlp.unreadable_component_cost",
@@ -252,6 +253,8 @@ CAPTURE_GAP_CODES = frozenset(
         "otlp.unreadable_timestamp",
         "otlp.unreadable_token_count",
         "otlp.unreadable_total_cost",
+        "otlp.unresolved_span_link",
+        "otlp.unscoped_span_link",
         "phoenix.unreadable_evaluation_score",
     }
 )

@@ -720,7 +720,8 @@ def test_a_task_failure_lost_to_a_malformed_write_cannot_decide_topology():
 
 
 OMITS_STEPS = ["langgraph.malformed_pending_writes", "langgraph.undecided_interrupt",
-               "langgraph.unapplied_command_goto", "langgraph.unknown_send_target"]
+               "langgraph.unapplied_command_goto", "langgraph.unknown_send_target",
+               "otlp.unresolved_span_link", "otlp.unscoped_span_link"]
 
 
 @pytest.mark.parametrize("code", OMITS_STEPS)
@@ -737,3 +738,48 @@ def test_every_rule_treats_a_possibly_missing_step_as_unknown(code, rule):
         assert against_gapped_baseline == "PASS"
     else:
         assert against_gapped_baseline == "INSUFFICIENT_EVIDENCE"
+
+
+# --- dropped OTLP span links (#49) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("rule", [FAILURES, pattern("tool-failure"), pattern("plan-then-tool-failure"),
+                                  TOPOLOGY, SHAPE])
+def test_a_link_to_another_trace_changes_no_outcome(rule):
+    def otlp(status, gaps=None):
+        return _trace("t", [("p", CHAIN, "plan", OK), ("x", TOOL, "call_tool", status)], [("x", "p")],
+                      gaps=gaps)
+    foreign = {"otlp.foreign_trace_link": 1}
+    for cur, base in ((OK, OK), (ERR, OK)):
+        assert (_one(_run(otlp(cur, foreign), otlp(base), rule))
+                == _one(_run(otlp(cur), otlp(base), rule))
+                == _one(_run(otlp(cur), otlp(base, foreign), rule)))
+
+
+def _link_doc(*, failing: bool, link: dict | None):
+    def span(sid, name, kind, *, error=False, parent=None, links=None, start=1):
+        out = {"traceId": "t", "spanId": sid, "name": name, "startTimeUnixNano": str(start),
+               "attributes": [{"key": "openinference.span.kind", "value": {"stringValue": kind}}]}
+        if error:
+            out["status"] = {"code": 2, "message": "boom"}
+        if parent:
+            out["parentSpanId"] = parent
+        if links is not None:
+            out["links"] = links
+        return out
+    return {"resourceSpans": [{"scopeSpans": [{"spans": [
+        span("p", "plan", "CHAIN"),
+        span("x", "call_tool", "TOOL", error=failing, links=None if link is None else [link], start=2),
+    ]}]}]}
+
+
+def test_a_link_naming_no_trace_cannot_hide_a_plan_then_failure():
+    # The tool's only cause is a link to the local plan span, with the traceId left out. Read as
+    # a cause it makes a plan -> failing tool match and a different tree; dropped, it makes
+    # neither, so the comparison must not PASS on the evidence that was not recorded.
+    baseline = _otlp(_link_doc(failing=False, link=None))
+    scoped = _otlp(_link_doc(failing=True, link={"traceId": "t", "spanId": "p"}))
+    unscoped = _otlp(_link_doc(failing=True, link={"spanId": "p"}))
+    rules = (pattern("plan-then-tool-failure"), TOPOLOGY, SHAPE)
+    assert set(_outcomes(_run(scoped, baseline, *rules)).values()) == {"FAIL"}
+    assert set(_outcomes(_run(unscoped, baseline, *rules)).values()) == {"INSUFFICIENT_EVIDENCE"}

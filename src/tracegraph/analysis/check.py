@@ -47,14 +47,18 @@ Outcome = Literal["PASS", "FAIL", "INSUFFICIENT_EVIDENCE"]
 
 #: What each capture gap can hide. A code this build does not know is assumed to hide all of it.
 #: Every one of these gaps means a step may be missing from the artifact — a failed or paused
-#: task whose write could not be read, or a task the supplied graph would schedule but that
-#: could not be listed — and a missing step's status, kind and name are all unknown, so every
-#: rule treats them alike.
+#: task whose write could not be read, a task the supplied graph would schedule but that could
+#: not be listed, or a span a link names that the export lacks — and a missing step's status,
+#: kind and name are all unknown, so every rule treats them alike. A link that names no trace is
+#: classed here too: it may name such a missing span, and where it names a present one, the
+#: unrecorded edge can only hide matches, which the same one-sided rule covers.
 _MAY_OMIT_STEPS = frozenset({
     "langgraph.malformed_pending_writes",
     "langgraph.undecided_interrupt",
     "langgraph.unapplied_command_goto",
     "langgraph.unknown_send_target",
+    "otlp.unresolved_span_link",
+    "otlp.unscoped_span_link",
 })
 _HEURISTIC_EDGES = frozenset({"otlp.graph_parent_by_timing", "otlp.graph_parent_fallback"})
 
