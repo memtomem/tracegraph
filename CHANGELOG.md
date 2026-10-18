@@ -11,23 +11,30 @@ explicitly.
 ### Fixed
 
 - **An error already in the parent graph is no longer recorded again around a subgraph** (#85).
-  A LangGraph checkpoint is an error where the error channel first holds one, but the check read
-  only a checkpoint's causal parents, and three shapes hid the earlier error from it. A
-  subgraph's `__start__`, and a fork copy of it (`update_state(..., as_node="__copy__")`), was
-  compared only with the subgraph's input checkpoint, which holds its values as pending writes.
-  A persistent subgraph (`checkpointer=True`) entered again was compared with its previous
-  invocation, not with the outer checkpoint that launched it. And the parent-graph checkpoint
-  after a subgraph was compared only with the subgraph's exit, so a subgraph whose state has no
-  error channel, or that cleared its own copy, made the outer error look new. Each recorded one
-  failure twice (three times with nested subgraphs). The check now also reads each checkpoint's
-  declared parents, and, for a checkpoint built on an input checkpoint, that input's declared
-  parent and its launch parent (`metadata.parents`). A former duplicate written by a node that
-  rewrote the still-set channel is disclosed as `langgraph.rewritten_error_channel` instead, with
-  its stderr line, as for any such write since #47; `check` reads that gap as before. Steps,
-  edges, names and kinds are unchanged; what changes is which steps are errors (with their
-  `error_msg`) and those disclosures. An error first written inside a subgraph, or a `Send`
-  payload error below a clean state, is recorded as before. Artifacts change only for histories
-  that held such a duplicate. The schema stays v7, and the committed fixtures are byte-identical.
+  A LangGraph checkpoint is an error where the error channel holds one and none of the
+  checkpoints it was built from did, but the check read only a checkpoint's causal parents, and
+  three shapes hid the earlier error from it. A subgraph's `__start__` was compared only with
+  the subgraph's input checkpoint, which holds its values as pending writes. A persistent
+  subgraph (`checkpointer=True`) entered again was compared with its previous invocation, not
+  with the outer checkpoint that launched it. And the parent-graph checkpoint after a subgraph
+  was compared only with the subgraph's exit, so a subgraph whose state has no error channel, or
+  that cleared its own copy, made the outer error look new. One failure was recorded two or more
+  times: three with nested subgraphs, or when the subgraph cleared its copy. The check now also
+  reads each checkpoint's declared parents, and for a `__start__`, its input checkpoint's
+  declared parent and its launch parent (`metadata.parents`). A former duplicate written by a
+  node that rewrote the still-set channel is disclosed as `langgraph.rewritten_error_channel`
+  instead, with its stderr line, as for any such write since #47; `check` reads that gap as
+  before.
+- **A fork copy is no longer a second failure.** `update_state(..., as_node="__copy__")`
+  copies a checkpoint and runs no node, but it is linked to the copied checkpoint's parent, so
+  copying the checkpoint where an error first appeared (in the root graph, or a subgraph's
+  `__start__`) recorded that error again. A fork now never records an error.
+
+  For both: steps, edges, names and kinds are unchanged; what changes is which steps are errors
+  (with their `error_msg`) and the disclosure above. An error first written inside a subgraph, a
+  `Send` payload error below a clean state, and an error a caller's `update_state` writes are
+  recorded as before. Artifacts change only for histories that held such a duplicate. The
+  schema stays v7, and the committed fixtures are byte-identical.
 
 ## 0.5.0 - 2026-10-18
 

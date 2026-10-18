@@ -1007,7 +1007,7 @@ def test_after_a_subgraph_the_namespace_history_still_holds_the_error():
 @pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
 def test_a_fork_copy_of_a_subgraph_start_does_not_record_the_error_again(saver_kind):
     # update_state(..., as_node="__copy__") links the copy to the copied checkpoint's parent,
-    # here the subgraph's input checkpoint, so it too reads through to the launcher.
+    # here the subgraph's empty input checkpoint; a copy runs no node, so it is never new.
     inner = StateGraph(_OuterState, output_schema=_InnerOut)
     inner.add_node("pause", lambda s: {"log": [interrupt("pause")]})
     inner.add_edge(START, "pause")
@@ -1023,3 +1023,47 @@ def test_a_fork_copy_of_a_subgraph_start_does_not_record_the_error_again(saver_k
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
     assert any(s.source.value == "fork" for s in raw.steps)
     assert _errors_by_namespace(raw) == [("", "first", "outer")]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_fork_copy_of_the_checkpoint_that_first_held_an_error_is_not_a_second_failure(saver_kind):
+    g = StateGraph(_OuterState)
+    g.add_node("first", lambda s: {"error": "boom"})
+    g.add_edge(START, "first")
+    g.add_edge("first", END)
+    saver = _new_saver(saver_kind)
+    app = g.compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "log": []}, cfg)
+    app.update_state(app.get_state(cfg).config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    assert [(s.source.value, s.name, s.error_msg) for s in raw.steps
+            if s.status is StepStatus.ERROR] == [("loop", "first", "boom")]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_an_update_introducing_an_error_into_a_clean_subgraph_is_recorded(saver_kind):
+    # The Send payload starts the subgraph clean although the launcher holds an error, so a
+    # caller update writing one there is new; only the checkpoint applying an input reads
+    # through it.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("pause", lambda s: {"log": [interrupt("pause")]})
+    inner.add_edge(START, "pause")
+    inner.add_edge("pause", END)
+    g = StateGraph(_OuterState)
+    g.add_node("first", lambda s: {"error": "outer"})
+    g.add_node("sub", inner.compile())
+    g.add_edge(START, "first")
+    g.add_conditional_edges("first", lambda s: [Send("sub", {"error": None, "log": []})])
+    g.add_edge("sub", END)
+    saver = _new_saver(saver_kind)
+    app = g.compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "log": []}, cfg)
+    sub_input = next(t for t in saver.list(cfg)
+                     if t.config["configurable"]["checkpoint_ns"].startswith("sub")
+                     and t.metadata["source"] == "input")
+    app.update_state(sub_input.config, {"error": "new"}, as_node="pause")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    assert sorted((s.source.value, s.error_msg) for s in raw.steps
+                  if s.status is StepStatus.ERROR) == [("loop", "outer"), ("update", "new")]
