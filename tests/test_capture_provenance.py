@@ -338,6 +338,8 @@ def _set_capture(nt):
      lambda nt: __import__("tracegraph.normalize").normalize.validate_normalized(nt)],
     ids=["dumps", "save", "save_atomic", "validate_normalized"],
 )
+# The writers validate the model first, and pydantic's serializer warns on the bad value.
+@pytest.mark.filterwarnings("ignore::UserWarning")
 def test_provenance_changed_after_validation_is_refused_before_writing(mutate, write, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     nt = _nt(unknown_fields=[])
