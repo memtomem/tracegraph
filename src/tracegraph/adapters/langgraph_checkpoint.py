@@ -360,11 +360,12 @@ class LangGraphCheckpointAdapter:
                 step.unknown_fields = ["kind", "name"]
             # An error is new here only if no checkpoint before this one held it, and the causal
             # parents alone can miss one that did: exit-edge expansion replaces a same-namespace
-            # predecessor with a subgraph's exit, and the input checkpoint a ``__start__``
-            # applies holds its values as pending writes, so its own parents (the namespace's
-            # previous invocation, and the checkpoint that launched the subgraph) stand in.
+            # predecessor with a subgraph's exit, and an input checkpoint holds its values as
+            # pending writes, so for a checkpoint built on one (its ``__start__``, or a fork copy
+            # of that) the input's own parents (the namespace's previous invocation, and the
+            # checkpoint that launched the subgraph) stand in.
             upstream_keys = list(parent_keys.get(step_id, []))
-            if no_producer and step.source is StepSource.LOOP and display_parent_id is not None:
+            if display_parent_id and steps[display_parent_id].source is StepSource.INPUT:
                 upstream_keys += [*parent_keys.get(display_parent_id, []),
                                   *launch_keys.get(display_parent_id, [])]
             upstream_ids = [*parents_by_step.get(step_id, []),

@@ -1002,3 +1002,24 @@ def test_after_a_subgraph_the_namespace_history_still_holds_the_error():
         _StubSaver([root_after, sub_done, sub_input, root_before])).ingest("A")
     assert ("004-root-after", "sub:003-sub-done") in {(e.src, e.dst) for e in raw.causal_edges}
     assert [s.step_id for s in raw.steps if s.status is StepStatus.ERROR] == ["001-root-before"]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_fork_copy_of_a_subgraph_start_does_not_record_the_error_again(saver_kind):
+    # update_state(..., as_node="__copy__") links the copy to the copied checkpoint's parent,
+    # here the subgraph's input checkpoint, so it too reads through to the launcher.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("pause", lambda s: {"log": [interrupt("pause")]})
+    inner.add_edge(START, "pause")
+    inner.add_edge("pause", END)
+    saver = _new_saver(saver_kind)
+    app = _into(inner.compile()).compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "log": []}, cfg)
+    start = next(t for t in saver.list(cfg)
+                 if t.config["configurable"]["checkpoint_ns"].startswith("sub")
+                 and t.metadata["step"] == 0)
+    app.update_state(start.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    assert any(s.source.value == "fork" for s in raw.steps)
+    assert _errors_by_namespace(raw) == [("", "first", "outer")]
