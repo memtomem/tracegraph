@@ -739,9 +739,10 @@ def test_a_value_that_can_be_neither_compared_nor_rendered_counts_as_persisted()
     adapter = LangGraphCheckpointAdapter(_StubSaver([]))
     cp = {"channel_values": {"error": Opaque()}, "channel_versions": {"error": "2"}}
     parent = {"channel_values": {"error": Opaque()}, "channel_versions": {"error": "1"}}
-    assert adapter._error_introduced(cp, [(parent, True)], node_written=True) == (None, True)
+    assert adapter._error_introduced(cp, [parent]) is None
+    assert adapter._rewrote_error(cp, [parent]) is True
     del cp["channel_versions"]  # without versions, an incomparable value is the same one
-    assert adapter._error_introduced(cp, [(parent, True)], node_written=True) == (None, False)
+    assert adapter._rewrote_error(cp, [parent]) is False
 
 
 def test_without_versions_a_new_value_is_disclosed_and_the_same_one_is_not():
@@ -778,3 +779,27 @@ def test_a_fork_copy_is_neither_a_failure_nor_a_rewrite(saver_kind, second, n_er
     assert counts() == (n_errors, rewritten)
     app.update_state(app.get_state(cfg).config, None, as_node="__copy__")
     assert counts() == (n_errors, rewritten)
+
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("second", ["A", "B"])
+def test_a_rewrite_alongside_a_subgraph_is_still_disclosed(saver_kind, second):
+    # The checkpoint after second_fail and a parallel subgraph has the subgraph's exit as its
+    # expanded causal parent; the rewrite is detected against the channel's own history, the
+    # declared same-namespace parent.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("inner_step", lambda s: {"log": ["inner"]})
+    inner.add_edge(START, "inner_step")
+    inner.add_edge("inner_step", END)
+    g = StateGraph(_OuterState)
+    g.add_node("first_fail", lambda s: {"error": "A"})
+    g.add_node("second_fail", lambda s: {"error": second})
+    g.add_node("sub", inner.compile())
+    g.add_edge(START, "first_fail")
+    g.add_edge("first_fail", "second_fail")
+    g.add_edge("first_fail", "sub")
+    g.add_edge(["second_fail", "sub"], END)
+    errors, gaps, _ = _ingest_run(g, saver_kind, ({"error": None, "log": []},))
+    assert [m for _, m in errors if m == "B"] == []  # never recorded
+    assert gaps["langgraph.rewritten_error_channel"] == 1  # 0 before: the exit hid the history
