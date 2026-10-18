@@ -15,7 +15,8 @@ import shlex
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+import traceback
+from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -35,10 +36,9 @@ from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
 from tracegraph.analysis import Match
-from tracegraph.analysis.patterns import match_for
+from tracegraph.analysis.patterns import build_index, find_matches, match_for
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
-from tracegraph.analysis import search as pattern_search
 from tracegraph import __version__
 from tracegraph.analysis import default_label, structure_only
 from tracegraph.model import EdgeType, NormalizedTrace, RawTrace, StepSource, StepStatus
@@ -878,6 +878,42 @@ def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
     )
 
 
+def _discover_artifacts(
+    paths: list[Path], *, exclude: Path | None = None
+) -> list[tuple[Path, bool]]:
+    """Expand files and directories into ``(path, explicitly_named)`` in load order."""
+    discovered: list[tuple[Path, bool]] = []
+    excluded = exclude.resolve() if exclude is not None else None
+    for p in paths:
+        if p.is_dir():
+            discovered.extend(
+                (f, False)
+                for f in sorted(p.glob("*.json"))
+                if excluded is None or f.resolve() != excluded
+            )
+        else:
+            if excluded is not None and p.resolve() == excluded:
+                raise typer.BadParameter("--out must not overwrite an input artifact")
+            discovered.append((p, True))
+    if not discovered:
+        raise typer.BadParameter("no artifact files found")
+    return discovered
+
+
+def _no_valid_artifacts(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
+    return typer.BadParameter(
+        f"no valid artifacts found ({len(skipped)} discovered file(s) were not "
+        "tracegraph artifacts)"
+    )
+
+
+def _duplicate_trace_id(tid: str, first: Path, again: Path) -> typer.BadParameter:
+    return typer.BadParameter(
+        f"duplicate trace_id {tid!r}: {first} and {again}. Each artifact "
+        "must carry a unique trace_id — rename or deduplicate before querying."
+    )
+
+
 def _load_many_evidence(
     paths: list[Path], *, exclude: Path | None = None
 ) -> list[_LoadedArtifact]:
@@ -896,22 +932,7 @@ def _load_many_evidence(
     chain, so silently keeping the last-loaded copy would attach matches from one artifact
     to a different artifact's causal graph.
     """
-    discovered: list[tuple[Path, bool]] = []  # (path, explicitly_named)
-    excluded = exclude.resolve() if exclude is not None else None
-    for p in paths:
-        if p.is_dir():
-            discovered.extend(
-                (f, False)
-                for f in sorted(p.glob("*.json"))
-                if excluded is None or f.resolve() != excluded
-            )
-        else:
-            if excluded is not None and p.resolve() == excluded:
-                raise typer.BadParameter("--out must not overwrite an input artifact")
-            discovered.append((p, True))
-    if not discovered:
-        raise typer.BadParameter("no artifact files found")
-
+    discovered = _discover_artifacts(paths, exclude=exclude)
     loaded: list[_LoadedArtifact] = []
     skipped: list[tuple[Path, str]] = []
     for f, explicit in discovered:
@@ -931,25 +952,15 @@ def _load_many_evidence(
 
     _warn_skipped(skipped)
     if not loaded:
-        raise typer.BadParameter(
-            f"no valid artifacts found ({len(skipped)} discovered file(s) were not "
-            "tracegraph artifacts)"
-        )
+        raise _no_valid_artifacts(skipped)
 
     seen: dict[str, Path] = {}
     for item in loaded:
         tid = item.trace.trace.trace_id
         if tid in seen:
-            raise typer.BadParameter(
-                f"duplicate trace_id {tid!r}: {seen[tid]} and {item.path}. Each artifact "
-                "must carry a unique trace_id — rename or deduplicate before querying."
-            )
+            raise _duplicate_trace_id(tid, seen[tid], item.path)
         seen[tid] = item.path
     return loaded
-
-
-def _load_many(paths: list[Path]) -> list[NormalizedTrace]:
-    return [item.trace for item in _load_many_evidence(paths)]
 
 
 def _store_cls(backend: QueryBackend) -> type[Any]:
@@ -1023,29 +1034,159 @@ def _search_with_backend(
     within this call (including on exceptions), so a directory sweep holds at most
     one open backend DB at a time. A caller that needs stores afterwards (``query
     --explain``) rebuilds them lazily for just the traces it renders."""
-    if backend is QueryBackend.MEMORY:
-        return pattern_search(traces, pattern)
-
     matches: list[Match] = []
     fell_back = False
     for nt in traces:
-        store = _store_from_trace(nt, backend)
-        try:
-            steps = nt.steps_by_id()
-            for path in store.find_matches(pattern):
-                matches.append(match_for(nt.trace.trace_id, steps, path))
-            fell_back = fell_back or getattr(store, "fell_back_to_python", False)
-        finally:
-            _close_store(store)
+        found, _, trace_fell_back = _match_trace(nt, pattern, backend)
+        matches.extend(found)
+        fell_back = fell_back or trace_fell_back
     if fell_back:
-        # Honesty signal (off result stdout): the ladybug accelerator couldn't compile this
-        # pattern under LadybugDB's 30-hop cap and ran the pure-Python matcher instead. Results
-        # are identical — this just tells the user the accelerator deferred.
-        err_console.print(
-            "[dim]⚠ pattern not Cypher-compilable (unbounded gap); ran the pure-Python "
-            "matcher over the raw causal graph — results are identical to --backend ladybug's.[/]"
-        )
+        _note_fallback()
     return matches
+
+
+def _match_trace(
+    nt: NormalizedTrace, pattern, backend: QueryBackend, *, room: int | None = None
+) -> tuple[list[Match], int, bool]:
+    """One trace's first ``room`` matches (all when ``None``), how many it has in total, and
+    whether the backend fell back to Python.
+
+    A backend store is opened and closed within the call, including on exceptions, and the
+    matches are labelled while it is still open."""
+    tid = nt.trace.trace_id
+    if backend is QueryBackend.MEMORY:
+        index = build_index(nt)
+        paths = find_matches(nt, pattern, index=index)
+        return [match_for(tid, index[0], path) for path in paths[:room]], len(paths), False
+    store = _store_from_trace(nt, backend)
+    try:
+        steps = nt.steps_by_id()
+        paths = store.find_matches(pattern)
+        found = [match_for(tid, steps, path) for path in paths[:room]]
+        return found, len(paths), getattr(store, "fell_back_to_python", False)
+    finally:
+        _close_store(store)
+
+
+def _note_fallback() -> None:
+    # Honesty signal (off result stdout): the ladybug accelerator couldn't compile this
+    # pattern under LadybugDB's 30-hop cap and ran the pure-Python matcher instead. Results
+    # are identical — this just tells the user the accelerator deferred.
+    err_console.print(
+        "[dim]⚠ pattern not Cypher-compilable (unbounded gap); ran the pure-Python "
+        "matcher over the raw causal graph — results are identical to --backend ladybug's.[/]"
+    )
+
+
+@dataclass
+class _QueryPass:
+    n_traces: int = 0
+    total: int = 0
+    matches: list[Match] = field(default_factory=list)
+    traces: dict[str, NormalizedTrace] = field(default_factory=dict)  # what --explain renders
+    # Scan state, read once every file has been loaded.
+    skipped: list[tuple[Path, str]] = field(default_factory=list)
+    seen: dict[str, Path] = field(default_factory=dict)
+    duplicate: tuple[str, Path, Path] | None = None
+    failure: Exception | None = None
+    fell_back: bool = False
+
+
+def _query_pass(
+    paths: list[Path], pattern, backend: QueryBackend, *, limit: int | None, keep_traces: bool
+) -> _QueryPass:
+    """Load, validate and match one artifact at a time, keeping only what ``query`` prints.
+
+    Equivalent to ``_load_many_evidence`` followed by ``_search_with_backend`` and slicing to
+    ``limit``, without holding every trace and every match: each file is handled by
+    :func:`_query_file`, whose trace is released when it returns unless ``keep_traces`` is set
+    and one of its matches is kept, and only the first ``limit`` paths become :class:`Match`
+    objects (the total still counts them all; a labelling fault past the limit, which would be
+    an internal bug, is therefore not raised). The two-phase error order is preserved: every
+    file is loaded and validated even after matching fails, and a matching failure is raised
+    only after the load, "no valid artifacts" and duplicate trace_id errors would have been.
+    ``MemoryError`` and interrupts propagate at once, after flushing the skip warnings
+    collected so far.
+    """
+    discovered = _discover_artifacts(paths)
+    scan = _QueryPass()
+    try:
+        for f, explicit in discovered:
+            failed = scan.failure is not None
+            _query_file(scan, f, explicit, pattern, backend, limit=limit, keep_traces=keep_traces)
+            if not failed and scan.failure is not None:
+                _release_frames(scan.failure)
+    except BaseException:
+        _warn_skipped(scan.skipped)
+        raise
+    _warn_skipped(scan.skipped)
+    if not scan.n_traces:
+        raise _no_valid_artifacts(scan.skipped)
+    if scan.duplicate is not None:
+        raise _duplicate_trace_id(*scan.duplicate)
+    if scan.failure is not None:
+        raise scan.failure
+    if scan.fell_back:
+        _note_fallback()
+    return scan
+
+
+def _release_frames(exc: BaseException) -> None:
+    """Drop the locals of the finished frames in ``exc``'s traceback chain, keeping the
+    exception itself, its chaining and the traceback's line numbers. A deferred matching
+    failure would otherwise keep its trace and match list alive while later files load."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    pending = [exc]
+    while pending:
+        cur = pending.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        traceback.clear_frames(cur.__traceback__)
+        pending.extend(e for e in (cur.__context__, cur.__cause__) if e is not None)
+
+
+def _query_file(
+    scan: _QueryPass,
+    f: Path,
+    explicit: bool,
+    pattern,
+    backend: QueryBackend,
+    *,
+    limit: int | None,
+    keep_traces: bool,
+) -> None:
+    try:
+        nt = _load_artifact_evidence(f).trace
+    except _LOAD_ERRORS as exc:
+        if not explicit:
+            scan.skipped.append((f, _load_reason(exc)))
+            return
+        pending, scan.skipped = scan.skipped, []
+        _warn_skipped(pending)
+        raise _load_error(f, exc) from exc
+    scan.n_traces += 1
+    tid = nt.trace.trace_id
+    if tid in scan.seen:
+        scan.duplicate = scan.duplicate or (tid, scan.seen[tid], f)
+        return
+    scan.seen[tid] = f
+    if scan.duplicate is not None or scan.failure is not None:
+        return  # an error is already certain; keep validating the rest
+    room = None if limit is None else max(limit - len(scan.matches), 0)
+    try:
+        found, count, fell_back = _match_trace(nt, pattern, backend, room=room)
+    except MemoryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - re-raised by _query_pass, in today's order
+        scan.failure = exc
+        return
+    scan.matches.extend(found)
+    scan.total += count
+    scan.fell_back = scan.fell_back or fell_back
+    if keep_traces and found:
+        scan.traces[tid] = nt
 
 
 def _label(step) -> str:
@@ -1547,20 +1688,18 @@ def query(
         )
     if limit is not None and limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
-    traces = _load_many(artifacts)
-    matches = _search_with_backend(traces, pattern, backend)
+    found = _query_pass(artifacts, pattern, backend, limit=limit, keep_traces=explain)
+    matches = found.matches
     # --explain stores are built lazily below, AFTER --limit truncation, so a 10-of-500
     # cap opens at most 10 backend DBs regardless of how many traces matched.
     stores: dict[str, Any] = {}
     try:
-        total = len(matches)
+        total = found.total
         truncated = limit is not None and total > limit
-        if truncated:
-            matches = matches[:limit]
         # escape() the pattern str (its [gap …] markers would be eaten as Rich markup otherwise).
         console.print(
             f"[bold]{pattern.pattern_id}@v{pattern.pattern_version}[/]: {escape(str(pattern))}  "
-            f"[dim](over {len(traces)} trace(s))[/]\n"
+            f"[dim](over {found.n_traces} trace(s))[/]\n"
         )
         if not matches:
             console.print("[dim]no matches[/]")
@@ -1568,7 +1707,7 @@ def query(
 
         # Lazily build stores only for the traces that actually appear in the (possibly
         # truncated) match set — --explain over a 10-of-500 cap shouldn't pay 500 store loads.
-        traces_by_id = {nt.trace.trace_id: nt for nt in traces}
+        traces_by_id = found.traces
         steps_maps: dict[str, dict] = {}
         for m in matches:
             console.print(
