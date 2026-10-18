@@ -73,7 +73,13 @@ input should bound it themselves. Still, analyzing an artifact you did not produ
 strings an attacker may have chosen; render them as data.
 
 Subprocess use is limited to one call site, the Phoenix CLI (`px`), invoked as an argument
-list rather than through a shell, with a timeout and without echoing its output.
+list rather than through a shell, with a timeout and without echoing its output. Its stdout is
+held to the same `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling: it is written to an unlinked temporary
+file rather than memory, and `px` is killed once that file passes the limit, so disk use can
+exceed it by about one 50 ms poll interval of output. The exception is a process `px` started
+that keeps its stdout: it can go on writing to the unlinked file after `px` exits, until it
+stops. Its stderr is discarded. The ceiling bounds
+what is read, not the JSON parse that follows.
 
 ### A checkpoint database is executable input, and is treated as such
 

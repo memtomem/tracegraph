@@ -127,6 +127,16 @@ explicitly.
   message: `doctor` prints `FAIL` and exits 1, `diagnose` exits 2, as for their other `px`
   failures. When the OS refused to launch `px`, the message adds a hint to check that `px` on
   PATH is an executable file.
+- **Phoenix `px` output is bounded** (#53, the half #63 left open). `phoenix doctor` and
+  `phoenix diagnose` held all of `px`'s stdout and stderr in memory with only a time limit. Stdout
+  now goes to an unlinked temporary file held to the same `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling
+  as file and stdin input (default 256 MiB, `0` disables it). `px` is killed and reaped once the
+  file passes the limit, and the command reports `... output exceeded the N-byte limit` without
+  echoing the output: doctor `FAIL` exit 1, diagnose exit 2. Stderr is discarded; it was never
+  shown. Two smaller changes come with it. Output that is not UTF-8 is now reported as such:
+  before, `doctor` printed the codec error and `diagnose` crashed with a traceback. And a
+  descendant of `px` that keeps stdout open no longer holds the call until the timeout. Timeout,
+  nonzero-exit and launch-error messages are unchanged.
 - **`SECURITY.md` now states the `ingest --graph` trust boundary** (#55). It said tracegraph
   "does not execute graphs" and called a checkpoint database the one input that can run code,
   but `--graph` imports the module you name, running its top-level code, and then runs the

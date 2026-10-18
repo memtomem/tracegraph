@@ -8,6 +8,9 @@ import re
 import subprocess
 from types import SimpleNamespace
 import sys
+import textwrap
+import threading
+import time
 
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -267,6 +270,18 @@ def test_analyze_accepts_phoenix_stdin():
     assert "phoenix-1" in result.output and "What failed" in result.output
 
 
+def _patch_px(monkeypatch, fake):
+    """Route every ``px`` call to ``fake(command, timeout=...)``.
+
+    The fake returns an object whose ``stdout`` is the text px would print, or raises what the
+    subprocess would (``FileNotFoundError``, ``TimeoutExpired``, ``CalledProcessError``).
+    """
+    monkeypatch.setattr(
+        cli_mod, "_px_exec",
+        lambda command, *, timeout: fake(command, timeout=timeout).stdout.encode("utf-8"),
+    )
+
+
 def test_phoenix_diagnose_uses_read_only_px_and_writes_safe_outputs(tmp_path, monkeypatch):
     seen = []
 
@@ -280,7 +295,7 @@ def test_phoenix_diagnose_uses_read_only_px_and_writes_safe_outputs(tmp_path, mo
             return SimpleNamespace(stdout=json.dumps(payload))
         raise AssertionError(f"unexpected px command: {command}")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     artifact_path = tmp_path / "safe.json"
     report_path = tmp_path / "report.json"
     result = runner.invoke(
@@ -299,7 +314,7 @@ def test_phoenix_diagnose_uses_read_only_px_and_writes_safe_outputs(tmp_path, mo
     assert seen[0][0] == ["px", "--version"]
     assert seen[1][0][:4] == ["px", "trace", "get", "phoenix-1"]
     assert "--include-annotations" in seen[1][0]
-    assert seen[1][1]["check"] is True
+    assert seen[1][1] == {"timeout": cli_mod._PX_TIMEOUT_SECONDS}
     assert all(command[1] not in {"annotate", "add-note", "delete"} for command, _ in seen)
     assert artifact_path.exists() and report_path.exists()
     assert "password=secret" not in artifact_path.read_text(encoding="utf-8")
@@ -317,7 +332,7 @@ def test_phoenix_diagnose_missing_px_is_actionable(monkeypatch):
     def missing(*args, **kwargs):
         raise FileNotFoundError("px")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", missing)
+    _patch_px(monkeypatch, missing)
     result = runner.invoke(app, ["phoenix", "diagnose", "t"])
     assert result.exit_code != 0
     assert "Phoenix CLI `px` was not found" in result.output
@@ -341,7 +356,7 @@ def test_phoenix_diagnose_auto_selects_latest_error_and_forwards_project(monkeyp
             )
         raise AssertionError(f"unexpected px command: {command}")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose", "--project", "agent-prod"])
     assert result.exit_code == 0, result.output
     assert "selected latest failed Phoenix trace" in result.output
@@ -363,7 +378,7 @@ def test_phoenix_diagnose_forwards_project_to_trace_and_baseline(monkeypatch):
             return SimpleNamespace(stdout=json.dumps(_phoenix_export(command[3], status="OK")))
         raise AssertionError(f"unexpected px command: {command}")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(
         app,
         [
@@ -392,7 +407,7 @@ def test_phoenix_diagnose_falls_back_to_newest_trace(monkeypatch):
             )
         )
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose"])
     assert result.exit_code == 0, result.output
     assert "No failed trace found in the latest 2" in result.output
@@ -403,7 +418,7 @@ def test_phoenix_diagnose_empty_project_is_actionable(monkeypatch):
     def fake_run(command, **kwargs):
         return SimpleNamespace(stdout="1.8.1" if command == ["px", "--version"] else "[]")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose"])
     assert result.exit_code != 0
     assert "configured Phoenix project has no traces" in result.output
@@ -418,7 +433,7 @@ def test_phoenix_diagnose_rejects_trace_list_without_aggregate_status(monkeypatc
             return SimpleNamespace(stdout="1.8.1")
         return SimpleNamespace(stdout=json.dumps([payload]))
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose"])
     assert result.exit_code != 0
     assert "required" in result.output and "status" in result.output
@@ -442,7 +457,7 @@ def test_phoenix_diagnose_sanitizes_px_process_failures(monkeypatch, failure, ex
             return SimpleNamespace(stdout="1.8.1")
         raise failure
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
     assert result.exit_code == 2
     assert expected in _flat(result.output)
@@ -451,9 +466,8 @@ def test_phoenix_diagnose_sanitizes_px_process_failures(monkeypatch, failure, ex
 
 def test_phoenix_diagnose_rejects_malformed_px_json(monkeypatch):
     responses = iter(["1.8.1", "not-json"])
-    monkeypatch.setattr(
-        cli_mod.subprocess,
-        "run",
+    _patch_px(
+        monkeypatch,
         lambda *args, **kwargs: SimpleNamespace(stdout=next(responses)),
     )
     result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
@@ -463,9 +477,8 @@ def test_phoenix_diagnose_rejects_malformed_px_json(monkeypatch):
 
 @pytest.mark.parametrize("version", ["0.9.9", "unknown"])
 def test_phoenix_diagnose_rejects_unsupported_px_versions(monkeypatch, version):
-    monkeypatch.setattr(
-        cli_mod.subprocess,
-        "run",
+    _patch_px(
+        monkeypatch,
         lambda *args, **kwargs: SimpleNamespace(stdout=version),
     )
     result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
@@ -475,9 +488,8 @@ def test_phoenix_diagnose_rejects_unsupported_px_versions(monkeypatch, version):
 
 def test_phoenix_doctor_reports_ready_warn_and_fail(monkeypatch):
     responses = iter(["1.8.1", "[]", json.dumps([_phoenix_export(status="OK")])])
-    monkeypatch.setattr(
-        cli_mod.subprocess,
-        "run",
+    _patch_px(
+        monkeypatch,
         lambda *args, **kwargs: SimpleNamespace(stdout=next(responses)),
     )
     ready = runner.invoke(app, ["phoenix", "doctor", "--project", "agent-prod"])
@@ -485,18 +497,16 @@ def test_phoenix_doctor_reports_ready_warn_and_fail(monkeypatch):
     assert "READY" in ready.output and "agent-prod" in ready.output
 
     responses = iter(["1.8.1", "[]", "[]"])
-    monkeypatch.setattr(
-        cli_mod.subprocess,
-        "run",
+    _patch_px(
+        monkeypatch,
         lambda *args, **kwargs: SimpleNamespace(stdout=next(responses)),
     )
     warning = runner.invoke(app, ["phoenix", "doctor"])
     assert warning.exit_code == 0, warning.output
     assert "WARN" in warning.output and "no traces yet" in warning.output
 
-    monkeypatch.setattr(
-        cli_mod.subprocess,
-        "run",
+    _patch_px(
+        monkeypatch,
         lambda *args, **kwargs: (_ for _ in ()).throw(FileNotFoundError("px")),
     )
     failed = runner.invoke(app, ["phoenix", "doctor"])
@@ -584,11 +594,226 @@ def test_phoenix_commands_report_a_px_that_cannot_be_run(tmp_path, monkeypatch, 
         assert "check that `px` on PATH is an executable file" in _flat(result.output)
 
 
+def _px_script(tmp_path, body):
+    """A fake ``px`` run as ``[sys.executable, script]``: portable, no PATH or shebang."""
+    script = tmp_path / "fake_px.py"
+    script.write_text("import os, sys, time\n" + textwrap.dedent(body), encoding="utf-8")
+    return [sys.executable, str(script)]
+
+
+def _px_limit(monkeypatch, limit):
+    monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(limit))
+
+
+def _reaped(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize("size", [64, 65])
+def test_px_output_at_and_past_the_byte_limit(tmp_path, monkeypatch, size):
+    _px_limit(monkeypatch, 64)
+    command = _px_script(tmp_path, f"sys.stdout.write('x' * {size})\n")
+    if size == 64:
+        assert cli_mod._px_run(command, action="px probe") == "x" * 64
+    else:
+        with pytest.raises(cli_mod._PxError, match=r"^px probe output exceeded the 64-byte limit"):
+            cli_mod._px_run(command, action="px probe")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pid liveness check is POSIX")
+def test_px_endless_output_is_stopped_and_reaped(tmp_path, monkeypatch):
+    _px_limit(monkeypatch, 1 << 20)
+    pid_file = tmp_path / "pid"
+    command = _px_script(tmp_path, f"""
+        open({str(pid_file)!r}, "w").write(str(os.getpid()))
+        while True:
+            sys.stdout.write("y" * 65536)
+    """)
+    started = time.monotonic()
+    with pytest.raises(cli_mod._PxError, match="exceeded the 1048576-byte limit"):
+        cli_mod._px_run(command, action="px probe", timeout=30)
+    assert time.monotonic() - started < 10
+    assert _reaped(int(pid_file.read_text()))
+
+
+def test_px_short_writes_and_split_utf8_are_assembled(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli_mod, "_READ_CHUNK_BYTES", 3)
+    text = "a€b" * 50 + "é"
+    command = _px_script(tmp_path, f"""
+        for ch in {text!r}:
+            sys.stdout.write(ch)
+            sys.stdout.flush()
+    """)
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+    assert cli_mod._px_run(command, action="px probe") == text
+
+
+def test_px_output_that_is_not_utf8_is_refused(tmp_path):
+    command = _px_script(tmp_path, "sys.stdout.buffer.write(b'{\"x\": \"\\xff\"}')\n")
+    with pytest.raises(cli_mod._PxError, match=r"^px probe returned output that is not UTF-8 text$"):
+        cli_mod._px_run(command, action="px probe")
+
+
+def test_px_stderr_is_discarded_whatever_its_size(tmp_path, monkeypatch):
+    _px_limit(monkeypatch, 16)
+    command = _px_script(tmp_path, """
+        sys.stderr.write("password=secret " * (20 * 1024 * 1024 // 16))
+        sys.stdout.write("ok")
+    """)
+    assert cli_mod._px_run(command, action="px probe") == "ok"
+
+
+def test_px_limit_zero_disables_the_ceiling(tmp_path, monkeypatch):
+    _px_limit(monkeypatch, 0)
+    command = _px_script(tmp_path, "sys.stdout.write('z' * 300000)\n")
+    assert len(cli_mod._px_run(command, action="px probe")) == 300000
+
+
+def test_px_nonzero_exit_reports_the_actual_code(tmp_path):
+    command = _px_script(tmp_path, "sys.stdout.write('partial'); sys.exit(7)\n")
+    with pytest.raises(cli_mod._PxError, match=r"^px probe failed with exit 7; verify Phoenix endpoint"):
+        cli_mod._px_run(command, action="px probe")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pid liveness check is POSIX")
+def test_px_timeout_kills_and_reaps_the_child(tmp_path):
+    pid_file = tmp_path / "pid"
+    command = _px_script(tmp_path, f"""
+        open({str(pid_file)!r}, "w").write(str(os.getpid()))
+        time.sleep(60)
+    """)
+    with pytest.raises(cli_mod._PxError, match=r"^px probe timed out after 1 seconds$"):
+        cli_mod._px_run(command, action="px probe", timeout=1)
+    assert _reaped(int(pid_file.read_text()))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pid liveness check is POSIX")
+def test_px_descendant_holding_stdout_does_not_hold_the_call(tmp_path):
+    # With a pipe, a descendant that inherits stdout keeps it open after px exits.
+    pid_file = tmp_path / "grandchild"
+    command = _px_script(tmp_path, f"""
+        import subprocess
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        open({str(pid_file)!r}, "w").write(str(child.pid))
+        sys.stdout.write("done")
+    """)
+    try:
+        started = time.monotonic()
+        assert cli_mod._px_run(command, action="px probe", timeout=20) == "done"
+        assert time.monotonic() - started < 10
+    finally:
+        os.kill(int(pid_file.read_text()), 9)
+
+
+def test_px_overflow_wins_over_a_passed_deadline(tmp_path, monkeypatch):
+    # Both are true at the same poll; the order is fixed, not a race.
+    _px_limit(monkeypatch, 4)
+    killed = []
+
+    class Stuck:
+        def __init__(self, command, *, stdout, **kwargs):
+            stdout.write(b"too long")
+            stdout.flush()
+
+        def wait(self, timeout=None):
+            if killed:
+                return -9
+            raise subprocess.TimeoutExpired("px", timeout)
+
+        def poll(self):
+            return -9 if killed else None
+
+        def kill(self):
+            killed.append(True)
+
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", Stuck)
+    with pytest.raises(cli_mod._PxOutputTooLarge):
+        cli_mod._px_exec(["px"], timeout=0)
+    assert killed == [True]
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_px_exit_observed_after_the_deadline_is_a_timeout(tmp_path, monkeypatch, exit_code):
+    clock = iter([0.0, 5.0, 5.0, 5.0])  # deadline set at 0; the exit is seen at 5 s
+
+    class Late:
+        def __init__(self, command, **kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            return exit_code
+
+        def poll(self):
+            return exit_code
+
+    monkeypatch.setattr(cli_mod.subprocess, "Popen", Late)
+    monkeypatch.setattr(cli_mod.time, "monotonic", lambda: next(clock))
+    with pytest.raises(subprocess.TimeoutExpired):
+        cli_mod._px_exec(["px"], timeout=1)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pid liveness check is POSIX")
+def test_px_interrupt_kills_and_reaps_the_child(tmp_path, monkeypatch):
+    pid_file = tmp_path / "pid"
+    command = _px_script(tmp_path, f"""
+        # Published by rename, so the file never exists half-written.
+        open({str(pid_file)!r} + ".tmp", "w").write(str(os.getpid()))
+        os.replace({str(pid_file)!r} + ".tmp", {str(pid_file)!r})
+        time.sleep(60)
+    """)
+    real_wait = subprocess.Popen.wait
+
+    def interrupted(self, timeout=None):
+        if timeout is not None and pid_file.exists():
+            raise KeyboardInterrupt
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(subprocess.Popen, "wait", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        cli_mod._px_run(command, action="px probe", timeout=30)
+    assert _reaped(int(pid_file.read_text()))
+
+
+def test_px_repeated_timeouts_leave_no_threads_or_descriptors(tmp_path):
+    command = _px_script(tmp_path, "time.sleep(60)\n")
+    fd_dir = Path("/dev/fd")
+    before = (threading.active_count(), len(os.listdir(fd_dir)) if fd_dir.is_dir() else 0)
+    for _ in range(3):
+        with pytest.raises(cli_mod._PxError, match="timed out"):
+            cli_mod._px_run(command, action="px probe", timeout=0.2)
+    after = (threading.active_count(), len(os.listdir(fd_dir)) if fd_dir.is_dir() else 0)
+    assert after == before
+
+
+@pytest.mark.parametrize("command", [["phoenix", "doctor"], ["phoenix", "diagnose", "trace"]])
+def test_phoenix_commands_report_oversized_px_output(tmp_path, monkeypatch, command):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    px = bin_dir / "px"
+    px.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('1.8.1') if sys.argv[1:] == ['--version'] else sys.stdout.write('PRIVATE ' * 64)\n",
+        encoding="utf-8",
+    )
+    px.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    _px_limit(monkeypatch, 100)
+    result = runner.invoke(app, command)
+    assert result.exit_code == (1 if command[1] == "doctor" else 2), result.output
+    assert "exceeded the 100-byte limit" in _flat(result.output)
+    assert "PRIVATE" not in result.output
+
+
 def test_px_os_errors_echo_only_the_operating_system_text(monkeypatch):
     def fake_run(command, **kwargs):
         raise OSError(errno.EMFILE, "password=secret")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "doctor"])
     assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
     expected = f"FAIL Phoenix CLI `px` failed with an OS error ({os.strerror(errno.EMFILE)})"
