@@ -123,9 +123,12 @@ Rules: `failures-not-increased` (recorded errors per step `(kind, name)` and in 
 (derived tree with labels) or `topology-unchanged:shape`. Counts compare step signatures,
 because no source records which step of one run is which step of another; two same-named steps
 trading which one fails is not detected (`analyze --baseline` shows the positional view).
-Evidence that is unknown is never read as zero: a step with an `unset` status, a value the
-adapter substituted (`unknown_fields`), or a capture gap that can hide a failure blocks PASS
+Evidence that is unknown is never read as zero. When something the selected rule depends on is
+unknown — an `unset` status, a value the adapter substituted (`unknown_fields`) or a missing
+name on a step the rule could count, or a capture gap that can hide a failure — it blocks PASS
 on the current side and FAIL on the baseline side, so the rule reports `INSUFFICIENT_EVIDENCE`.
+Unknowns a rule cannot count leave it decided: an unset CHAIN does not block
+`pattern-not-increased:tool-failure`, and a withheld error message blocks only `timeout`.
 Pairs from different sources or ingested before capture provenance (artifact version 7) are
 insufficient for every rule; pairs read with different causal settings, or with causal edges
 chosen heuristically at ingest, are insufficient for the rules that read causal structure
