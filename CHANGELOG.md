@@ -105,6 +105,17 @@ explicitly.
   the green used for finished steps, and the summary line gains `· N interrupted` when there
   is one. The output for every trace without interrupt steps is unchanged.
 
+### Fixed
+
+- **`analyze --trace` and `--baseline-trace` no longer ignore the selector on an artifact**
+  (#64). An artifact holds one trace, and a selector naming a different one was accepted: the
+  command exited 0 with a report on the artifact's trace, not the one requested. It now exits 2
+  with `Invalid value for --trace: <input> holds trace '<id>', not '<selector>'` (or
+  `--baseline-trace`) and writes no report, as `check` already did and as a missing trace in an
+  OTLP or Phoenix export does. A selector naming the artifact's own trace is still accepted, and
+  the report is byte-identical to the one without it. `ingest-phoenix` given a Phoenix-sourced
+  artifact still ignores `--trace` (#69).
+
 ## 0.4.0 - 2026-10-14
 
 ### Added

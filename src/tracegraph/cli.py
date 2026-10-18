@@ -323,14 +323,20 @@ def _select_trace(adapter: Any, trace_id: str | None, *, what: str) -> str:
     return ids[0]
 
 
-def _load_analysis_source(source: str, trace_id: str | None = None) -> NormalizedTrace:
-    return _load_analysis_input(source, trace_id).trace
+def _load_analysis_source(
+    source: str, trace_id: str | None = None, *, option: str = "--trace"
+) -> NormalizedTrace:
+    return _load_analysis_input(source, trace_id, option=option).trace
 
 
 def _load_analysis_input(
-    source: str, trace_id: str | None = None, *, strict_json: bool = False
+    source: str, trace_id: str | None = None, *, strict_json: bool = False, option: str = "--trace"
 ) -> _AnalysisInput:
-    """Strictly identify a tracegraph artifact, OTLP span export or Phoenix CLI trace export."""
+    """Strictly identify a tracegraph artifact, OTLP span export or Phoenix CLI trace export.
+
+    ``trace_id`` picks one trace out of an export. An artifact holds exactly one trace, so a
+    selector there must name it; ``option`` is the flag blamed when it does not.
+    """
     try:
         kind, payload = _parse_analysis_text(_read_source(source), strict=strict_json)
         if kind == "artifact":
@@ -352,9 +358,13 @@ def _load_analysis_input(
                 phoenix.ingest(_select_trace(phoenix, trace_id, what="Phoenix export"))
             )
         validate_normalized(nt)
-        return _AnalysisInput(nt, kind)
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot load analysis input {source}: {_load_reason(exc)}") from exc
+    if kind == "artifact" and trace_id is not None and trace_id != nt.trace.trace_id:
+        raise typer.BadParameter(
+            f"{source} holds trace {nt.trace.trace_id!r}, not {trace_id!r}", param_hint=option
+        )
+    return _AnalysisInput(nt, kind)
 
 
 def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECONDS) -> str:
@@ -1106,9 +1116,9 @@ def ingest_phoenix(
 @app.command(name="analyze")
 def analyze_command(
     source: str = typer.Argument(..., help="Tracegraph artifact, OTLP span export (JSON or Collector JSONL), Phoenix CLI export, or '-' for stdin."),
-    trace: str = typer.Option(None, "--trace", "-t", help="Trace id for a multi-trace OTLP or Phoenix input."),
+    trace: str = typer.Option(None, "--trace", "-t", help="Trace id for a multi-trace OTLP or Phoenix input; on an artifact it must be the artifact's own."),
     baseline: str = typer.Option(None, "--baseline", help="Explicit artifact, OTLP export, or Phoenix export baseline."),
-    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace OTLP or Phoenix baseline."),
+    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace OTLP or Phoenix baseline; on an artifact it must be the artifact's own."),
     json_out: Path = typer.Option(None, "--json-out", help="Write deterministic body-free JSON report."),
     limit: int = typer.Option(3, "--limit", "-l", help="Failure candidates to investigate rendered in the terminal."),
 ) -> None:
@@ -1118,7 +1128,9 @@ def analyze_command(
     _distinct_paths([Path(p) for p in (source, baseline) if p and p != "-"], [json_out] if json_out else [])
     loaded = _load_analysis_input(source, trace)
     nt = loaded.trace
-    baseline_nt = _load_analysis_source(baseline, baseline_trace) if baseline else None
+    baseline_nt = (
+        _load_analysis_source(baseline, baseline_trace, option="--baseline-trace") if baseline else None
+    )
     report = build_analysis(nt, baseline=baseline_nt)
     _render_analysis(report, limit=limit)
     if json_out:
@@ -1133,15 +1145,7 @@ _CHECK_STYLE = {"PASS": "green", "FAIL": "bold red", "INSUFFICIENT_EVIDENCE": "y
 
 def _check_input(source: str, trace_id: str | None, option: str) -> NormalizedTrace:
     # NaN/Infinity are not JSON; a gate must not pass a file a strict parser would reject.
-    loaded = _load_analysis_input(source, trace_id, strict_json=True)
-    # The shared loader ignores a selector for an artifact, which holds exactly one trace; a
-    # check must not judge a trace other than the one the caller named.
-    if loaded.source == "artifact" and trace_id is not None and trace_id != loaded.trace.trace.trace_id:
-        raise typer.BadParameter(
-            f"{source} holds trace {loaded.trace.trace.trace_id!r}, not {trace_id!r}",
-            param_hint=option,
-        )
-    return loaded.trace
+    return _load_analysis_input(source, trace_id, strict_json=True, option=option).trace
 
 
 def _render_check(report: regression_check.CheckReport, *, limit: int) -> None:
@@ -1167,8 +1171,8 @@ def check_command(
     current: str = typer.Argument(..., help="Current run: artifact, OTLP export, Phoenix export, or '-' for stdin."),
     baseline: str = typer.Option(None, "--baseline", help="Baseline run to compare against (required; never chosen for you)."),
     rules: list[str] = typer.Option(None, "--rule", help=f"Rule to evaluate, repeatable (required): {regression_check.RULE_HELP}."),
-    trace: str = typer.Option(None, "--trace", "-t", help="Trace id in a multi-trace current input."),
-    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace baseline input."),
+    trace: str = typer.Option(None, "--trace", "-t", help="Trace id in a multi-trace current input; on an artifact it must be the artifact's own."),
+    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace baseline input; on an artifact it must be the artifact's own."),
     json_out: Path = typer.Option(None, "--json-out", help="Write the versioned check report (tracegraph.check v1)."),
     limit: int = typer.Option(5, "--limit", "-l", help="Evidence items rendered per rule."),
 ) -> None:

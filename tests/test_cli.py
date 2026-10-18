@@ -2178,6 +2178,42 @@ def test_analyze_otlp_baseline_selection_and_limit(tmp_path, monkeypatch):
     assert result.exit_code == 2 and "byte limit" in _flat(result.output), result.output
 
 
+def _panel_message(output):
+    """The text inside the error panel, one line per panel row, borders stripped."""
+    return " ".join(line.strip("│ ") for line in output.splitlines() if line.startswith("│"))
+
+
+@pytest.mark.parametrize("option", ["--trace", "--baseline-trace"])
+def test_analyze_rejects_a_selector_naming_another_trace_on_an_artifact(tmp_path, monkeypatch, option):
+    monkeypatch.chdir(tmp_path)
+    _write_linear_trace(tmp_path / "art.json", "art-1", ("agent", StepKind.AGENT, StepStatus.ERROR))
+    Path("report.json").write_text("previous report\n")
+    args = ["analyze", "art.json", "--baseline", "art.json", option, "other", "--json-out", "report.json"]
+    result = runner.invoke(app, args)
+    assert result.exit_code == 2, result.output
+    assert _panel_message(result.output) == f"Invalid value for {option}: art.json holds trace 'art-1', not 'other'"
+    assert Path("report.json").read_text() == "previous report\n"
+
+
+def test_analyze_rejects_a_mismatched_selector_on_an_artifact_from_stdin(tmp_path):
+    text = _analysis_artifact_text(tmp_path / "art.json")
+    result = runner.invoke(app, ["analyze", "-", "--trace", "other"], input=text)
+    assert result.exit_code == 2, result.output
+    assert _panel_message(result.output) == "Invalid value for --trace: - holds trace 'art-1', not 'other'"
+
+
+def test_analyze_accepts_a_selector_naming_the_artifacts_own_trace(tmp_path):
+    art = tmp_path / "art.json"
+    _write_linear_trace(art, "art-1", ("agent", StepKind.AGENT, StepStatus.ERROR))
+    plain, selected = tmp_path / "plain.json", tmp_path / "selected.json"
+    result = runner.invoke(app, ["analyze", str(art), "--baseline", str(art), "--json-out", str(plain)])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, ["analyze", str(art), "--trace", "art-1", "--baseline", str(art),
+                                 "--baseline-trace", "art-1", "--json-out", str(selected)])
+    assert result.exit_code == 0, result.output
+    assert selected.read_bytes() == plain.read_bytes()
+
+
 @pytest.mark.parametrize("via_stdin", [False, True])
 def test_analyze_direct_otlp_next_steps_name_ingest_otlp(tmp_path, via_stdin):
     text = json.dumps(_otlp_export("otlp-1"))
