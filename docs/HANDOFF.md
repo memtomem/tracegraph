@@ -4,10 +4,12 @@
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `361ad03`(PR #86 병합)이고,
   이 문서는 그 위에 문서만 더한다. 시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
-  PyPI 최신은 여전히 0.4.0이고, 아래 표의 제품 변경 PR #78·#80·#81·#83·#84·#86도 모두 `CHANGELOG.md`의 Unreleased에 있다. 다음
-  릴리스는 0.5.0이다(릴리스는 아직 소유자 지시 대기).
+  PyPI 최신은 여전히 0.4.0이고, 아래 표의 제품 변경 PR #78·#80·#81·#83·#84·#86은 0.4.0 이후의 다른 변경과 함께
+  `CHANGELOG.md`의 `0.5.0 - 2026-10-18`에 있다. 0.4.0은 artifact v1~v5만 읽으므로 v7을 쓰는 이번 릴리스는
+  minor인 0.5.0이다. 준비 커밋은 브랜치 `release/0.5.0`에 있고, 남은 순서는 병합 → `test-v0.5.0` 예행 →
+  `v0.5.0`이다.
 - **0.5.0 노트에서 놓치기 쉬운 동작 변경**(아래 `b18fd1a` 기준 절의 것에 더해). 전체 목록은
-  `CHANGELOG.md` Unreleased의 해당 항목이다:
+  `CHANGELOG.md` `0.5.0 - 2026-10-18`의 해당 항목이다:
   - library writer `artifact.save()`/`save_atomic()`가 reader가 거부할 trace를 쓰지 않고 `ValueError`
     (pydantic `ValidationError` 포함)를 낸다(PR #83). 잘못된 타입의 `seq`는 이전엔 raw `TypeError`였고,
     provenance 위반도 writer에서는 `check_provenance` 문구 대신 `ValidationError`로 나온다.
@@ -84,7 +86,8 @@
 3. **기능 제안:** #60(명시한 trace 묶음의 반복 인과 패턴 요약). 이슈가 #54의 bounded query와 함께
    설계하라고 하므로 #79 결정 뒤가 맞다.
 4. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
-5. **0.5.0 릴리스:** [릴리스 런북](releasing.md)대로. 위와 `b18fd1a` 기준 절의 동작 변경을 노트에 넣을 것.
+5. **0.5.0 릴리스:** [릴리스 런북](releasing.md) 3~5단계(병합 → `test-v0.5.0` 예행과 게시 파일 검증 →
+   `v0.5.0`). GitHub Release 노트에는 위와 `b18fd1a` 기준 절의 동작 변경을 넣을 것.
 
 ---
 
