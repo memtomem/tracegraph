@@ -846,7 +846,8 @@ def test_a_missing_file_is_refused(tmp_path):
 
 _KILLED_CHILD = textwrap.dedent(
     """
-    import operator, os, sys, time
+    import operator, os, sqlite3, sys, time
+    from contextlib import closing
     from typing import Annotated, TypedDict
     from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.graph import END, START, StateGraph
@@ -856,9 +857,35 @@ _KILLED_CHILD = textwrap.dedent(
         log: Annotated[list, operator.add]
 
 
+    # x's result, persisted under the super-step checkpoint (the input step's writes sit under
+    # the first checkpoint, which has no parent).
+    _X_WROTE = (
+        "SELECT 1 FROM writes w JOIN checkpoints c ON c.thread_id = w.thread_id"
+        " AND c.checkpoint_ns = w.checkpoint_ns AND c.checkpoint_id = w.checkpoint_id"
+        " WHERE w.channel = 'log' AND c.parent_checkpoint_id IS NOT NULL LIMIT 1"
+    )
+
+
+    def wait_for_x_write(db, timeout):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+                    if conn.execute(_X_WROTE).fetchone():
+                        return True
+            except sqlite3.OperationalError:
+                pass  # the saver has not created its tables yet
+            time.sleep(0.01)
+        return False
+
+
     def y(state):
         if os.environ.get("TRACEGRAPH_TEST_KILL"):
-            time.sleep(0.3)
+            # Die only once x's write is durable; a fixed sleep raced the checkpointer.
+            timeout = float(os.environ.get("TRACEGRAPH_TEST_KILL_TIMEOUT", "30"))
+            if not wait_for_x_write(sys.argv[1], timeout):
+                print(f"x's write did not appear within {timeout}s", file=sys.stderr, flush=True)
+                os._exit(3)
             os._exit(9)
         return {"log": ["y"]}
 
@@ -897,6 +924,29 @@ def killed_run(tmp_path):
     )
     assert proc.returncode == 9, proc.stderr
     return module, db
+
+
+def test_killed_run_fails_loudly_when_x_write_never_appears(tmp_path):
+    module = tmp_path / "killed_graph.py"
+    module.write_text(_KILLED_CHILD, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(module), str(tmp_path / "killed.sqlite")],
+        env={**os.environ, "TRACEGRAPH_TEST_KILL": "1", "TRACEGRAPH_TEST_KILL_TIMEOUT": "0"},
+        capture_output=True, text=True,
+    )
+    assert proc.returncode == 3
+    assert "x's write did not appear within 0.0s" in proc.stderr
+
+
+def test_killed_run_waits_for_x_write_in_the_database(killed_run, tmp_path):
+    import importlib.util
+
+    module, db = killed_run
+    spec = importlib.util.spec_from_file_location("killed_graph_probe", module)
+    child = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(child)
+    assert child.wait_for_x_write(db, timeout=1) is True
+    assert child.wait_for_x_write(tmp_path / "absent.sqlite", timeout=0.2) is False
 
 
 def _inspect(monkeypatch, path):
