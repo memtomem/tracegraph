@@ -1,6 +1,7 @@
 """CLI smoke test: ingest a real SqliteSaver DB, then inspect / explain / diff."""
 
 import builtins
+import errno
 import json
 import os
 import re
@@ -428,6 +429,7 @@ def test_phoenix_diagnose_rejects_trace_list_without_aggregate_status(monkeypatc
     [
         (subprocess.TimeoutExpired(["px"], 60), "timed out"),
         (subprocess.CalledProcessError(1, ["px"], stderr="password=secret"), "failed with exit 1"),
+        (PermissionError(errno.EACCES, "password=secret"), "check that `px` on PATH is an executable file"),
     ],
 )
 def test_phoenix_diagnose_sanitizes_px_process_failures(monkeypatch, failure, expected):
@@ -442,8 +444,8 @@ def test_phoenix_diagnose_sanitizes_px_process_failures(monkeypatch, failure, ex
 
     monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
-    assert result.exit_code != 0
-    assert expected in result.output
+    assert result.exit_code == 2
+    assert expected in _flat(result.output)
     assert "password=secret" not in result.output
 
 
@@ -546,6 +548,52 @@ def test_phoenix_diagnose_crosses_real_subprocess_boundary(tmp_path, monkeypatch
     assert commands[0] == ["--version"]
     assert commands[1][:2] == ["trace", "list"]
     assert "--include-annotations" in commands[1]
+
+
+def _broken_px(bin_dir, kind):
+    if kind == "directory":
+        (bin_dir / "px").mkdir()
+        return
+    px = bin_dir / "px"
+    if kind == "not executable":
+        px.write_text("#!/bin/sh\necho 1.8.1\n")
+        px.chmod(0o644)
+    else:  # an executable whose header no loader accepts
+        px.write_bytes(b"\x7fELF\x00\x00 not a real executable")
+        px.chmod(0o755)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX exec semantics")
+@pytest.mark.parametrize("kind", ["not executable", "directory", "bad format"])
+def test_phoenix_commands_report_a_px_that_cannot_be_run(tmp_path, monkeypatch, kind):
+    if kind == "not executable" and os.geteuid() == 0:
+        pytest.skip("root may execute a file without the exec bit")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _broken_px(bin_dir, kind)
+    # The fixture alone: on EACCES or ENOEXEC the PATH search moves on to any later px.
+    monkeypatch.setenv("PATH", str(bin_dir))
+    doctor = runner.invoke(app, ["phoenix", "doctor"])
+    assert doctor.exit_code == 1, doctor.output
+    stderr = _flat(doctor.stderr)
+    assert stderr.startswith("FAIL Phoenix CLI `px` failed with an OS error (") and "Traceback" not in doctor.output
+    assert stderr.endswith("); check that `px` on PATH is an executable file")
+    for args in (["phoenix", "diagnose"], ["phoenix", "diagnose", "trace"]):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 2, result.output
+        assert "check that `px` on PATH is an executable file" in _flat(result.output)
+
+
+def test_px_os_errors_echo_only_the_operating_system_text(monkeypatch):
+    def fake_run(command, **kwargs):
+        raise OSError(errno.EMFILE, "password=secret")
+
+    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    result = runner.invoke(app, ["phoenix", "doctor"])
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.output
+    expected = f"FAIL Phoenix CLI `px` failed with an OS error ({os.strerror(errno.EMFILE)})"
+    assert _flat(result.stderr) == expected
+    assert "password=secret" not in result.output
 
 
 def test_analyze_renders_baseline_telemetry_deltas(tmp_path):

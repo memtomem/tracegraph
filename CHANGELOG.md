@@ -120,6 +120,13 @@ explicitly.
   `--out` or to the default path. A matching selector re-saves the artifact byte for byte, as
   before. An artifact from any other source keeps its existing error, `--file must contain a
   Phoenix CLI trace export`.
+- **`phoenix doctor` and `phoenix diagnose` no longer crash when `px` cannot be run** (#56). A
+  `px` on PATH without the exec bit, a directory named `px`, or a file the OS cannot execute
+  raised `PermissionError` or `OSError` with a traceback. They now report that `px` failed with
+  an OS error, naming the operating system's text for the error number and never the exception
+  message: `doctor` prints `FAIL` and exits 1, `diagnose` exits 2, as for their other `px`
+  failures. When the OS refused to launch `px`, the message adds a hint to check that `px` on
+  PATH is an executable file.
 
 ## 0.4.0 - 2026-10-14
 
