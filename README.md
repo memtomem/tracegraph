@@ -401,6 +401,8 @@ change (`ok` to `unset`, or the reverse).
 
 LangGraph ingestion reads both the configured error state channel and native task failures
 from checkpoint pending writes. A checkpoint is an error where the channel first holds an error.
+An error the parent graph already held is not recorded again where a subgraph receives it, nor
+where the parent graph continues after a subgraph that did not carry it.
 A node that writes the channel again while it still holds one may have failed again, or only
 have returned the whole state (and a reducer can change the value either way); the checkpoint
 cannot tell which, so such a write is not recorded as a failure but disclosed as the capture
