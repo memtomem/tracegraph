@@ -383,12 +383,15 @@ addressed to a node the graph lacks, are left out of LangGraph's own answer; ing
 both instead.
 `--graph` runs code: it imports the module (top-level code runs), and reading the checkpoint
 runs the graph's state callbacks — schema mappers and validators, reducers, custom channels,
-managed values, cache-key functions — though no node runs. It is never inferred. An artifact
-read with `--graph` declares artifact `schema_version` 6. An artifact carrying interrupt
-steps declares artifact `schema_version` 5; one
-whose derived tree relies on EdgeOrigin precedence declares 4; otherwise, an artifact carrying
-derived task steps declares `schema_version` 3, and artifacts without them still serialize as
-version 2, byte for byte.
+managed values, cache-key functions — though no node runs. It is never inferred.
+Every ingest records what the adapter could not observe: `trace.capture` is an object whose
+`gaps` list holds a fixed code and count per ingest disclosure (empty when there was none),
+and a step's `unknown_fields` names a kind, name or error message the adapter substituted. That
+record makes a fresh artifact declare `schema_version` 7. The envelope otherwise follows
+content, which is what an artifact written by an earlier release keeps when it is loaded and
+saved again: a graph read (`--graph`) needs 6, interrupt steps 5, a derived tree that relies on
+EdgeOrigin precedence 4, derived task steps 3, and anything else 2, byte for byte (a v1 file is
+migrated to 2 as before).
 Missing observed errors still do not
 prove success: an artifact ingested by an older build, or one using an unrecognized checkpoint
 layout, carries no derived step and looks exactly like a clean run, which is why the capture

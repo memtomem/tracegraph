@@ -26,7 +26,15 @@ from enum import Enum
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 class StepKind(str, Enum):
@@ -162,6 +170,22 @@ class EdgeType(str, Enum):
     READ = "READ"               # step -> channel (optional, flagged)
 
 
+#: A step field whose stored value an adapter defaulted or substituted rather than read from
+#: the producer: ``kind`` and ``name`` (a span without a recognized kind or a usable name; every
+#: LangGraph checkpoint step except the input checkpoint and the loop step applying it, whose
+#: names are inferred from routing; an unattributed LangGraph task) and ``error_msg`` (a
+#: fallback, placeholder or withheld message on an ERROR step). ``None`` alone is not this
+#: signal: an unnamed LangGraph input checkpoint is a known, nameless step.
+UnknownField = Literal["error_msg", "kind", "name"]
+_UNKNOWN_FIELDS: TypeAdapter[list[UnknownField]] = TypeAdapter(list[UnknownField])
+
+
+def _canonical_unknown_fields(value: list[UnknownField]) -> list[UnknownField]:
+    if value != sorted(set(value)):
+        raise ValueError("unknown_fields must be sorted and free of duplicates")
+    return value
+
+
 class Step(BaseModel):
     """A causal-event node: one LangGraph super-step/checkpoint or one OTLP span."""
 
@@ -178,6 +202,14 @@ class Step(BaseModel):
     #: Set during normalization: True iff this step had >1 raw CAUSED_BY edge and
     #: the derived TREE_PARENT projection therefore dropped at least one real cause.
     projection_lossy: bool = False
+    #: Fields whose value is a substitute, sorted. Only an adapter that also records a trace
+    #: ``capture`` sets it, so an artifact without one never claims its values are complete.
+    unknown_fields: list[UnknownField] = Field(default_factory=list)
+
+    @field_validator("unknown_fields")
+    @classmethod
+    def _canonical(cls, value: list[UnknownField]) -> list[UnknownField]:
+        return _canonical_unknown_fields(value)
 
 
 class Edge(BaseModel):
@@ -201,6 +233,66 @@ class ScheduleGraph(BaseModel):
     fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+#: Every disclosure an adapter can make about what it could not read, as a fixed code. The
+#: stderr warning carries the detail; the code is what survives into the artifact, so it holds
+#: no checkpoint id, task id or producer value.
+CAPTURE_GAP_CODES = frozenset(
+    {
+        "langgraph.malformed_pending_writes",
+        "langgraph.unapplied_command_goto",
+        "langgraph.unattributed_failed_task",
+        "langgraph.unattributed_interrupted_task",
+        "langgraph.undecided_interrupt",
+        "langgraph.undecodable_send_packets",
+        "langgraph.unknown_send_target",
+        "otlp.graph_parent_by_timing",
+        "otlp.graph_parent_fallback",
+        "otlp.unreadable_component_cost",
+        "otlp.unreadable_cost_currency",
+        "otlp.unreadable_timestamp",
+        "otlp.unreadable_token_count",
+        "otlp.unreadable_total_cost",
+        "phoenix.unreadable_evaluation_score",
+    }
+)
+
+
+class CaptureGap(BaseModel):
+    #: Any well-formed code is read and kept, so a newer writer can add one without breaking a
+    #: v7 reader, which must treat a code it does not know as a gap of unknown effect. Writers
+    #: are held to ``CAPTURE_GAP_CODES`` by :meth:`Capture.from_counts`.
+    code: str = Field(pattern=r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$", max_length=128)
+    count: int = Field(ge=1)
+
+
+class Capture(BaseModel):
+    """What the adapter that read this trace could not observe.
+
+    Present on every trace ingested by a build that records it, with an empty ``gaps`` list
+    when the read raised no trace-level disclosure; values substituted on a single step are
+    recorded separately, in ``Step.unknown_fields``. Its absence means "not recorded".
+    """
+
+    #: Required, with no default: a record that omits it is malformed, not an empty one.
+    gaps: list[CaptureGap]
+
+    @field_validator("gaps")
+    @classmethod
+    def _canonical_gaps(cls, value: list[CaptureGap]) -> list[CaptureGap]:
+        codes = [gap.code for gap in value]
+        if codes != sorted(set(codes)):
+            raise ValueError("capture gaps must be sorted by code with one entry per code")
+        return value
+
+    @classmethod
+    def from_counts(cls, counts: dict[str, int]) -> "Capture":
+        """The record an adapter writes; only codes this build defines may be emitted."""
+        unknown = sorted(set(counts) - CAPTURE_GAP_CODES)
+        if unknown:
+            raise ValueError(f"unknown capture gap code(s) {unknown!r}")
+        return cls(gaps=[CaptureGap(code=code, count=counts[code]) for code in sorted(counts)])
+
+
 class Trace(BaseModel):
     """One agent run / thread."""
 
@@ -216,15 +308,34 @@ class Trace(BaseModel):
     links_preserved: bool | None = None
     decision_evidence: list[DecisionEvidence] = Field(default_factory=list)
     schedule_graph: ScheduleGraph | None = None
+    capture: Capture | None = None
 
     @model_serializer(mode="wrap")
-    def _omit_absent_schedule_graph(self, handler: SerializerFunctionWrapHandler) -> dict:
-        # Absent, the key is left out rather than written as null, so every trace ingested
-        # without a graph serializes to the same bytes as before the field existed.
+    def _omit_absent_optional_headers(self, handler: SerializerFunctionWrapHandler) -> dict:
+        # Absent, a key is left out rather than written as null, so a trace that does not use
+        # it serializes to the same bytes as before the field existed.
         data = handler(self)
-        if self.schedule_graph is None:
-            data.pop("schedule_graph", None)
+        for key in ("schedule_graph", "capture"):
+            if getattr(self, key) is None:
+                data.pop(key, None)
         return data
+
+
+def check_provenance(trace: Trace, steps: list[Step]) -> None:
+    """Raise ``ValueError`` unless the provenance is what the artifact reader accepts.
+
+    Construction validates it, but a model changed afterwards (a list extended in place, a
+    header reassigned) is not revalidated, so writers and ``validate_normalized`` call this too.
+    """
+    if trace.capture is not None:
+        Capture.model_validate(trace.capture.model_dump())
+    flagged = [step for step in steps if step.unknown_fields]
+    for step in flagged:
+        _canonical_unknown_fields(_UNKNOWN_FIELDS.validate_python(step.unknown_fields))
+    # Substitution flags without a capture record would be provenance an older envelope could
+    # carry and an older reader would silently drop; the pair is written together or not at all.
+    if trace.capture is None and flagged:
+        raise ValueError("steps carry unknown_fields but the trace has no capture record")
 
 
 class RawTrace(BaseModel):
@@ -243,8 +354,14 @@ class RawTrace(BaseModel):
     causal_edges: list[Edge] = Field(default_factory=list)
     #: Disclosures that are only knowable while reading the source (e.g. a checkpoint whose
     #: task writes could not be attributed to a node). They describe the *ingestion*, not the
-    #: run, so they never reach ``NormalizedTrace`` or the artifact — the CLI prints them.
+    #: run, so the text never reaches ``NormalizedTrace`` or the artifact — the CLI prints it.
+    #: Each one's fixed code and count is kept in ``trace.capture``.
     ingest_warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _provenance(self) -> "RawTrace":
+        check_provenance(self.trace, self.steps)
+        return self
 
     def steps_by_id(self) -> dict[str, Step]:
         return {s.step_id: s for s in self.steps}
@@ -262,6 +379,11 @@ class NormalizedTrace(BaseModel):
     trace: Trace
     steps: list[Step] = Field(default_factory=list)
     edges: list[Edge] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _provenance(self) -> "NormalizedTrace":
+        check_provenance(self.trace, self.steps)
+        return self
 
     # --- convenience views (no business logic; just typed filters) ---
 

@@ -16,17 +16,18 @@ from pathlib import Path
 
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.input_validation import loads as json_loads
-from tracegraph.model import NormalizedTrace, StepSource
+from tracegraph.model import NormalizedTrace, StepSource, check_provenance
 
 #: Bump when the on-disk shape changes incompatibly.
-ARTIFACT_SCHEMA_VERSION = 6
+ARTIFACT_SCHEMA_VERSION = 7
 
 #: Versions this build can read. 1 needs a migration (see ``_migrate_v1``); 2 -> 3 is the
 #: identity, because 3 adds only a new ``Step.source`` value and changes nothing existing.
 #: 4 signals that TREE_PARENT was derived under EdgeOrigin precedence rather than
 #: legacy temporal-only selection. 5 adds only the ``interrupt`` ``Step.source`` value. 6 adds
-#: the ``scheduled`` ``Step.source`` value and the optional ``schedule_graph`` trace header.
-_READABLE_VERSIONS = (1, 2, 3, 4, 5, ARTIFACT_SCHEMA_VERSION)
+#: the ``scheduled`` ``Step.source`` value and the optional ``schedule_graph`` trace header. 7 adds
+#: the optional ``capture`` trace header and ``Step.unknown_fields``.
+_READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, ARTIFACT_SCHEMA_VERSION)
 
 
 def _required_version(nt: NormalizedTrace) -> int:
@@ -39,6 +40,9 @@ def _required_version(nt: NormalizedTrace) -> int:
     bump would invalidate digests already exported in review-candidate reports for artifacts
     whose content did not change at all.
 
+    * An artifact that records capture provenance — a ``capture`` header, or a step with
+      ``unknown_fields`` — is stamped 7. Only adapters write it, so loading and re-saving an
+      older artifact never adds it and its bytes stay as they were.
     * An artifact read against a supplied graph — it has a ``schedule_graph`` header, whether
       or not that graph scheduled anything, or a scheduled step — is stamped 6, for the same
       reason as 5 below.
@@ -54,6 +58,8 @@ def _required_version(nt: NormalizedTrace) -> int:
     """
     from tracegraph.normalize import requires_origin_priority_projection
 
+    if nt.trace.capture is not None or any(step.unknown_fields for step in nt.steps):
+        return 7
     scheduled = StepSource.SCHEDULED
     if nt.trace.schedule_graph is not None or any(step.source is scheduled for step in nt.steps):
         return 6
@@ -73,7 +79,18 @@ def dumps(nt: NormalizedTrace) -> str:
     which strict JSON parsers reject. The model refuses non-finite floats on validation, so
     only a model built around validation (``model_construct``, attribute assignment) gets here.
     """
-    payload = {"schema_version": _required_version(nt), "trace": nt.model_dump(mode="json")}
+    # The model refuses this pairing on validation; a trace changed afterwards must not become
+    # a file this module's own reader rejects.
+    check_provenance(nt.trace, nt.steps)
+    trace = nt.model_dump(mode="json")
+    # An empty ``unknown_fields`` is left out so a step with nothing substituted keeps the
+    # bytes it had before the field existed. Done here rather than in a Step serializer: under
+    # pydantic 2.13 a wrap ``model_serializer`` turns a nested NaN into null in JSON mode, which
+    # would silently write the value this function exists to refuse.
+    for step in trace["steps"]:
+        if not step["unknown_fields"]:
+            del step["unknown_fields"]
+    payload = {"schema_version": _required_version(nt), "trace": trace}
     return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
 
 

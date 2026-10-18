@@ -123,6 +123,11 @@ print(json.dumps({
                 encoding="utf-8")
             cli("ingest-otlp", "--file", f"{name}.otlp.json", "--out", f"{name}.json")
         cli("validate", "baseline.json", "failure.json")
+        # A fresh ingest records what capture could not observe (artifact v7): nothing here.
+        ingested = json.loads((work / "failure.json").read_text(encoding="utf-8"))
+        require(ingested["schema_version"] == 7, "a fresh ingest is not artifact v7")
+        require(ingested["trace"]["trace"].get("capture") == {"gaps": []},
+                "a fresh ingest lost its capture record")
         cli("diff", "failure.json", "failure.json")
         cli("diff", "baseline.json", "failure.json", expected=1, expected_line="NOT IDENTICAL")
         cli("analyze", "failure.json", "--baseline", "baseline.json", "--json-out", "analysis.json")
@@ -171,16 +176,22 @@ with LadybugStore.from_trace(nt) as store:
         (work / "checkpoints.sqlite").write_bytes(checkpoints.read_bytes())
         cli("ingest", "--sqlite", "checkpoints.sqlite", "--thread", "t", "--out", "native.json")
         native = json.loads((work / "native.json").read_text(encoding="utf-8"))
-        require(native["schema_version"] == 3,
-                "an artifact carrying derived task steps must declare the version that reads it")
+        require(native["schema_version"] == 7 and "capture" in native["trace"]["trace"],
+                "a fresh ingest records capture provenance and must declare the version that reads it")
         derived = [s for s in native["trace"]["steps"] if s["source"] == "task"]
         require([s["name"] for s in derived] == ["call_tool"],
                 "native failure lost its node attribution outside the checkout")
         require(derived[0]["status"] == "error" and native["trace"]["trace"]["status"] == "error",
                 "native failure did not reach the trace status")
-        # The same build still writes v2 for content that needs no new reader.
-        require(json.loads((work / "failure.json").read_text(encoding="utf-8"))["schema_version"] == 2,
-                "envelope version must follow content, not the build")
+        # The envelope follows content, not the build: an artifact written before capture
+        # provenance existed re-serializes without it, at its own version.
+        run([sys.executable, "-I", "-c", """
+import json
+from tracegraph import artifact
+text = artifact.dumps(artifact.load('source.json'))
+if json.loads(text)['schema_version'] != 2 or 'capture' in text:
+    raise RuntimeError('re-serializing an older artifact changed its version or added provenance')
+"""])
 
         require((work / "source.json").read_bytes() == source, "source fixture was modified")
         return {"result": "PASS", "extra": extra, "module": str(module),

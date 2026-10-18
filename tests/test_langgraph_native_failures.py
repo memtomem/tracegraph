@@ -406,6 +406,7 @@ def test_error_is_recorded_even_on_an_abandoned_branch(saver):
 
 from hashlib import sha1  # noqa: E402
 
+from test_capture_provenance import gap_counts  # noqa: E402
 from test_langgraph_adapter import _StubSaver, _ck  # noqa: E402
 
 CID = "1f1ae6ea-e7d8-6c28-8001-03afbf35e17c"
@@ -455,6 +456,9 @@ def test_unresolvable_task_stays_unnamed():
     # ... and the read says so: an unnamed failure is also what a drift between LangGraph's
     # task-id algorithm and the copy here would look like.
     assert any("could not be attributed" in w for w in raw.ingest_warnings)
+    assert gap_counts(raw) == {"langgraph.unattributed_failed_task": 1}
+    # Its kind is inferred from a name it does not have, so both are recorded as unknown.
+    assert errors[0].unknown_fields == ["kind", "name"]
 
 
 def test_error_source_node_write_names_the_task():
@@ -553,6 +557,8 @@ def test_unserialized_exception_is_labelled_not_blank():
     errors = _errors(LangGraphCheckpointAdapter(_StubSaver(tuples)).ingest("A").steps)
     assert len(errors) == 1
     assert "not serialized" in (errors[0].error_msg or "")
+    # The placeholder is a label, not the run's exception text.
+    assert "error_msg" in errors[0].unknown_fields
 
 
 def test_undecodable_send_packets_are_disclosed():
@@ -570,6 +576,7 @@ def test_undecodable_send_packets_are_disclosed():
     raw = LangGraphCheckpointAdapter(_StubSaver(tuples)).ingest("A")
     assert [e.name for e in _errors(raw.steps)] == [None]
     assert any("Send packet" in w and "2" in w for w in raw.ingest_warnings)
+    assert gap_counts(raw)["langgraph.undecodable_send_packets"] == 2
 
 
 # --- reading a checkpoint database must not execute what it contains ---

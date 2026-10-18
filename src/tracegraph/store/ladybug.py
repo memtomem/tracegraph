@@ -61,6 +61,7 @@ _STEP_FIELDS: tuple[str, ...] = (
     "error_msg",
     "evidence_json",
     "projection_lossy",
+    "unknown_fields_json",
 )
 
 _TRACE_FIELDS: tuple[str, ...] = (
@@ -73,6 +74,7 @@ _TRACE_FIELDS: tuple[str, ...] = (
     "links_preserved",
     "decision_evidence_json",
     "schedule_graph_json",
+    "capture_json",
 )
 
 _SCHEMA_DDL: tuple[str, ...] = (
@@ -82,11 +84,11 @@ _SCHEMA_DDL: tuple[str, ...] = (
     "step_id STRING, trace_id STRING, seq INT64, ts STRING, "
     "kind STRING, source STRING, name STRING, status STRING, "
     "error_msg STRING, evidence_json STRING, projection_lossy BOOLEAN, "
-    "PRIMARY KEY (step_id))",
+    "unknown_fields_json STRING, PRIMARY KEY (step_id))",
     "CREATE NODE TABLE Trace ("
     "trace_id STRING, source_kind STRING, run_id STRING, thread_id STRING, status STRING, "
     "causal_fidelity STRING, links_preserved BOOLEAN, decision_evidence_json STRING, "
-    "schedule_graph_json STRING, PRIMARY KEY (trace_id))",
+    "schedule_graph_json STRING, capture_json STRING, PRIMARY KEY (trace_id))",
     "CREATE REL TABLE CAUSED_BY (FROM Step TO Step, origin STRING)",
     "CREATE REL TABLE TREE_PARENT (FROM Step TO Step)",
     "CREATE REL TABLE BELONGS_TO (FROM Step TO Trace)",
@@ -461,6 +463,7 @@ def _step_params(s: Step) -> dict[str, Any]:
             else None
         ),
         "projection_lossy": s.projection_lossy,
+        "unknown_fields_json": json.dumps(s.unknown_fields) if s.unknown_fields else None,
     }
 
 
@@ -480,6 +483,9 @@ def _trace_params(t: Trace) -> dict[str, Any]:
             None
             if t.schedule_graph is None
             else json.dumps(t.schedule_graph.model_dump(mode="json"), sort_keys=True)
+        ),
+        "capture_json": (
+            None if t.capture is None else json.dumps(t.capture.model_dump(mode="json"), sort_keys=True)
         ),
     }
 
@@ -503,6 +509,9 @@ def _step_from_row(row: list[Any]) -> Step:
             else None
         ),
         projection_lossy=by_name["projection_lossy"],
+        unknown_fields=(
+            json.loads(by_name["unknown_fields_json"]) if by_name["unknown_fields_json"] else []
+        ),
     )
 
 

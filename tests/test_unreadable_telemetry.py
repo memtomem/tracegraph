@@ -11,6 +11,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from test_capture_provenance import gap_counts
 from typer.testing import CliRunner
 
 from tracegraph import artifact
@@ -73,6 +74,7 @@ def test_unreadable_total_cost_withholds_the_total(value):
     assert any("not a finite non-negative decimal" in w for w in report.warnings), report.warnings
     assert any("cost" in w for w in raw.ingest_warnings), raw.ingest_warnings
     assert "abc" not in json.dumps(raw.ingest_warnings)
+    assert gap_counts(raw) == {"otlp.unreadable_total_cost": 1}
 
 
 @pytest.mark.parametrize(
@@ -84,6 +86,7 @@ def test_unreadable_token_count_is_unavailable_and_disclosed(value):
     raw, report = _read({"llm.token_count.prompt": value})
     assert raw.steps[1].evidence is None or raw.steps[1].evidence.prompt_tokens is None
     assert any("token count" in w for w in raw.ingest_warnings), raw.ingest_warnings
+    assert gap_counts(raw) == {"otlp.unreadable_token_count": 1}
     # Token totals are already disclosed as possibly partial; the readable count still counts.
     assert report.metrics.prompt_tokens == 10
 
@@ -92,7 +95,9 @@ def test_disclosure_names_the_attribute_and_counts_spans():
     doc = _doc({"llm.token_count.completion": {"stringValue": "x"},
                 "llm.token_count.total": {"boolValue": True}},
                good={**GOOD, "llm.token_count.completion": {"intValue": "-1"}})
-    warnings = OTLPSpanAdapter(doc).ingest("t").ingest_warnings
+    raw = OTLPSpanAdapter(doc).ingest("t")
+    assert gap_counts(raw) == {"otlp.unreadable_token_count": 2}
+    warnings = raw.ingest_warnings
     assert warnings == [
         "2 span(s) carry a token count that cannot be read (llm.token_count.completion, "
         "llm.token_count.total); that count is reported as unavailable."
@@ -120,6 +125,7 @@ def test_unreadable_component_cost_is_disclosed(name):
         raw.steps[1].evidence, name.replace("llm.cost.", "") + "_cost"
     ) is None
     assert any("cost" in w for w in raw.ingest_warnings), raw.ingest_warnings
+    assert gap_counts(raw) == {"otlp.unreadable_component_cost": 1}
     # Component costs are never summed, so the total is unaffected.
     assert report.metrics.total_cost == "0.5"
 
@@ -129,6 +135,7 @@ def test_unreadable_currency_is_disclosed(value):
     raw, _ = _read({"llm.cost.total": {"stringValue": "0.1"}, "llm.cost.currency": value})
     assert raw.steps[1].evidence.cost_currency is None
     assert any("currency" in w for w in raw.ingest_warnings), raw.ingest_warnings
+    assert gap_counts(raw) == {"otlp.unreadable_cost_currency": 1}
 
 
 def test_unwrapping_no_longer_truncates_a_fractional_int_value():
@@ -275,6 +282,7 @@ def test_phoenix_unreadable_score_is_null_and_disclosed(score):
     raw = PhoenixExportAdapter(_phoenix([{"name": "quality", "score": score}])).ingest("t")
     assert [e.score for e in raw.steps[0].evidence.evaluations] == [None]
     assert any("score" in w for w in raw.ingest_warnings), raw.ingest_warnings
+    assert gap_counts(raw)["phoenix.unreadable_evaluation_score"] == 1
 
 
 @pytest.mark.parametrize("score,expected", [(True, 1.0), (False, 0.0), ("0.25", 0.25)])
@@ -288,6 +296,7 @@ def test_phoenix_counts_evaluations_not_spans():
     raw = PhoenixExportAdapter(_phoenix([{"name": "q1", "score": "abc"},
                                          {"name": "q2", "score": "nan"}])).ingest("t")
     assert any(w.startswith("2 evaluation score(s)") for w in raw.ingest_warnings), raw.ingest_warnings
+    assert gap_counts(raw)["phoenix.unreadable_evaluation_score"] == 2
 
 
 def test_phoenix_readable_or_dropped_evaluations_raise_no_score_warning():
