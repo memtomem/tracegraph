@@ -114,3 +114,69 @@ def test_deep_diff_scaling():
         timings.append(median(samples))
     for before, after in zip(timings, timings[1:], strict=False):
         assert after <= 3.5 * before + 0.05, timings
+
+
+@pytest.mark.parametrize(
+    "name_of",
+    [lambda i: f"agent-{i}", lambda i: None, lambda i: f"agent-{i // 2}"],
+    ids=["distinct-names", "null-names", "adjacent-pairs"],
+)
+def test_repeated_agent_failure_scales_linearly_when_names_rarely_repeat(name_of):
+    # A chain of failing AGENT steps whose names never (or only adjacently) repeat. Before, the
+    # unbounded two-step matcher walked and sorted every endpoint's full ancestor set before
+    # filtering on the name back-reference: zero matches, yet ~1.3s at 2000 steps and 4x per
+    # doubling.
+    from tracegraph.analysis.patterns import PRESETS, find_matches
+
+    timings = []
+    for n in (2000, 4000, 8000):
+        nt = normalize(RawTrace(
+            trace=Trace(trace_id="t", source_kind="x"),
+            steps=[
+                Step(step_id=f"s{i}", trace_id="t", seq=i, name=name_of(i),
+                     kind=StepKind.AGENT, status=StepStatus.ERROR)
+                for i in range(n)
+            ],
+            causal_edges=[
+                Edge(type=EdgeType.CAUSED_BY, src=f"s{i}", dst=f"s{i - 1}") for i in range(1, n)
+            ],
+        ))
+        expected = sum(1 for i in range(1, n) if name_of(i) is not None and name_of(i) == name_of(i - 1))
+        samples = []
+        for _ in range(3):
+            start = time.perf_counter()
+            assert len(find_matches(nt, PRESETS["repeated-agent-failure"])) == expected
+            samples.append(time.perf_counter() - start)
+        timings.append(median(samples))
+    for before, after in zip(timings, timings[1:], strict=False):
+        assert after <= 3 * before + 0.05, timings
+
+
+def test_unbounded_two_step_does_not_rescan_a_high_fan_out_cause_per_endpoint():
+    # One AGENT root causing n CHAIN steps, all of which pair with it. The longest-path pass
+    # used to scan the root's n children once per endpoint: linear output, quadratic work.
+    from tracegraph.analysis.patterns import PathPattern, StepPredicate, find_matches
+
+    pattern = PathPattern(
+        (StepPredicate(kind=StepKind.AGENT), StepPredicate(kind=StepKind.CHAIN, gap=(1, None)))
+    )
+    timings = []
+    for n in (4000, 8000, 16000):
+        steps = [Step(step_id="r", trace_id="t", seq=0, name="root", kind=StepKind.AGENT)]
+        steps += [
+            Step(step_id=f"c{i}", trace_id="t", seq=i, name=f"c{i}", kind=StepKind.CHAIN)
+            for i in range(1, n)
+        ]
+        nt = normalize(RawTrace(
+            trace=Trace(trace_id="t", source_kind="x"),
+            steps=steps,
+            causal_edges=[Edge(type=EdgeType.CAUSED_BY, src=f"c{i}", dst="r") for i in range(1, n)],
+        ))
+        samples = []
+        for _ in range(3):
+            start = time.perf_counter()
+            assert len(find_matches(nt, pattern)) == n - 1
+            samples.append(time.perf_counter() - start)
+        timings.append(median(samples))
+    for before, after in zip(timings, timings[1:], strict=False):
+        assert after <= 3 * before + 0.05, timings
