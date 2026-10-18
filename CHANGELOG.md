@@ -110,6 +110,21 @@ explicitly.
 
 ### Changed
 
+- **`artifact.save()` and `artifact.save_atomic()` refuse a trace the readers would reject**
+  (#67). Pydantic does not revalidate on attribute assignment, so a `NormalizedTrace` changed in
+  place could be written in a form tracegraph's own readers refuse: `save()` wrote a mistyped
+  `status`, and both wrote a `CAUSED_BY` edge to a missing step, which `artifact.load` accepted
+  and only `validate` / `analyze` rejected. Both writers now round-trip the model and run
+  `validate_structure` before touching the destination, and raise `ValueError` (pydantic's
+  `ValidationError` is one), leaving an existing file untouched. A mistyped `seq` used to escape
+  every writer as a raw `TypeError`; it is now a `ValidationError` too. A valid trace is written
+  byte for byte as before, from the validated copy, so a value the model coerces (`"0"` for a
+  `seq`) is written as it would be read. Cost on a 6000-step chain: `save()` 0.17 s → 0.24 s,
+  `save_atomic()` 0.21 s → 0.25 s. Because the model now checks first, a capture-provenance
+  violation reaches a writer's caller as pydantic's `ValidationError` rather than the
+  `check_provenance` message (`artifact.dumps()` still raises the latter). `artifact.dumps()`
+  stays a serializer without the model and structure checks (its `TypeError` on a mistyped
+  `seq` is #82).
 - `inspect` marks a step paused by `interrupt()` as `⏸ interrupted`, in yellow rather than
   the green used for finished steps, and the summary line gains `· N interrupted` when there
   is one. The output for every trace without interrupt steps is unchanged.

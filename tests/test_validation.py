@@ -222,11 +222,49 @@ def test_from_trace_validates_raw_layer():
 
 
 def test_load_artifact_rejects_corrupt_raw_layer(tmp_path):
-    # artifact.save stays a pure serializer (no validation); the store load is the gate.
+    # Both writers refuse this trace (below), so write it with the pure serializer: a file
+    # from elsewhere can still hold it, and the store load must be the gate.
     path = tmp_path / "bad.json"
-    artifact.save(_corrupt_normalized(), path)
+    path.write_text(artifact.dumps(_corrupt_normalized()), encoding="utf-8")
     with pytest.raises(ValueError, match="not a known step"):
         InMemoryStore.load_artifact(path)
+
+
+def _changed_in_place(change: str) -> NormalizedTrace:
+    # Pydantic does not revalidate on assignment: each change leaves a model the readers reject.
+    nt = _canonical_two_step()
+    edge = next(e for e in nt.edges if e.type is EdgeType.CAUSED_BY)
+    if change == "seq":
+        nt.steps[0].seq = "zero"  # type: ignore[assignment]
+    elif change == "status":
+        nt.steps[0].status = "maybe"  # type: ignore[assignment]
+    elif change == "dangling-edge":
+        edge.dst = "ghost"
+    else:  # a coercible type string hides the edge from enum-identity filters until validated
+        edge.type = "CAUSED_BY"  # type: ignore[assignment]
+        edge.dst = "ghost"
+    return nt
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")  # pydantic's serializer warns on the bad types
+@pytest.mark.parametrize("change", ["seq", "status", "dangling-edge", "str-type-dangling-edge"])
+@pytest.mark.parametrize("writer", ["save", "save_atomic"])
+def test_writers_refuse_a_trace_the_readers_would_reject(tmp_path, writer, change):
+    target = tmp_path / "a.json"
+    target.write_text("previous", encoding="utf-8")
+    with pytest.raises(ValueError):
+        getattr(artifact, writer)(_changed_in_place(change), target)
+    assert target.read_text(encoding="utf-8") == "previous"
+    assert [p.name for p in tmp_path.iterdir()] == ["a.json"]  # no temp file left behind
+
+
+@pytest.mark.parametrize("writer", ["save", "save_atomic"])
+def test_writers_still_write_a_valid_trace_byte_for_byte(tmp_path, writer):
+    nt = _canonical_two_step()
+    target = tmp_path / "a.json"
+    getattr(artifact, writer)(nt, target)
+    assert target.read_text(encoding="utf-8") == artifact.dumps(nt)
+    assert artifact.load(target) == nt
 
 
 # --- trace-level status is part of the system of record ------------------------------------
@@ -664,3 +702,35 @@ def test_every_atomic_writer_cleans_up_when_the_write_fails(tmp_path, monkeypatc
     with pytest.raises(OSError, match="disk full"):
         save()
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")  # pydantic's serializer warns on the str seq
+@pytest.mark.parametrize("writer", ["save", "save_atomic"])
+def test_writers_write_the_validated_value_of_a_coercible_assignment(tmp_path, writer):
+    # "0" is what the model would read as 0: write that, rather than crash on "0" < 1.
+    nt = _canonical_two_step()
+    nt.steps[0].seq = "0"  # type: ignore[assignment]
+    target = tmp_path / "a.json"
+    getattr(artifact, writer)(nt, target)
+    assert artifact.load(target) == _canonical_two_step()
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize("break_it", ["steps=None", "steps[0]=None", "trace=None", "steps[0]=object"])
+@pytest.mark.parametrize("writer", ["save", "save_atomic"])
+def test_writers_refuse_a_replaced_container_with_a_value_error(tmp_path, writer, break_it):
+    nt = _canonical_two_step()
+    if break_it == "steps=None":
+        nt.steps = None  # type: ignore[assignment]
+    elif break_it == "steps[0]=None":
+        nt.steps[0] = None  # type: ignore[call-overload]
+    elif break_it == "trace=None":
+        nt.trace = None  # type: ignore[assignment]
+    else:
+        nt.steps[0] = object()  # type: ignore[call-overload]
+    target = tmp_path / "a.json"
+    target.write_text("previous", encoding="utf-8")
+    with pytest.raises(ValueError):
+        getattr(artifact, writer)(nt, target)
+    assert target.read_text(encoding="utf-8") == "previous"
+    assert [p.name for p in tmp_path.iterdir()] == ["a.json"]

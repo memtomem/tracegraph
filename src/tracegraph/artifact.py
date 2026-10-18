@@ -17,6 +17,7 @@ from pathlib import Path
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.input_validation import loads as json_loads
 from tracegraph.model import NormalizedTrace, StepSource, check_provenance
+from tracegraph.normalize import validate_structure
 
 #: Bump when the on-disk shape changes incompatibly.
 ARTIFACT_SCHEMA_VERSION = 7
@@ -201,19 +202,35 @@ def from_obj(payload: object) -> NormalizedTrace:
     return nt
 
 
+def _checked_dumps(nt: NormalizedTrace) -> str:
+    """Serialize ``nt`` only if tracegraph's own readers would accept the result.
+
+    Pydantic does not revalidate on attribute assignment, so a trace changed in place after it
+    was built can hold a field the model refuses (``seq="zero"``) or a structure no reader
+    accepts (a dangling edge). Both writers check before touching the destination: the payload
+    must round-trip through the model, and the trace must pass :func:`validate_structure`, the
+    cheap structural subset every reader relies on. Raises ``ValueError`` (pydantic's
+    ``ValidationError`` is one). The model goes first and checks everything it can, including
+    a container replaced by ``None`` and the provenance pairing; anything run before it would
+    dereference unvalidated values (:func:`dumps` re-derives the projection to pick a schema
+    version, and on a mistyped field fails with a raw ``TypeError``).
+    """
+    # Check and write the validated copy, not ``nt``: a value the model coerces (``"0"`` for a
+    # seq, ``"CAUSED_BY"`` for an edge type) would otherwise reach the structural check and the
+    # serializer still unconverted.
+    checked = NormalizedTrace.model_validate(nt.model_dump(mode="json"))
+    validate_structure(checked)
+    return dumps(checked)
+
+
 def save(nt: NormalizedTrace, path: str | Path) -> None:
-    Path(path).write_text(dumps(nt), encoding="utf-8")
+    """Write an artifact; refuses, before writing, one the readers would reject."""
+    Path(path).write_text(_checked_dumps(nt), encoding="utf-8")
 
 
 def save_atomic(nt: NormalizedTrace, path: str | Path, *, replace: bool = True) -> None:
     """Validate and atomically replace an artifact without leaving partial output."""
-    target = Path(path)
-    text = dumps(nt)
-    # Writer-side contract check before touching the destination: the payload we just
-    # serialized must round-trip through the model. Validates the parsed shape directly —
-    # no need to re-parse the JSON string we produced ourselves.
-    NormalizedTrace.model_validate(nt.model_dump(mode="json"))
-    write_text_atomic(target, text, replace=replace)
+    write_text_atomic(Path(path), _checked_dumps(nt), replace=replace)
 
 
 def load(path: str | Path) -> NormalizedTrace:
