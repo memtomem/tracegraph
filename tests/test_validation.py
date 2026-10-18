@@ -240,14 +240,27 @@ def _changed_in_place(change: str) -> NormalizedTrace:
         nt.steps[0].status = "maybe"  # type: ignore[assignment]
     elif change == "dangling-edge":
         edge.dst = "ghost"
-    else:  # a coercible type string hides the edge from enum-identity filters until validated
+    elif change == "str-type-dangling-edge":
+        # A coercible type string hides the edge from enum-identity filters until validated.
         edge.type = "CAUSED_BY"  # type: ignore[assignment]
         edge.dst = "ghost"
+    elif change == "stale-status":
+        nt.trace.status = StepStatus.ERROR  # every step is ok
+    elif change == "lossy-flag":
+        nt.steps[1].projection_lossy = True
+    elif change == "no-tree-parent":
+        nt.edges = [e for e in nt.edges if e.type is not EdgeType.TREE_PARENT]
+    else:  # dangling BELONGS_TO
+        next(e for e in nt.edges if e.type is EdgeType.BELONGS_TO).dst = "ghost"
     return nt
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")  # pydantic's serializer warns on the bad types
-@pytest.mark.parametrize("change", ["seq", "status", "dangling-edge", "str-type-dangling-edge"])
+@pytest.mark.parametrize(
+    "change",
+    ["seq", "status", "dangling-edge", "str-type-dangling-edge", "stale-status", "lossy-flag",
+     "no-tree-parent", "dangling-belongs-to"],
+)
 @pytest.mark.parametrize("writer", ["save", "save_atomic"])
 def test_writers_refuse_a_trace_the_readers_would_reject(tmp_path, writer, change):
     target = tmp_path / "a.json"

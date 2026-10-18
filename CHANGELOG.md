@@ -113,14 +113,17 @@ explicitly.
 - **`artifact.save()` and `artifact.save_atomic()` refuse a trace the readers would reject**
   (#67). Pydantic does not revalidate on attribute assignment, so a `NormalizedTrace` changed in
   place could be written in a form tracegraph's own readers refuse: `save()` wrote a mistyped
-  `status`, and both wrote a `CAUSED_BY` edge to a missing step, which `artifact.load` accepted
-  and only `validate` / `analyze` rejected. Both writers now round-trip the model and run
-  `validate_structure` before touching the destination, and raise `ValueError` (pydantic's
-  `ValidationError` is one), leaving an existing file untouched. A mistyped `seq` used to escape
+  `status`, and both wrote a `CAUSED_BY` edge to a missing step (which `artifact.load` accepted
+  and only `validate` / `analyze` rejected), a trace status that disagrees with its steps, a
+  wrong `projection_lossy` flag, or a missing `TREE_PARENT`. Both writers now round-trip the
+  model and run `validate_normalized`, the check the stores and `validate` apply on load
+  (legacy projections included), before touching the destination, and raise `ValueError`
+  (pydantic's `ValidationError` is one), leaving an existing file untouched. A mistyped `seq` used to escape
   every writer as a raw `TypeError`; it is now a `ValidationError` too. A valid trace is written
   byte for byte as before, from the validated copy, so a value the model coerces (`"0"` for a
-  `seq`) is written as it would be read. Cost on a 6000-step chain: `save()` 0.17 s → 0.24 s,
-  `save_atomic()` 0.21 s → 0.25 s. Because the model now checks first, a capture-provenance
+  `seq`) is written as it would be read. Cost on a 6000-step chain: `save()` 0.16 s → 0.29 s,
+  `save_atomic()` 0.19 s → 0.30 s; `ingest` already validated before saving, so it now checks
+  twice. Because the model now checks first, a capture-provenance
   violation reaches a writer's caller as pydantic's `ValidationError` rather than the
   `check_provenance` message (`artifact.dumps()` still raises the latter). `artifact.dumps()`
   stays a serializer without the model and structure checks (its `TypeError` on a mistyped

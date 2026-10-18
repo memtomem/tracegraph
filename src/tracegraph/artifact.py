@@ -17,7 +17,7 @@ from pathlib import Path
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.input_validation import loads as json_loads
 from tracegraph.model import NormalizedTrace, StepSource, check_provenance
-from tracegraph.normalize import validate_structure
+from tracegraph.normalize import validate_normalized
 
 #: Bump when the on-disk shape changes incompatibly.
 ARTIFACT_SCHEMA_VERSION = 7
@@ -207,9 +207,10 @@ def _checked_dumps(nt: NormalizedTrace) -> str:
 
     Pydantic does not revalidate on attribute assignment, so a trace changed in place after it
     was built can hold a field the model refuses (``seq="zero"``) or a structure no reader
-    accepts (a dangling edge). Both writers check before touching the destination: the payload
-    must round-trip through the model, and the trace must pass :func:`validate_structure`, the
-    cheap structural subset every reader relies on. Raises ``ValueError`` (pydantic's
+    accepts (a dangling edge, a stale trace status). Both writers check before touching the
+    destination: the payload must round-trip through the model, and the trace must pass
+    :func:`validate_normalized`, the check the stores and ``validate`` apply on load (legacy
+    projections included). Raises ``ValueError`` (pydantic's
     ``ValidationError`` is one). The model goes first and checks everything it can, including
     a container replaced by ``None`` and the provenance pairing; anything run before it would
     dereference unvalidated values (:func:`dumps` re-derives the projection to pick a schema
@@ -219,7 +220,7 @@ def _checked_dumps(nt: NormalizedTrace) -> str:
     # seq, ``"CAUSED_BY"`` for an edge type) would otherwise reach the structural check and the
     # serializer still unconverted.
     checked = NormalizedTrace.model_validate(nt.model_dump(mode="json"))
-    validate_structure(checked)
+    validate_normalized(checked)
     return dumps(checked)
 
 
