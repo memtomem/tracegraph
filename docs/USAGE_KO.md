@@ -212,6 +212,15 @@ uv run tracegraph query tool-failure A.json B.json
 uv run tracegraph query tool-failure traces/
 ```
 
+디렉터리 안의 `*.json` 중 artifact가 아닌 파일은 경고만 남기고 건너뜁니다. 그래서 실패가 담긴
+artifact가 깨져 있으면 "매치 없음"(exit 1)으로 끝날 수 있습니다. CI에서 "이 패턴이 없어야 한다"를
+검사할 때는 `--strict`를 붙이세요. 건너뛴 파일이 하나라도 있으면 exit 2로 실패합니다.
+`export-review-candidates`도 같은 옵션을 받습니다.
+
+```bash
+uv run tracegraph query tool-failure --strict traces/
+```
+
 결과가 너무 많으면 `--limit`으로 개수를 제한합니다.
 
 ```bash

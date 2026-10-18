@@ -10,6 +10,15 @@ explicitly.
 
 ### Added
 
+- **`--strict` for `query` and `export-review-candidates`** (#50). A `*.json` file in a directory
+  that is not a valid artifact is skipped with a warning, so a truncated artifact holding the
+  failure let a "pattern must not appear" gate pass with exit 1 ("no matches"), and let
+  `export-review-candidates` write a report without it. With `--strict`, any skipped directory
+  file fails the command with exit 2 (`--strict: N discovered file(s) are not tracegraph
+  artifacts`) after the usual skip warning, and no report is written. An explicitly named bad
+  file still fails first, as before; `--strict` is checked before "no valid artifacts" and
+  duplicate trace ids. Without the flag nothing changes, and with it and no strays the output
+  is byte-identical.
 - **`tracegraph check`, an explicit regression verdict** (#59): one current run, one baseline the
   caller names, and rules the caller names (`failures-not-increased`,
   `pattern-not-increased:<preset>`, `topology-unchanged[:shape]`; no default set). Exits 0 PASS,

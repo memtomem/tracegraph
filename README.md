@@ -99,6 +99,7 @@ Frequently-used options, beyond `--out` / `--json-out`:
 | `--explain` | `query` | Print each match's raw causal chain back to its root cause. |
 | `--structure` | `diff` | Compare topology only, ignoring labels. |
 | `--backend` | `query` | Use the optional LadybugDB Cypher accelerator instead of the pure-Python matcher. |
+| `--strict` | `query`, `export-review-candidates` | Fail with exit 2 when a directory holds a `*.json` file that is not a valid artifact, instead of skipping it with a warning. Use it in CI gates, where a skipped corrupt run would otherwise read as "no match". |
 | `--rule` | `check` | Rule to evaluate, repeatable; there is no default rule set. |
 
 ### Regression check
@@ -280,6 +281,8 @@ id/version, tool key, and the SHA-256 digest of the exact normalized artifact th
 There are no prompts, outputs, errors, step IDs, trace IDs, or local paths, and the command
 never changes a Toolgraph manifest or policy. A matching artifact without `run_id` fails the
 entire batch and leaves an existing output untouched; export never silently drops evidence.
+A `*.json` file in a directory that is not a valid artifact is skipped with a warning, as for
+`query`; pass `--strict` to fail the batch instead.
 The public schema is a repository-vendored contract (not wheel package data) at
 [`contracts/review-candidates.schema.json`](contracts/review-candidates.schema.json); G3
 consumers should vendor that file explicitly.
