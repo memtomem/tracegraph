@@ -1,0 +1,396 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tracegraph.dev/contracts/check-report.schema.json",
+  "title": "tracegraph regression check report",
+  "description": "Verdict of explicit rules over an explicit current/baseline pair. artifact_digest is the sha256 of the canonical normalized artifact (the analysis report's artifact_digest), not of the input file's bytes. Counts compare step signatures (kind, name), because no source records which step of one run is which step of another.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "verdict",
+    "current",
+    "baseline",
+    "rules",
+    "warnings",
+    "privacy_profile"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "tracegraph.check"
+    },
+    "verdict": {
+      "$ref": "#/$defs/outcome"
+    },
+    "current": {
+      "$ref": "#/$defs/trace"
+    },
+    "baseline": {
+      "$ref": "#/$defs/trace"
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "privacy_profile": {
+      "const": "safe-v1"
+    }
+  },
+  "$defs": {
+    "outcome": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "INSUFFICIENT_EVIDENCE"
+      ]
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_digest",
+        "trace_id",
+        "source_kind",
+        "causal_fidelity",
+        "links_preserved",
+        "projection_rule",
+        "schedule_graph_fingerprint",
+        "step_count",
+        "capture_gaps"
+      ],
+      "properties": {
+        "artifact_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "source_kind": {
+          "type": "string"
+        },
+        "causal_fidelity": {
+          "enum": [
+            "declared_dag",
+            "parent_only",
+            "legacy_unknown"
+          ]
+        },
+        "links_preserved": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "projection_rule": {
+          "enum": [
+            "origin_priority",
+            "temporal"
+          ]
+        },
+        "schedule_graph_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "step_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "capture_gaps": {
+          "description": "null when the artifact predates capture provenance (schema version 7).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "count"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "name"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_id",
+        "rule_version",
+        "params",
+        "outcome",
+        "reasons",
+        "limitations",
+        "evidence"
+      ],
+      "properties": {
+        "rule_id": {
+          "enum": [
+            "failures-not-increased",
+            "pattern-not-increased",
+            "topology-unchanged"
+          ]
+        },
+        "rule_version": {
+          "const": 1
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
+        },
+        "outcome": {
+          "$ref": "#/$defs/outcome"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence": {
+          "type": "array"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "rule_id": {
+                "const": "failures-not-increased"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "type": "object",
+                "maxProperties": 0
+              },
+              "evidence": {
+                "items": {
+                  "$ref": "#/$defs/failure_evidence"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule_id": {
+                "const": "pattern-not-increased"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "preset",
+                  "pattern_version"
+                ],
+                "properties": {
+                  "preset": {
+                    "type": "string"
+                  },
+                  "pattern_version": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              },
+              "evidence": {
+                "items": {
+                  "$ref": "#/$defs/pattern_evidence"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "rule_id": {
+                "const": "topology-unchanged"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "compare"
+                ],
+                "properties": {
+                  "compare": {
+                    "enum": [
+                      "labels",
+                      "shape"
+                    ]
+                  }
+                }
+              },
+              "evidence": {
+                "items": {
+                  "$ref": "#/$defs/topology_evidence"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "failure_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signature",
+        "baseline_errors",
+        "current_errors",
+        "current_step_ids"
+      ],
+      "properties": {
+        "signature": {
+          "description": "null for failures of unknown kind or name.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/signature"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_step_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "pattern_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signature",
+        "baseline_matches",
+        "current_matches",
+        "current_step_ids"
+      ],
+      "properties": {
+        "signature": {
+          "description": "null for matches binding a step of unknown kind or name.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/signature"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline_matches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_matches": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "current_step_ids": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "topology_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change"
+      ],
+      "properties": {
+        "change": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

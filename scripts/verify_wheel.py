@@ -128,6 +128,20 @@ print(json.dumps({
         require(ingested["schema_version"] == 7, "a fresh ingest is not artifact v7")
         require(ingested["trace"]["trace"].get("capture") == {"gaps": []},
                 "a fresh ingest lost its capture record")
+        # The regression check: unchanged evidence passes, the injected failure fails (exit 1),
+        # and the report binds both digests with the rule identity.
+        cli("check", "failure.json", "--baseline", "failure.json", "--rule", "failures-not-increased",
+            expected_line="PASS failures-not-increased")
+        cli("check", "failure.json", "--baseline", "baseline.json",
+            "--rule", "failures-not-increased", "--rule", "pattern-not-increased:tool-retry-failure",
+            "--json-out", "check.json", expected=1, expected_line="FAIL failures-not-increased")
+        verdict = json.loads((work / "check.json").read_text(encoding="utf-8"))
+        require(verdict["kind"] == "tracegraph.check" and verdict["verdict"] == "FAIL"
+                and [rule["outcome"] for rule in verdict["rules"]] == ["FAIL", "FAIL"],
+                "the regression check lost the injected failure")
+        require(verdict["current"]["artifact_digest"]
+                == "sha256:" + hashlib.sha256((work / "failure.json").read_bytes()).hexdigest(),
+                "the check report is not bound to the current artifact")
         cli("diff", "failure.json", "failure.json")
         cli("diff", "baseline.json", "failure.json", expected=1, expected_line="NOT IDENTICAL")
         cli("analyze", "failure.json", "--baseline", "baseline.json", "--json-out", "analysis.json")

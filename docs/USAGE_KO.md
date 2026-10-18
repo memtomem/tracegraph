@@ -158,6 +158,39 @@ label은 무시하고 topology만 비교하려면 `--structure`를 붙입니다.
 uv run tracegraph diff --structure A.json B.json
 ```
 
+## 변경을 baseline과 검사하기: check
+
+`check`는 지정한 현재 실행 하나를 지정한 baseline 하나와, 지정한 규칙으로 판정합니다.
+기본 규칙은 없고 baseline도 대신 고르지 않습니다.
+
+```bash
+uv run tracegraph check B.json --baseline A.json \
+  --rule failures-not-increased --rule pattern-not-increased:tool-failure --json-out check.json
+```
+
+exit code가 판정입니다. `0`은 PASS, `1`은 FAIL(규칙 위반이 확실함: 실패·매치 증가 또는 트리
+변경), `3`은 INSUFFICIENT_EVIDENCE(판정할 증거가
+부족하고 FAIL은 없음), `2`는 잘못된 입력·설정이며 이때는 보고서를 쓰지 않습니다.
+
+- `failures-not-increased`: step의 `(kind, name)`별 오류 수와 전체 오류 수가 늘지 않았는지 봅니다.
+- `pattern-not-increased:<preset>`: preset의 확정된 매치 수가 늘지 않았는지 봅니다.
+- `topology-unchanged` / `topology-unchanged:shape`: 파생 트리를 label 포함 / 모양만 비교합니다.
+
+실행 간에 "이 step이 저 step"이라는 기록은 어느 source에도 없으므로 개수로 비교합니다. 같은
+이름의 step 둘이 실패를 서로 바꾼 경우는 잡지 못하며, 위치 기준 비교는 `analyze --baseline`이
+보여 줍니다. 모르는 증거는 0으로 세지 않습니다. 선택한 규칙이 세는 step의 `unset` status, adapter가
+대신 채운 값(`unknown_fields`)이나 없는 이름, 실패를 가릴 수 있는 capture gap이 현재 쪽에 있으면
+PASS를, baseline 쪽에 있으면 FAIL을 낼 수 없어 INSUFFICIENT_EVIDENCE가 됩니다. 규칙이 셀 수 없는
+미지는 판정을 막지 않습니다. 예를 들어 `unset` CHAIN은 `pattern-not-increased:tool-failure`를
+막지 않고, 보관하지 않은 오류 메시지는 `timeout`만 막습니다. source가 다르거나 수집 provenance가
+없는(artifact v7 이전) 쌍은 모든 규칙에서, 인과 설정이 다르거나 ingest 때 인과 edge를 추정으로
+고른 쌍은 인과 구조를 읽는 규칙(여러 step preset, topology)에서 판정 불가입니다. 이름이 없는 step은
+이름을 비교하는 곳에서 모두 미지로 다루고, LangGraph checkpoint 이름은 추론값이므로 LangGraph
+실행에서는 label 포함 topology 규칙이 판정 불가이고 `:shape`은 판정합니다. 입력은 파일·stdin 하나씩이며 디렉터리는 받지 않습니다. 입력이 그 실행의 완전한
+기록이라고 가정하므로, 실패한 span이 빠진 export는 정상 실행과 구별되지 않습니다.
+`--json-out` 보고서는 `tracegraph.check` v1(`contracts/check-report.schema.json`)이며 두 입력의
+정규화 artifact digest와 규칙 id·버전·인자를 담습니다.
+
 ## 여러 trace에서 패턴 찾기: query
 
 먼저 기본 제공 preset을 확인합니다.
