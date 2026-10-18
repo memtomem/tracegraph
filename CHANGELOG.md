@@ -75,7 +75,7 @@ explicitly.
   shape exits 2 listing the supported ones instead of failing as a Phoenix export.
   `ingest-otlp --file -` reads stdin, and stdin now goes through the same
   `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling as files for `analyze`, `ingest-otlp` and
-  `ingest-phoenix` (the stdin half of #53; Phoenix subprocess output is still unbounded);
+  `ingest-phoenix` (the stdin half of #53; the `px` output half is the "Phoenix `px` output is bounded" entry below);
   `ingest-phoenix` reads its input with the Phoenix adapter only (its accepted inputs are
   unchanged). Next investigation steps after a direct OTLP
   diagnosis print an `ingest-otlp` save template. No file is written without `--json-out`;
