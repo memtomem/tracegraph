@@ -149,6 +149,14 @@ explicitly.
   hardened checkpoint deserialization and explicitly supplied graph code. The same file no
   longer says piped stdin is read without a size cap: since direct OTLP analysis (#63), `-` goes
   through the same `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling as a named file. Documentation only.
+- **`repeated-agent-failure` no longer takes quadratic time when no names can match** (#52).
+  The unbounded two-step matcher it shares with `tool-repeat-failure-heuristic`, and which
+  `analyze` runs on every trace, walked and sorted every failing endpoint's whole causal
+  history before checking the name back-reference: a 2000-step chain of failing agents with distinct names
+  took 1.3s for zero matches, 4x per doubling. It now skips an endpoint no earlier candidate
+  can pair with and walks back only as far as the earliest one (2000 steps: 0.001s; repeated
+  names next to each other are linear too). The longest-path pass also stopped rescanning a
+  high-fan-out cause once per endpoint. Matches, their order and every report are unchanged.
 
 ## 0.4.0 - 2026-10-14
 

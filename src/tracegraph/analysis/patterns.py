@@ -216,10 +216,13 @@ def find_matches(
     on the full path tuple — matching the LadybugDB backend's row sort and ``RETURN DISTINCT`` so the
     two backends agree on a fan-in graph where one endpoint is reachable by several gap paths.
 
-    Performance: two-step unbounded patterns such as ``tool-repeat-failure-heuristic`` take an
-    endpoint-anchored fast path — see
+    Performance: two-step unbounded patterns such as ``tool-repeat-failure-heuristic`` and
+    ``repeated-agent-failure`` take an endpoint-anchored fast path — see
     :func:`_match_two_step_unbounded`. A naive forward walk from every tool would be O(n²) on the
-    deep-linear traces this project targets; the fast path is output-optimal. Every other shape
+    deep-linear traces this project targets; the fast path skips endpoints no candidate can pair
+    with and bounds each remaining walk by the earliest eligible candidate's ``seq``, so with a
+    back-reference it is linear when no names repeat (it is not output-optimal in general). Every
+    other shape
     uses :func:`_find_matches_forward`, which is linear for bounded/strict patterns (a bounded gap
     is capped at :data:`MAX_GAP` hops). The fast path returns *exactly* the same matches as the
     forward matcher (which remains the semantic reference); a randomized differential test pins
@@ -234,7 +237,7 @@ def find_matches(
     # Fast path for a two-step unbounded shape. A gap on p0 is deliberately
     # ignored by the PathPattern contract because no predicate precedes it, so it must not disable
     # this optimization. The forward matcher is correct here too but O(n²) when many steps match
-    # p0; the endpoint-anchored variant is O(n·k).
+    # p0; the endpoint-anchored variant only walks back from endpoints that can pair with one.
     if (
         len(preds) == 2
         and preds[1].gap is not None
@@ -322,10 +325,24 @@ def _match_two_step_unbounded(
     ``>= lo`` (the gap's lower bound; the upper bound is unbounded). "A path of length ``>= lo``
     exists" is exactly "the *longest* path ``a -> e`` is ``>= lo``", so we work backward from each
     ``p1`` endpoint, computing the longest causal distance to it for every ancestor in one
-    reverse-topological pass. Cost is ``O(|endpoints| * (n + edges))`` — output-optimal, and
-    ``O(n)`` for the realistic case where failing tools are rare. (A forward walk from every
-    ``p0`` match would be ``O(n²)`` on a deep-linear trace; this avoids re-traversing the shared
-    downstream suffix.) Produces exactly what :func:`_find_matches_forward` would.
+    reverse-topological pass. (A forward walk from every ``p0`` match would be ``O(n²)`` on a
+    deep-linear trace; this avoids re-traversing the shared downstream suffix.) Produces exactly
+    what :func:`_find_matches_forward` would.
+
+    Each endpoint's backward walk is bounded by its *eligible* candidates: the ``p0`` matches
+    that could pair with it at all (with ``same_name_as``, those sharing its non-null name). An
+    endpoint with none is skipped without traversal. Otherwise, because every cause's ``seq``
+    strictly precedes its effect's, every path from a candidate to ``e`` stays inside the seq
+    window ``[earliest eligible candidate, e]``, so the walk never leaves that window. Work is
+    ``O(n + edges)``, plus for each endpoint with an earlier eligible candidate its ancestors
+    inside that window and their cause edges (times a log for the sort), plus sorting the
+    matches. With a back-reference that is linear when no names repeat, or more generally when
+    each endpoint's earliest same-named candidate is a bounded seq distance back; it grows
+    quadratic when windows overlap heavily, e.g. many steps sharing one name (every window then
+    starts at the first of them), or, without a back-reference, many candidates ahead of many
+    endpoints, which is also where the output can be quadratic. It is not output-optimal in
+    general: an eligible candidate on a parallel branch still costs its endpoint a walk that
+    finds nothing.
     """
     steps, children = index  # children: cause -> [effect, ...]
     parents: dict[str, list[str]] = {}  # effect -> [cause, ...]
@@ -336,36 +353,50 @@ def _match_two_step_unbounded(
     # The dispatcher only routes here when p1.gap is (lo, None).
     assert p1.gap is not None
     lo = p1.gap[0]
+    # Earliest seq of a p0 match, per name when p1 back-references p0 (p1.same_name_as can only
+    # be 0 here). A nameless endpoint is skipped below, so the None key is never read then.
+    by_name = p1.same_name_as is not None
+    floor_by_name: dict[str | None, int] = {}
+    for st in steps.values():
+        if not p0.matches(st):
+            continue
+        key = st.name if by_name else None
+        if key not in floor_by_name or st.seq < floor_by_name[key]:
+            floor_by_name[key] = st.seq
+
     results: list[list[str]] = []
     for e in (sid for sid, st in steps.items() if p1.matches(st)):
-        # Ancestors of e that p0 could match (backward reachability over CAUSED_BY).
+        ename = steps[e].name
+        if by_name and ename is None:
+            continue
+        floor = floor_by_name.get(ename if by_name else None)
+        if floor is None or floor >= steps[e].seq:
+            continue  # no eligible candidate can precede e
+        # Ancestors of e inside the seq window (backward reachability over CAUSED_BY).
         ancestors: set[str] = set()
         stack = [e]
         while stack:
             node = stack.pop()
             for cause in parents.get(node, []):
-                if cause not in ancestors:
+                if cause not in ancestors and steps[cause].seq >= floor:
                     ancestors.add(cause)
                     stack.append(cause)
-        # Longest causal distance to e for each ancestor: process effects before causes (seq
-        # descending), so a node's children already have their longest-to-e when we reach it.
+        # Longest causal distance to e for each ancestor: relax cause edges from effects to causes
+        # (seq descending), so a node's longest-to-e is final before it is pushed further back.
+        # Walking parents rather than children keeps a high-fan-out cause from being rescanned
+        # once per endpoint.
         longest: dict[str, int] = {e: 0}
-        for a in sorted(ancestors, key=lambda nid: steps[nid].seq, reverse=True):
-            best = max(
-                (longest[c] + 1 for c in children.get(a, []) if c in longest),
-                default=0,
-            )
-            if best:
-                longest[a] = best
-        ename = steps[e].name
+        for node in [e, *sorted(ancestors, key=lambda nid: steps[nid].seq, reverse=True)]:
+            dist = longest[node] + 1
+            for cause in parents.get(node, []):
+                if cause in ancestors and longest.get(cause, 0) < dist:
+                    longest[cause] = dist
         for a in ancestors:
             if longest.get(a, 0) < lo or not p0.matches(steps[a]):
                 continue
-            # Back-reference (p1.same_name_as can only be 0 == p0 here): names must match, both
-            # non-null — same NULL semantics as _name_ok / the compiled `IS NOT NULL` guard.
-            if p1.same_name_as is not None and not (
-                ename is not None and steps[a].name is not None and ename == steps[a].name
-            ):
+            # Back-reference: names must match, both non-null — same NULL semantics as
+            # _name_ok / the compiled `IS NOT NULL` guard.
+            if by_name and not (steps[a].name is not None and ename == steps[a].name):
                 continue
             results.append([a, e])
     results.sort(key=lambda row: tuple((steps[sid].seq, sid) for sid in row))

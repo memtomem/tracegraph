@@ -378,6 +378,98 @@ def test_fast_path_equals_forward_reference_on_random_dags(seed):
     assert find_matches(nt, pattern) == _find_matches_forward(build_index(nt), pattern)
 
 
+@pytest.mark.parametrize("seed", range(40))
+def test_fast_path_name_eligibility_equals_forward_reference(seed):
+    # The fast path skips endpoints with no eligible candidate and bounds each backward walk by
+    # the earliest eligible candidate's seq. Pin that against the forward reference across
+    # mostly-distinct names, repeated names, nameless steps, diamonds, varying gap lower bounds,
+    # a status-agnostic or failing first predicate, and with or without the back-reference.
+    import random
+
+    from tracegraph.analysis.patterns import _find_matches_forward, build_index
+
+    rng = random.Random(seed)
+    n = rng.randint(2, 24)
+    pool = rng.choice([
+        [f"a{i}" for i in range(30)],  # almost always distinct
+        ["x", "y"],  # heavily repeated
+        ["x", "y", "z", None, None],  # repeated plus nameless
+        [None],  # all nameless
+    ])
+    specs = [
+        (i, rng.choice(pool), rng.choice([StepKind.AGENT, StepKind.TOOL]),
+         ERR if rng.random() < 0.6 else OK)
+        for i in range(n)
+    ]
+    # Each step caused by 0..3 strictly-earlier steps, so diamonds and parallel branches occur.
+    edges = [
+        (i, cand)
+        for i in range(1, n)
+        for cand in rng.sample(range(i), k=min(i, rng.randint(0, 3)))
+    ]
+    nt = _custom(f"ELG{seed}", specs, edges)
+
+    lo = rng.randint(1, 5)
+    first = StepPredicate(kind=StepKind.AGENT, status=rng.choice([ERR, None]))
+    for same_name_as in (0, None):
+        pattern = PathPattern(
+            (first, StepPredicate(kind=StepKind.AGENT, status=ERR, same_name_as=same_name_as,
+                                  gap=(lo, None)))
+        )
+        assert find_matches(nt, pattern) == _find_matches_forward(build_index(nt), pattern)
+
+
+def test_repeated_agent_failure_pairs_only_same_named_ancestors():
+    # agent "x" fails on one branch and again on a parallel one (not a causal descendant), and
+    # "x" also fails twice on the same branch with distinct-named failures between. Only the
+    # same-branch pair matches; the earliest "x" anchors the seq window but is not an ancestor.
+    A, E = StepKind.AGENT, ERR
+    nt = _custom(
+        "W",
+        [
+            (0, "root", StepKind.CHAIN, OK),
+            (1, "x", A, E),  # branch 1
+            (2, "x", A, E),  # branch 2 starts here
+            (3, "p", A, E),
+            (4, None, A, E),
+            (5, "x", A, E),
+        ],
+        [(1, 0), (2, 0), (3, 2), (4, 3), (5, 4)],
+    )
+    assert find_matches(nt, PRESETS["repeated-agent-failure"]) == [["W2", "W5"]]
+
+
+@pytest.mark.parametrize("lo, expected", [(2, [["D1", "D6"]]), (4, [["D1", "D6"]]), (5, [])])
+def test_unbounded_gap_uses_the_longest_path_through_an_unequal_diamond(lo, expected):
+    # "x" causes a short branch (D2 -> e, one hop) with the LOWER seq and a long one
+    # (D3 -> D4 -> D5 -> e) with the higher seq, so the longest x -> e path is 4 hops while the
+    # last-relaxed branch gives 2. The gap lower bound must be checked against the longest one.
+    A, E = StepKind.AGENT, ERR
+    nt = _custom(
+        "D",
+        [
+            (0, "root", StepKind.CHAIN, OK),
+            (1, "x", A, E),
+            (2, None, StepKind.CHAIN, OK),
+            (3, None, StepKind.CHAIN, OK),
+            (4, None, StepKind.CHAIN, OK),
+            (5, None, StepKind.CHAIN, OK),
+            (6, "x", A, E),
+        ],
+        [(1, 0), (2, 1), (3, 1), (4, 3), (5, 4), (6, 5), (6, 2)],
+    )
+    pattern = PathPattern(
+        (
+            StepPredicate(kind=A, status=E),
+            StepPredicate(kind=A, status=E, same_name_as=0, gap=(lo, None)),
+        )
+    )
+    from tracegraph.analysis.patterns import _find_matches_forward, build_index
+
+    assert _find_matches_forward(build_index(nt), pattern) == expected
+    assert find_matches(nt, pattern) == expected
+
+
 def test_str_renders_gap_and_back_reference_readably():
     s = str(PRESETS["tool-retry-failure"])
     assert "{kind=TOOL}" in s
