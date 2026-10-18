@@ -6,7 +6,7 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.5.0 - 2026-10-18
 
 ### Added
 
@@ -36,10 +36,11 @@ explicitly.
   1 FAIL, 3 INSUFFICIENT_EVIDENCE, 2 invalid input (no report written). Rules compare counts
   per step `(kind, name)`; unknown evidence the selected rule depends on — an `unset` status, a
   substituted value or missing name on a step it could count, a capture gap that may have
-  left a step out of the artifact, or an artifact without capture provenance — blocks PASS on the current side and
+  left a step out of the artifact — blocks PASS on the current side and
   FAIL on the baseline side instead of counting as zero (a step-omitting gap on either side makes
   the topology rule insufficient, since it compares trees, not counts). Pairs from different
-  sources are insufficient for every rule, and pairs read with different causal settings for the
+  sources, or with either artifact lacking capture provenance (written before artifact v7),
+  are insufficient for every rule, and pairs read with different causal settings for the
   rules that read causal structure. New contract `tracegraph.check` v1
   (`contracts/check-report.schema.json`), bound to both canonical artifact digests and each
   rule's id, version and parameters. `diff`, `query` and `analyze` keep their exit codes.
@@ -75,7 +76,7 @@ explicitly.
   shape exits 2 listing the supported ones instead of failing as a Phoenix export.
   `ingest-otlp --file -` reads stdin, and stdin now goes through the same
   `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling as files for `analyze`, `ingest-otlp` and
-  `ingest-phoenix` (the stdin half of #53; Phoenix subprocess output is still unbounded);
+  `ingest-phoenix` (the stdin half of #53; the `px` output half is the "Phoenix `px` output is bounded" entry below);
   `ingest-phoenix` reads its input with the Phoenix adapter only (its accepted inputs are
   unchanged). Next investigation steps after a direct OTLP
   diagnosis print an `ingest-otlp` save template. No file is written without `--json-out`;
@@ -111,8 +112,8 @@ explicitly.
   field is omitted, not written as `null`. (A fresh ingest by this release declares 7 for its
   capture record, which outranks 6.)
 - **A hands-on getting-started notebook in Korean**, `examples/getting_started_ko.ipynb`, for
-  first-time users working from a repository checkout. It runs the example agent and every
-  core command offline, interprets each output, and works through two applied scenarios:
+  first-time users working from a repository checkout. It runs the example agent and the
+  offline commands other than `check` and `export-review-candidates`, interprets each output, and works through two applied scenarios:
   checking a change against a baseline, and aggregating failures across many runs from
   `analyze --json-out` reports. Its outputs are committed, and `tests/test_notebooks.py`
   executes it so its commands and exit codes cannot drift from the CLI. `nbclient` and
@@ -141,7 +142,7 @@ explicitly.
   `seq` is #82).
 - `inspect` marks a step paused by `interrupt()` as `⏸ interrupted`, in yellow rather than
   the green used for finished steps, and the summary line gains `· N interrupted` when there
-  is one. The output for every trace without interrupt steps is unchanged.
+  is one. The output for every trace with neither interrupted nor scheduled steps is unchanged.
 
 ### Fixed
 
