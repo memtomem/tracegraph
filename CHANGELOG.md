@@ -149,6 +149,19 @@ explicitly.
   hardened checkpoint deserialization and explicitly supplied graph code. The same file no
   longer says piped stdin is read without a size cap: since direct OTLP analysis (#63), `-` goes
   through the same `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling as a named file. Documentation only.
+- **`query` no longer keeps every trace and every match in memory** (part of #54). It loaded
+  and validated all artifacts, matched them all, and only then sliced the result to `--limit`,
+  so `--limit 1` over 200 artifacts of 2000 steps (248 MB on disk) peaked at 1374 MiB. It now
+  loads, validates and matches one artifact after another, keeps only the matches it prints
+  (and, with `--explain`, the traces they belong to), and builds labels only for those, so peak
+  memory no longer grows with the number of artifacts: 70 MiB for the same query, 105 MiB
+  without `--limit`. Output, exit codes and error precedence are
+  unchanged: every input is still validated, a later file's load error or a duplicate
+  trace_id still wins over a matching failure, and the footer's total stays exact. One trace
+  with very many matches still enumerates them all (3.1M matches: 971 MiB, down from 986 MiB
+  but 5.4 s instead of 17 s); bounding that needs a decision about the `--limit` total and is
+  tracked as #79. An interrupt or `MemoryError` now surfaces at the artifact being read,
+  after the skip warnings collected so far, rather than after every file has loaded.
 - **`repeated-agent-failure` no longer takes quadratic time when no names can match** (#52).
   The unbounded two-step matcher it shares with `tool-repeat-failure-heuristic`, and which
   `analyze` runs on every trace, walked and sorted every failing endpoint's whole causal

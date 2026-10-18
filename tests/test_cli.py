@@ -2645,3 +2645,333 @@ def test_stdin_inputs_respect_the_byte_limit(tmp_path, monkeypatch, command):
     monkeypatch.setenv("TRACEGRAPH_MAX_ARTIFACT_BYTES", str(len(text.encode())))
     result = runner.invoke(app, args, input=text)
     assert result.exit_code == 0, result.output
+
+
+# --- query: streaming pass keeps the two-phase error order (#54) ----------------------
+#
+# `query` loads, validates and matches one artifact at a time instead of loading every trace
+# first. These pin today's precedence: every load error, then "no valid artifacts", then the
+# first duplicate trace_id, then a matching failure. The injection seams (`patterns.find_matches`
+# and `LadybugStore` methods) exist in both the old and new code paths, so the same tests pass
+# against the pre-streaming implementation.
+
+
+def _failing_traces(tmp_path, *tids):
+    paths = []
+    for tid in tids:
+        p = tmp_path / f"{tid}.json"
+        _write_linear_trace(
+            p, tid,
+            ("plan", StepKind.CHAIN, StepStatus.OK),
+            ("call_tool", StepKind.TOOL, StepStatus.ERROR),
+        )
+        paths.append(p)
+    return paths
+
+
+class _Injected(RuntimeError):
+    pass
+
+
+def _break_memory_matcher(monkeypatch, exc=None):
+    from tracegraph.analysis import patterns
+
+    def boom(*args, **kwargs):
+        raise exc or _Injected("matcher broke")
+
+    monkeypatch.setattr(patterns, "find_matches", boom)
+    monkeypatch.setattr(cli_mod, "find_matches", boom, raising=False)
+
+
+def test_query_matcher_failure_yields_to_a_later_explicit_load_error(tmp_path, monkeypatch):
+    first, = _failing_traces(tmp_path, "A")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    _break_memory_matcher(monkeypatch)
+    res = runner.invoke(app, ["query", "error", str(first), str(bad)])
+    assert res.exit_code == 2, res.output
+    assert "cannot load artifact" in _panel_text(res.output)
+
+
+def test_query_matcher_failure_yields_to_a_later_duplicate_trace_id(tmp_path, monkeypatch):
+    a, b = _failing_traces(tmp_path, "A", "B")
+    dup = tmp_path / "again.json"
+    dup.write_bytes(a.read_bytes())
+    _break_memory_matcher(monkeypatch)
+    res = runner.invoke(app, ["query", "error", str(a), str(b), str(dup)])
+    assert res.exit_code == 2, res.output
+    out = _panel_text(res.output)
+    assert "duplicate trace_id 'A'" in out
+    assert out.index("A.json") < out.index("again.json")  # first-seen path, then the repeat
+
+
+def test_query_matcher_failure_propagates_when_inputs_are_valid(tmp_path, monkeypatch):
+    paths = _failing_traces(tmp_path, "A", "B")
+    _break_memory_matcher(monkeypatch)
+    res = runner.invoke(app, ["query", "error", *map(str, paths)])
+    assert isinstance(res.exception, _Injected)
+    assert str(res.exception) == "matcher broke"
+    assert "match(es)" not in res.output
+
+
+def test_query_interrupt_from_the_matcher_still_reports_skipped_strays(tmp_path, monkeypatch):
+    # Interrupts are outside the equivalence scope: the pass can now be interrupted before a
+    # later file is read. What it guarantees is that strays already skipped are reported.
+    d = tmp_path / "arts"
+    d.mkdir()
+    (d / "0-stray.json").write_text('{"name": "x"}', encoding="utf-8")  # sorts first
+    _failing_traces(d, "A")
+    _break_memory_matcher(monkeypatch, KeyboardInterrupt())
+    res = runner.invoke(app, ["query", "error", str(d)])
+    assert res.exit_code == 130
+    assert "0-stray.json" in _panel_text(res.stderr)
+
+
+def test_query_memory_error_from_the_matcher_is_not_deferred(tmp_path, monkeypatch):
+    # Out of the equivalence scope by design: an allocation failure must not trigger more
+    # parsing and then be replaced by a later input's error.
+    first, = _failing_traces(tmp_path, "A")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    loads = []
+    real = cli_mod._load_artifact_evidence
+    monkeypatch.setattr(
+        cli_mod, "_load_artifact_evidence", lambda p: loads.append(p) or real(p)
+    )
+    _break_memory_matcher(monkeypatch, MemoryError())
+    res = runner.invoke(app, ["query", "error", str(first), str(bad)])
+    assert isinstance(res.exception, MemoryError)
+    assert loads == [first]
+
+
+def _ladybug_store():
+    pytest.importorskip("ladybug")
+    from tracegraph.store.ladybug import LadybugStore
+
+    return LadybugStore
+
+
+def test_query_ladybug_store_load_failure_yields_to_a_later_explicit_load_error(
+    tmp_path, monkeypatch
+):
+    store_cls = _ladybug_store()
+    first, = _failing_traces(tmp_path, "A")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+
+    def refuse(cls, nt):
+        raise ValueError("too big for ladybug")
+
+    monkeypatch.setattr(store_cls, "from_trace", classmethod(refuse))
+    res = runner.invoke(app, ["query", "error", str(first), "--backend", "ladybug"])
+    assert res.exit_code == 2
+    assert "cannot load trace A into the ladybug backend" in _panel_text(res.output)
+    res = runner.invoke(app, ["query", "error", str(first), str(bad), "--backend", "ladybug"])
+    assert res.exit_code == 2
+    out = _panel_text(res.output)
+    assert "cannot load artifact" in out and "ladybug backend" not in out
+
+
+def test_query_ladybug_close_failure_replaces_the_matching_failure(tmp_path, monkeypatch):
+    store_cls = _ladybug_store()
+    paths = _failing_traces(tmp_path, "A")
+
+    def find(self, pattern):
+        raise _Injected("search broke")
+
+    def close(self):
+        raise OSError("close broke")
+
+    monkeypatch.setattr(store_cls, "find_matches", find)
+    monkeypatch.setattr(store_cls, "close", close)
+    res = runner.invoke(app, ["query", "error", *map(str, paths), "--backend", "ladybug"])
+    assert isinstance(res.exception, OSError)
+    assert str(res.exception) == "close broke"
+    assert isinstance(res.exception.__context__, _Injected)
+
+
+def test_query_ladybug_fallback_note_only_when_every_trace_succeeds(tmp_path, monkeypatch):
+    store_cls = _ladybug_store()
+    paths = _failing_traces(tmp_path, "A", "B")
+    preset = "repeated-agent-failure"  # unbounded gap: the ladybug store falls back to Python
+    res = runner.invoke(app, ["query", preset, *map(str, paths), "--backend", "ladybug"])
+    assert res.exit_code == 1  # no match, but every trace was searched
+    assert "not Cypher-compilable" in res.output
+
+    real = store_cls.find_matches
+    calls = []
+
+    def second_fails(self, pattern):
+        calls.append(pattern)
+        if len(calls) == 2:
+            raise _Injected("second trace broke")
+        return real(self, pattern)
+
+    monkeypatch.setattr(store_cls, "find_matches", second_fails)
+    res = runner.invoke(app, ["query", preset, *map(str, paths), "--backend", "ladybug"])
+    assert isinstance(res.exception, _Injected)
+    assert "not Cypher-compilable" not in res.output
+
+
+@pytest.mark.parametrize("limit", [None, 1, 2, 3, 4, 7])
+@pytest.mark.parametrize("explain", [False, True])
+def test_query_pass_equals_loading_everything_then_slicing(tmp_path, limit, explain):
+    from tracegraph.analysis import PRESETS
+
+    d = tmp_path / "arts"
+    d.mkdir()
+    for i, n_fail in enumerate([0, 2, 1, 0, 3]):
+        _write_linear_trace(
+            d / f"t{i}.json", f"T{i}",
+            ("plan", StepKind.CHAIN, StepStatus.OK),
+            *[("call_tool", StepKind.TOOL, StepStatus.ERROR)] * n_fail,
+        )
+    (d / "stray.json").write_text("{}", encoding="utf-8")
+    pattern = PRESETS["error"]
+    backend = cli_mod.QueryBackend.MEMORY
+    from tracegraph.analysis import search  # independent of the CLI's own matching helpers
+
+    loaded = cli_mod._load_many_evidence([d])
+    everything = search([x.trace for x in loaded], pattern)
+    got = cli_mod._query_pass([d], pattern, backend, limit=limit, keep_traces=explain)
+    assert got.n_traces == len(loaded)
+    assert got.total == len(everything)
+    assert got.matches == everything[:limit]
+    expected_traces = {m.trace_id for m in everything[:limit]} if explain else set()
+    assert set(got.traces) == expected_traces
+
+
+@pytest.mark.parametrize("explain", [False, True])
+def test_query_peak_memory_does_not_grow_with_the_number_of_artifacts(tmp_path, explain):
+    # With a fixed --limit, only per-file metadata may grow with the corpus. Before the
+    # streaming pass every parsed trace stayed alive: 300-step artifacts added ~0.9 MiB of
+    # traced peak each (10 -> 30 artifacts: +18 MiB); the streaming pass adds ~1 KiB each.
+    import tracemalloc
+
+    def corpus(n):
+        d = tmp_path / f"c{n}"
+        d.mkdir()
+        for k in range(n):
+            _write_linear_trace(
+                d / f"t{k:03d}.json", f"T{k:03d}",
+                *[(f"a{i}", StepKind.TOOL, StepStatus.ERROR if i % 10 == 0 else StepStatus.OK)
+                  for i in range(300)],
+            )
+        return d
+
+    args = ["--limit", "1", *(["--explain"] if explain else [])]
+    peaks = []
+    was_tracing = tracemalloc.is_tracing()
+    for d in (corpus(10), corpus(30)):
+        runner.invoke(app, ["query", "error", str(d), *args])  # settle lazy imports and caches
+        if not was_tracing:
+            tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()  # an enclosing session's earlier peak must not count
+            baseline = tracemalloc.get_traced_memory()[0]
+            res = runner.invoke(app, ["query", "error", str(d), *args])
+            peaks.append(tracemalloc.get_traced_memory()[1] - baseline)
+        finally:
+            if not was_tracing:
+                tracemalloc.stop()
+        assert res.exit_code == 0, res.output
+    growth = peaks[1] - peaks[0]
+    assert growth < 2 * 2**20, f"peak grew {growth / 2**20:.1f} MiB for 20 more artifacts"
+
+
+def _track_loads(monkeypatch):
+    """Record, at every artifact load, which earlier traces and steps are still alive.
+
+    Callers disable cyclic garbage collection for the run, so anything reported dead was freed
+    by reference counting: a reference cycle only the collector would break shows up alive."""
+    import weakref
+
+    alive_at_load: list[list[str]] = []
+    refs: list[tuple[str, weakref.ref, weakref.ref]] = []
+    real = cli_mod._load_artifact_evidence
+
+    def tracking(path):
+        alive_at_load.append(
+            [tid for tid, trace, step in refs if trace() is not None or step() is not None]
+        )
+        item = real(path)
+        refs.append((item.trace.trace.trace_id, weakref.ref(item.trace),
+                     weakref.ref(item.trace.steps[-1])))
+        return item
+
+    monkeypatch.setattr(cli_mod, "_load_artifact_evidence", tracking)
+    return alive_at_load
+
+
+@pytest.mark.parametrize("explain", [False, True])
+def test_query_releases_each_trace_before_loading_the_next(tmp_path, monkeypatch, explain):
+    # Peak memory stays flat only if the previous trace and its steps are gone *while* the next
+    # one loads, not merely at the end of the pass. With --explain, the trace holding the one
+    # kept match must stay alive; nothing else may.
+    import gc
+
+    d = tmp_path / "arts"
+    d.mkdir()
+    _failing_traces(d, "A", "B", "C", "D")
+    alive_at_load = _track_loads(monkeypatch)
+    gc.disable()
+    try:
+        args = ["query", "error", str(d), "--limit", "1", *(["--explain"] if explain else [])]
+        res = runner.invoke(app, args)
+    finally:
+        gc.enable()
+    assert res.exit_code == 0, res.output
+    kept = ["A"] if explain else []
+    assert alive_at_load == [[], kept, kept, kept]
+
+
+def test_query_deferred_matching_failure_does_not_keep_its_trace(tmp_path, monkeypatch):
+    # The first matching failure is held until every file has loaded; its traceback frames
+    # must not keep that trace (or its match list) alive meanwhile.
+    import gc
+
+    d = tmp_path / "arts"
+    d.mkdir()
+    _failing_traces(d, "A", "B", "C")
+    from tracegraph.analysis import patterns
+
+    def boom(nt, pattern, *, index=None):
+        raise _Injected(f"matcher broke on {nt.trace.trace_id}")
+
+    monkeypatch.setattr(patterns, "find_matches", boom)
+    monkeypatch.setattr(cli_mod, "find_matches", boom, raising=False)
+    alive_at_load = _track_loads(monkeypatch)
+    gc.disable()
+    try:
+        res = runner.invoke(app, ["query", "error", str(d)])
+    finally:
+        gc.enable()
+    assert isinstance(res.exception, _Injected)
+    assert str(res.exception) == "matcher broke on A"
+    assert alive_at_load == [[], [], []]
+
+
+@pytest.mark.parametrize("command", ["query", "export-review-candidates"])
+def test_ladybug_label_failure_stays_the_context_of_a_close_failure(
+    tmp_path, monkeypatch, command
+):
+    # Labels are built while the per-trace store is open, so a close failure raised while a
+    # label failure is propagating chains it as __context__, as before.
+    store_cls = _ladybug_store()
+    paths = _failing_traces(tmp_path, "A")
+
+    def label(*args, **kwargs):
+        raise _Injected("label broke")
+
+    def close(self):
+        raise OSError("close broke")
+
+    monkeypatch.setattr(cli_mod, "match_for", label)
+    monkeypatch.setattr(store_cls, "close", close)
+    args = [command, "tool-failure", *map(str, paths), "--backend", "ladybug"]
+    if command == "export-review-candidates":
+        args += ["--out", str(tmp_path / "out.json")]
+    res = runner.invoke(app, args)
+    assert isinstance(res.exception, OSError), res.output
+    assert str(res.exception) == "close broke"
+    assert isinstance(res.exception.__context__, _Injected)

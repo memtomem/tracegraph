@@ -266,53 +266,66 @@ def _find_matches_forward(index: TraceIndex, pattern: PathPattern) -> list[list[
     exactly. Linear for strict/bounded patterns; only an *unbounded* gap (which the dispatcher
     routes elsewhere for the common 2-step shape) can make it quadratic.
     """
-    steps, children = index
-    preds = pattern.steps
-    results: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
+    walk = _ForwardWalk(index[0], index[1], pattern.steps, [], set())
+    for sid in walk.steps:
+        _advance(walk, sid, 0, [], {})
+    walk.results.sort(key=lambda row: tuple((walk.steps[sid].seq, sid) for sid in row))
+    return walk.results
 
-    # Recursion depth here == predicate index (len(preds), ~2-4), NOT trace depth — safe on the
-    # deep-linear traces this project sees. The variable-length gap walk below is an explicit
-    # deque (heap, not stack), so a 30-hop span over a 2000-step trace never grows the call stack.
-    def advance(node_id: str, idx: int, acc: list[str], bound: dict[int, str | None]) -> None:
-        step = steps[node_id]
-        pred = preds[idx]
-        if not pred.matches(step) or not _name_ok(pred, step, bound):
-            return
-        acc2 = acc + [node_id]
-        if idx + 1 == len(preds):
-            key = tuple(acc2)
-            if key not in seen:  # == RETURN DISTINCT: collapse multiple gap paths to one row
-                seen.add(key)
-                results.append(acc2)
-            return
-        bound2 = {**bound, idx: step.name}
-        nxt = preds[idx + 1]
-        if nxt.gap is None:
-            for child in children.get(node_id, []):
-                advance(child, idx + 1, acc2, bound2)
-            return
-        lo, hi = nxt.gap
-        # BFS forward over CAUSED_BY (cause -> effect). De-dup on (node, distance) so a diamond
-        # doesn't blow up exponentially while still visiting every distinct path *length* — an
-        # endpoint reachable only at a longer-than-min distance within [lo, hi] is not missed.
-        frontier: deque[tuple[str, int]] = deque((c, 1) for c in children.get(node_id, []))
-        visited_states: set[tuple[str, int]] = set()
-        while frontier:
-            cur, dist = frontier.popleft()
-            if (cur, dist) in visited_states:
-                continue
-            visited_states.add((cur, dist))
-            if dist >= lo and (hi is None or dist <= hi):
-                advance(cur, idx + 1, acc2, bound2)
-            if hi is None or dist < hi:
-                for c in children.get(cur, []):
-                    frontier.append((c, dist + 1))
 
-    for sid in steps:
-        advance(sid, 0, [], {})
-    results.sort(key=lambda row: tuple((steps[sid].seq, sid) for sid in row))
-    return results
+@dataclass
+class _ForwardWalk:
+    """State shared by one :func:`_find_matches_forward` call. A module-level recursion over it,
+    rather than a self-referencing closure, leaves no reference cycle holding the index and
+    results after the call returns."""
+
+    steps: dict[str, Step]
+    children: dict[str, list[str]]
+    preds: tuple[StepPredicate, ...]
+    results: list[list[str]]
+    seen: set[tuple[str, ...]]
+
+
+# Recursion depth here == predicate index (len(preds), ~2-4), NOT trace depth — safe on the
+# deep-linear traces this project sees. The variable-length gap walk below is an explicit
+# deque (heap, not stack), so a 30-hop span over a 2000-step trace never grows the call stack.
+def _advance(
+    walk: _ForwardWalk, node_id: str, idx: int, acc: list[str], bound: dict[int, str | None]
+) -> None:
+    preds, children = walk.preds, walk.children
+    step = walk.steps[node_id]
+    pred = preds[idx]
+    if not pred.matches(step) or not _name_ok(pred, step, bound):
+        return
+    acc2 = acc + [node_id]
+    if idx + 1 == len(preds):
+        key = tuple(acc2)
+        if key not in walk.seen:  # == RETURN DISTINCT: collapse multiple gap paths to one row
+            walk.seen.add(key)
+            walk.results.append(acc2)
+        return
+    bound2 = {**bound, idx: step.name}
+    nxt = preds[idx + 1]
+    if nxt.gap is None:
+        for child in children.get(node_id, []):
+            _advance(walk, child, idx + 1, acc2, bound2)
+        return
+    lo, hi = nxt.gap
+    # BFS forward over CAUSED_BY (cause -> effect). De-dup on (node, distance) so a diamond
+    # doesn't blow up exponentially while still visiting every distinct path *length* — an
+    # endpoint reachable only at a longer-than-min distance within [lo, hi] is not missed.
+    frontier: deque[tuple[str, int]] = deque((c, 1) for c in children.get(node_id, []))
+    visited_states: set[tuple[str, int]] = set()
+    while frontier:
+        cur, dist = frontier.popleft()
+        if (cur, dist) in visited_states:
+            continue
+        visited_states.add((cur, dist))
+        if dist >= lo and (hi is None or dist <= hi):
+            _advance(walk, cur, idx + 1, acc2, bound2)
+        if hi is None or dist < hi:
+            for c in children.get(cur, []):
+                frontier.append((c, dist + 1))
 
 
 def _match_two_step_unbounded(
