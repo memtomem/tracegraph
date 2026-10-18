@@ -400,7 +400,15 @@ source; mixing them can report a step whose status differs only by source as a b
 change (`ok` to `unset`, or the reverse).
 
 LangGraph ingestion reads both the configured error state channel and native task failures
-from checkpoint pending writes. A node that raises becomes a derived `task` step under the
+from checkpoint pending writes. A checkpoint is an error where the channel first holds an error,
+or where it is written with a *different* error than its predecessor in the same namespace (a
+retry that fails again with another message). The same error written again cannot be told
+from a node returning the whole state, so it is not recorded as a failure; it is disclosed as
+the capture gap `langgraph.rewritten_error_channel`, which makes `check`'s count rules
+one-sided, and success-dependent patterns such as `gate-failure-after-success` insufficient
+either way. Clear a plain (last-value) error key before retrying (`{"error": None}`) to have
+every attempt recorded; a reducer on the channel decides whether `None` clears it.
+A handler that rewrites the error into another message is read as a new failure. A node that raises becomes a derived `task` step under the
 checkpoint that scheduled it, never a mark on that checkpoint, whose own name belongs to the
 node that produced it. The failing node is named by recomputing LangGraph's task id from
 checkpoint data; when nothing proves which node ran, the step stays unnamed rather than

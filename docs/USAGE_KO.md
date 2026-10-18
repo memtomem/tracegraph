@@ -478,6 +478,14 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
   task·interrupt·scheduled step은 표시하지 않습니다.
 - OTLP의 `graph.node.parent_id`를 시작 시각으로 골랐거나 따르지 못하고 `parentSpanId`를 쓴
   경우에도 gap으로 남고, stderr 경고가 새로 한 줄 나옵니다.
+- LangGraph 오류 채널이 이미 오류를 담고 있는데 같은 오류로 다시 쓰이면
+  `langgraph.rewritten_error_channel` gap이 됩니다. 같은 메시지로 다시 실패한 것인지, state 전체를
+  돌려주는 노드가 값을 그대로 넘긴 것인지 checkpoint만으로는 구분할 수 없어서 실패로 기록하지
+  않습니다. `check`는 이 gap이 있는 쪽의 개수 규칙을 한쪽으로만 판정하고, topology 규칙은 영향을
+  받지 않습니다. 성공을 조건으로 하는 pattern(`gate-failure-after-success` 등)은 어느 쪽에 gap이
+  있든 판정 불가입니다. 다른 메시지로 다시 쓰이면 새 실패로 기록합니다. 모든 시도를 기록하려면
+  재시도 전에 오류 키를 비우세요(`{"error": None}`). 다만 채널에 reducer가 있으면 `None`으로
+  비워지는지는 그 reducer에 달려 있습니다.
 - OTLP span link 중 원인으로 기록하지 못한 것도 종류별로 gap이 됩니다. 이 trace를 가리키지만
   export에 없는 span을 가리키는 link는 `otlp.unresolved_span_link`, trace를 지정하지 않은 link는
   `otlp.unscoped_span_link`, 다른 trace를 가리키는 link는 `otlp.foreign_trace_link`입니다. 앞의

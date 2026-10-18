@@ -1280,7 +1280,12 @@ def ingest(
     sqlite: Path = typer.Option(..., help="Path to a LangGraph SqliteSaver DB file."),
     thread: str = typer.Option(..., "--thread", "-t", help="thread_id to ingest."),
     out: Path = typer.Option(None, "--out", "-o", help="Artifact path (default <thread>.json)."),
-    error_channel: str = typer.Option("error", help="State channel that signals a step error."),
+    error_channel: str = typer.Option(
+        "error",
+        help="State channel that signals a step error. A step is an error where the channel "
+             "first holds one or is written with a different one; the same error written "
+             "again is disclosed, not recorded.",
+    ),
     graph: str = typer.Option(
         None,
         "--graph",
