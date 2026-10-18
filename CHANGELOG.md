@@ -10,6 +10,17 @@ explicitly.
 
 ### Added
 
+- **`tracegraph check`, an explicit regression verdict** (#59): one current run, one baseline the
+  caller names, and rules the caller names (`failures-not-increased`,
+  `pattern-not-increased:<preset>`, `topology-unchanged[:shape]`; no default set). Exits 0 PASS,
+  1 FAIL, 3 INSUFFICIENT_EVIDENCE, 2 invalid input (no report written). Rules compare counts
+  per step `(kind, name)`; unknown evidence — an `unset` status, a substituted value, a capture
+  gap that can hide a failure, or an artifact without capture provenance — blocks PASS on the
+  current side and FAIL on the baseline side instead of counting as zero. Pairs from different
+  sources are insufficient for every rule, and pairs read with different causal settings for the
+  rules that read causal structure. New contract `tracegraph.check` v1
+  (`contracts/check-report.schema.json`), bound to both canonical artifact digests and each
+  rule's id, version and parameters. `diff`, `query` and `analyze` keep their exit codes.
 - **Capture provenance, artifact schema version 7** (groundwork for #59): every ingest now
   records in the artifact what the adapter could not observe, so a later comparison can tell
   "recorded, nothing disclosed" from "not recorded". `trace.capture.gaps` keeps one fixed code and count

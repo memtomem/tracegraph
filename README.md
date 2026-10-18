@@ -65,6 +65,7 @@ tracegraph explain A.json <step_id>  # raw causal chain back to the root cause
 tracegraph diff A.json B.json        # structural regression diff (AHU isomorphism)
 tracegraph validate A.json traces/   # validate artifacts before CI/query jobs
 tracegraph analyze A.json            # automatically select and explain failures
+tracegraph check B.json --baseline A.json --rule failures-not-increased   # regression verdict for CI
 
 # Phoenix: one command after configuring the official `px` CLI
 tracegraph phoenix doctor
@@ -97,6 +98,45 @@ Frequently-used options, beyond `--out` / `--json-out`:
 | `--explain` | `query` | Print each match's raw causal chain back to its root cause. |
 | `--structure` | `diff` | Compare topology only, ignoring labels. |
 | `--backend` | `query` | Use the optional LadybugDB Cypher accelerator instead of the pure-Python matcher. |
+| `--rule` | `check` | Rule to evaluate, repeatable; there is no default rule set. |
+
+### Regression check
+
+`check` judges one current run against one baseline you name, with rules you name, and answers
+with an exit code a CI job can use directly:
+
+```bash
+tracegraph check current.json --baseline baseline.json \
+  --rule failures-not-increased --rule pattern-not-increased:tool-retry-failure \
+  --json-out check.json
+```
+
+| exit | verdict |
+|---|---|
+| 0 | `PASS` — every rule held on the recorded evidence |
+| 1 | `FAIL` — some rule was definitely violated (more failures or matches, or a changed tree) |
+| 3 | `INSUFFICIENT_EVIDENCE` — some rule could not decide, and none failed |
+| 2 | invalid input or configuration; no report is written |
+
+Rules: `failures-not-increased` (recorded errors per step `(kind, name)` and in total),
+`pattern-not-increased:<preset>` (confirmed matches of a preset), and `topology-unchanged`
+(derived tree with labels) or `topology-unchanged:shape`. Counts compare step signatures,
+because no source records which step of one run is which step of another; two same-named steps
+trading which one fails is not detected (`analyze --baseline` shows the positional view).
+Evidence that is unknown is never read as zero: a step with an `unset` status, a value the
+adapter substituted (`unknown_fields`), or a capture gap that can hide a failure blocks PASS
+on the current side and FAIL on the baseline side, so the rule reports `INSUFFICIENT_EVIDENCE`.
+Pairs from different sources or ingested before capture provenance (artifact version 7) are
+insufficient for every rule; pairs read with different causal settings, or with causal edges
+chosen heuristically at ingest, are insufficient for the rules that read causal structure
+(multi-step presets and topology). A step without a name is
+treated as unknown wherever a rule compares names, and LangGraph checkpoint names are inferred,
+so the labeled topology rule is insufficient for LangGraph runs; the shape rule is not.
+`check` takes exactly one current and one baseline input (artifact, OTLP export, Phoenix export
+or `-`), never a directory, and never picks a baseline. It also assumes each input is a
+complete record of its run: an export missing a failing span cannot be told from a clean one.
+The `--json-out` report is `tracegraph.check` v1 (`contracts/check-report.schema.json`), bound
+to both canonical artifact digests and each rule's id, version and parameters.
 
 ## Phoenix-first workflow
 

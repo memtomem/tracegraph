@@ -27,6 +27,7 @@ from rich.tree import Tree
 from tracegraph import artifact
 from tracegraph.input_validation import loads as load_json
 from tracegraph.analysis import PRESETS
+from tracegraph.analysis import check as regression_check
 from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
@@ -283,7 +284,7 @@ def _route(records: list[Any], *, root: bool, container: str | None) -> str:
     raise ValueError(f"unsupported shape; {_SHAPES_HELP}")
 
 
-def _parse_analysis_text(text: str) -> tuple[str, Any]:
+def _parse_analysis_text(text: str, *, strict: bool = False) -> tuple[str, Any]:
     """Identify an artifact, OTLP export (JSON or Collector JSONL) or Phoenix export by shape.
 
     Routing is decided before any adapter runs, so no payload is ever tried as one format
@@ -291,11 +292,11 @@ def _parse_analysis_text(text: str) -> tuple[str, Any]:
     documents for JSONL).
     """
     try:
-        payload = load_json(text)
+        payload = load_json(text, strict=strict)
     except json.JSONDecodeError:
         # The Collector file exporter writes one TracesData object per line; nothing else
         # has a line format. A line that is not JSON re-raises as "not valid JSON".
-        documents = [load_json(line) for line in text.splitlines() if line.strip()]
+        documents = [load_json(line, strict=strict) for line in text.splitlines() if line.strip()]
         if _route(documents, root=True, container="JSON Lines") != "otlp":
             raise ValueError(
                 "unsupported shape; JSON Lines input is read as an OTLP span export only; "
@@ -326,10 +327,12 @@ def _load_analysis_source(source: str, trace_id: str | None = None) -> Normalize
     return _load_analysis_input(source, trace_id).trace
 
 
-def _load_analysis_input(source: str, trace_id: str | None = None) -> _AnalysisInput:
+def _load_analysis_input(
+    source: str, trace_id: str | None = None, *, strict_json: bool = False
+) -> _AnalysisInput:
     """Strictly identify a tracegraph artifact, OTLP span export or Phoenix CLI trace export."""
     try:
-        kind, payload = _parse_analysis_text(_read_source(source))
+        kind, payload = _parse_analysis_text(_read_source(source), strict=strict_json)
         if kind == "artifact":
             nt = artifact.from_obj(payload)
         elif kind == "otlp":
@@ -1122,6 +1125,87 @@ def analyze_command(
         _save_report(report, json_out)
     _render_next_steps(report, limit=limit, source=source,
                        source_kind=loaded.source, json_out=json_out)
+
+
+_CHECK_EXIT = {"PASS": 0, "FAIL": 1, "INSUFFICIENT_EVIDENCE": 3}
+_CHECK_STYLE = {"PASS": "green", "FAIL": "bold red", "INSUFFICIENT_EVIDENCE": "yellow"}
+
+
+def _check_input(source: str, trace_id: str | None, option: str) -> NormalizedTrace:
+    # NaN/Infinity are not JSON; a gate must not pass a file a strict parser would reject.
+    loaded = _load_analysis_input(source, trace_id, strict_json=True)
+    # The shared loader ignores a selector for an artifact, which holds exactly one trace; a
+    # check must not judge a trace other than the one the caller named.
+    if loaded.source == "artifact" and trace_id is not None and trace_id != loaded.trace.trace.trace_id:
+        raise typer.BadParameter(
+            f"{source} holds trace {loaded.trace.trace.trace_id!r}, not {trace_id!r}",
+            param_hint=option,
+        )
+    return loaded.trace
+
+
+def _render_check(report: regression_check.CheckReport, *, limit: int) -> None:
+    style = _CHECK_STYLE[report.verdict]
+    console.print(f"[{style}]{report.verdict}[/]  [dim]current {report.current.artifact_digest[:19]}… "
+                  f"vs baseline {report.baseline.artifact_digest[:19]}…[/]")
+    for rule in report.rules:
+        params = ",".join(f"{key}={value}" for key, value in sorted(rule.params.items()))
+        label = rule.rule_id + (f" ({params})" if params else "")
+        console.print(f"  [{_CHECK_STYLE[rule.outcome]}]{rule.outcome}[/] {escape(label)}")
+        for reason in rule.reasons:
+            console.print(f"      [dim]{escape(reason)}[/]")
+        for item in rule.evidence[:limit]:
+            _print_evidence(f"      • {json.dumps(item.model_dump(mode='json'), sort_keys=True)}")
+        if len(rule.evidence) > limit:
+            console.print(f"      [dim]… {len(rule.evidence) - limit} more in --json-out[/]")
+        for limitation in rule.limitations:
+            console.print(f"      [dim]limitation: {escape(limitation)}[/]")
+
+
+@app.command(name="check")
+def check_command(
+    current: str = typer.Argument(..., help="Current run: artifact, OTLP export, Phoenix export, or '-' for stdin."),
+    baseline: str = typer.Option(None, "--baseline", help="Baseline run to compare against (required; never chosen for you)."),
+    rules: list[str] = typer.Option(None, "--rule", help=f"Rule to evaluate, repeatable (required): {regression_check.RULE_HELP}."),
+    trace: str = typer.Option(None, "--trace", "-t", help="Trace id in a multi-trace current input."),
+    baseline_trace: str = typer.Option(None, "--baseline-trace", help="Trace id in a multi-trace baseline input."),
+    json_out: Path = typer.Option(None, "--json-out", help="Write the versioned check report (tracegraph.check v1)."),
+    limit: int = typer.Option(5, "--limit", "-l", help="Evidence items rendered per rule."),
+) -> None:
+    """Check a run against an explicit baseline with explicit rules.
+
+    Exits 0 for PASS, 1 for FAIL, 3 for INSUFFICIENT_EVIDENCE and 2 for invalid input; no report
+    is written on exit 2.
+    """
+    if baseline is None:
+        raise typer.BadParameter("a baseline is required; tracegraph never picks one", param_hint="--baseline")
+    if limit <= 0:
+        raise typer.BadParameter("--limit must be a positive integer")
+    if current == "-" and baseline == "-":
+        raise typer.BadParameter("stdin can supply only one of the current run and the baseline")
+    try:
+        specs = regression_check.parse_rules(rules or [])
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--rule") from exc
+    try:
+        _distinct_paths([Path(p) for p in (current, baseline) if p != "-"], [json_out] if json_out else [])
+    except (OSError, RuntimeError) as exc:
+        # Resolving a path can fail on its own (a symlink loop, a name too long to stat); that
+        # is a usage error, not a crash a gate would read as FAIL.
+        raise typer.BadParameter(f"cannot resolve a path: {_load_reason(exc)}") from exc
+    current_nt = _check_input(current, trace, "--trace")
+    baseline_nt = _check_input(baseline, baseline_trace, "--baseline-trace")
+    try:
+        report = regression_check.evaluate(current_nt, baseline_nt, specs)
+    except ValueError as exc:
+        raise typer.BadParameter(f"cannot check these inputs: {exc}") from exc
+    if json_out:
+        try:
+            regression_check.save_atomic(report, json_out)
+        except OSError as exc:
+            raise typer.BadParameter(f"cannot write report: {_load_reason(exc)}") from exc
+    _render_check(report, limit=limit)
+    raise typer.Exit(_CHECK_EXIT[report.verdict])
 
 
 @phoenix_app.command(name="diagnose")
