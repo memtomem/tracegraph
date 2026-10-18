@@ -1283,8 +1283,8 @@ def ingest(
     error_channel: str = typer.Option(
         "error",
         help="State channel that signals a step error. A step is an error where the channel "
-             "first holds one or is written with a different one; the same error written "
-             "again is disclosed, not recorded.",
+             "first holds one; a node writing it again while it is set is disclosed, not "
+             "recorded.",
     ),
     graph: str = typer.Option(
         None,

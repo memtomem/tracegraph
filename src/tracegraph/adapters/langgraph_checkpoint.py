@@ -21,10 +21,10 @@ langgraph-checkpoint 4.x):
   adapter re-sequences globally when declared cross-namespace parentage needs it.
 * ``metadata["writes"]`` is **not** reliably populated by ``list()``; instead we read the
   serialized ``channel_values``. A step "introduced" an error when a designated error
-  channel (default ``"error"``) is truthy at that checkpoint but falsy at its parent, or, at a
-  checkpoint a node wrote, holds a *different* error than its parents in the same namespace.
-  The same error written again (its ``channel_versions`` entry moved) cannot be told from a
-  node passing the state through, so it is disclosed, not recorded (``_error_introduced``).
+  channel (default ``"error"``) is truthy at that checkpoint but falsy at its parent. A node
+  writing the channel again while it still holds an error may have failed again, or may only
+  have passed the state through (a reducer can change the value either way); a checkpoint
+  cannot tell which, so such a write is disclosed, not recorded (``_error_introduced``).
 * the producing node's name is recovered best-effort from the parent checkpoint's
   internal ``branch:to:<node>`` channel; absent that, ``name`` is left unset.
 
@@ -361,11 +361,13 @@ class LangGraphCheckpointAdapter:
             ns = key_by_step_id[step_id][0]
             parent_cps = [(checkpoints[pid], key_by_step_id[pid][0] == ns)
                           for pid in parents_by_step.get(step_id, [])]
-            # Only a checkpoint a node wrote is compared by value: an input, an update and a
+            # Only a checkpoint a node wrote can disclose a rewrite: an input, an update and a
             # fork (``update_state(..., as_node="__copy__")`` copies state, linked to the copied
             # checkpoint's parent) carry what the caller supplied.
-            by_value = step.source is StepSource.LOOP and not no_producer
-            err, rewritten = self._error_introduced(checkpoints[step_id], parent_cps, by_value=by_value)
+            node_written = step.source is StepSource.LOOP and not no_producer
+            err, rewritten = self._error_introduced(
+                checkpoints[step_id], parent_cps, node_written=node_written
+            )
             rewritten_errors += rewritten
             if err is not None:
                 step.status = StepStatus.ERROR
@@ -403,9 +405,9 @@ class LangGraphCheckpointAdapter:
         if rewritten_errors:
             disclosures.add(
                 "langgraph.rewritten_error_channel",
-                f"{rewritten_errors} checkpoint(s) rewrote the error channel with the error it "
-                "already held; a repeated failure there cannot be told from a node passing the "
-                "state through, so none was recorded.",
+                f"{rewritten_errors} checkpoint(s) wrote the error channel while it already held "
+                "an error; a repeated failure there cannot be told from a node passing the state "
+                "through, so none was recorded.",
                 rewritten_errors,
             )
 
@@ -1147,20 +1149,20 @@ class LangGraphCheckpointAdapter:
         return None
 
     def _error_introduced(
-        self, cp: dict, parent_cps: list[tuple[dict, bool]], *, by_value: bool
+        self, cp: dict, parent_cps: list[tuple[dict, bool]], *, node_written: bool
     ) -> tuple[str | None, bool]:
-        """The error message iff a failure is recorded at this checkpoint, and whether its error
-        channel was rewritten with the error it already held (a failure that cannot be told
-        from a node passing the state through).
+        """The error message iff the error first appears at this checkpoint, and whether a node
+        wrote the error channel here while it already held an error.
 
-        ``parent_cps`` pairs each causal parent with whether it is in this checkpoint's
-        namespace. A truthy error in a parent from another namespace, or (without
-        ``by_value``, for a checkpoint no node wrote) in any parent, means the error was
-        already present upstream, as it always has. Within the namespace, a parent holding a
-        *different* error does not: the channel was written with a new one, which is how a
-        retry that fails again with another message shows up. The same error held again is a
-        failure only if it was rewritten, which the channel's version shows but cannot
-        attribute, so it is reported back instead of recorded.
+        An error is introduced where the channel is truthy and every causal parent's is falsy.
+        ``parent_cps`` pairs each parent with whether it is in this checkpoint's namespace.
+        A node writing the channel again while it is set may have failed again or only have
+        passed the state through, and a reducer can change the value in either case, so that
+        write is reported back to be disclosed, never recorded as a failure. It is detected
+        only at a checkpoint a node wrote (``node_written``) and only against same-namespace
+        parents, the channel's own history: by a moved ``channel_versions`` entry, or, without
+        versions, by a different value. A set error held by a parent in another namespace (a
+        subgraph's entry or exit) is propagation, not a write here.
         """
         channel = self._error_channel
         current = cp.get("channel_values", {}).get(channel)
@@ -1169,19 +1171,19 @@ class LangGraphCheckpointAdapter:
         held = [(parent.get("channel_values", {}).get(channel), parent, same_ns)
                 for parent, same_ns in parent_cps]
         held = [(value, parent, same_ns) for value, parent, same_ns in held if value]
-        if not by_value:
-            return (None, False) if held else (str(current), False)
-        if any(not same_ns for _, _, same_ns in held):
-            return None, False
-        same = [parent for value, parent, _ in held if _same_error(value, current)]
-        if not same:
+        if not held:
             return str(current), False
+        if not node_written or any(not same_ns for _, _, same_ns in held):
+            return None, False
         version = cp.get("channel_versions", {}).get(channel)
-        rewritten = version is not None and any(
-            parent.get("channel_versions", {}).get(channel) not in (None, version)
-            for parent in same
-        )
-        return None, rewritten
+
+        def rewritten(value: Any, parent: dict) -> bool:
+            before = parent.get("channel_versions", {}).get(channel)
+            if version is not None and before is not None:
+                return before != version
+            return not _same_error(value, current)
+
+        return None, any(rewritten(value, parent) for value, parent, _ in held)
 
 
 def _same_error(a: Any, b: Any) -> bool:

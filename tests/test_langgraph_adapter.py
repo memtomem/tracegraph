@@ -583,8 +583,10 @@ def _ingest_run(graph, saver_kind="memory", inputs=({"error": None, "attempts": 
 @pytest.mark.parametrize("clear, same_message, n_errors, rewritten", [
     (True, True, 2, None),
     (True, False, 2, None),
-    (False, False, 2, None),  # a different message is a new write: recorded (was 1)
-    (False, True, 1, 1),      # the same message again: not recorded, but disclosed
+    # The key still set: the second attempt is not recorded (the value cannot prove a failure)
+    # but disclosed, whatever its message.
+    (False, False, 1, 1),
+    (False, True, 1, 1),
 ])
 def test_a_retry_that_fails_again_is_recorded_or_disclosed(saver_kind, clear, same_message,
                                                          n_errors, rewritten):
@@ -592,14 +594,15 @@ def test_a_retry_that_fails_again_is_recorded_or_disclosed(saver_kind, clear, sa
     assert [name for name, _ in errors] == ["call_tool"] * n_errors
     assert gaps.get("langgraph.rewritten_error_channel") == rewritten
     if rewritten:
-        assert any("rewrote the error channel" in w for w in raw.ingest_warnings)
+        assert any("wrote the error channel while it already held an error" in w
+                   for w in raw.ingest_warnings)
         from tracegraph import artifact
 
         reread = artifact.loads(artifact.dumps(normalize(raw)))
         assert {g.code: g.count for g in reread.trace.capture.gaps} == gaps
 
 
-@pytest.mark.parametrize("same_message, n_errors, rewritten", [(True, 1, 2), (False, 2, 1)])
+@pytest.mark.parametrize("same_message, n_errors, rewritten", [(True, 1, 2), (False, 1, 2)])
 def test_a_node_returning_the_whole_state_is_never_a_failure(same_message, n_errors, rewritten):
     errors, gaps, _ = _ingest_run(
         _retry_graph(clear=False, same_message=same_message, passthrough=True)
@@ -624,11 +627,29 @@ def test_a_handler_passing_the_state_through_is_disclosed_not_failed():
     assert gaps["langgraph.rewritten_error_channel"] == 1
 
 
-def test_a_handler_that_rewords_the_error_is_recorded_as_a_failure():
-    # Documented limit: a checkpoint does not say which node raised, so a new error value is
-    # read as a new failure even when a handler only reworded it.
-    errors, _, _ = _ingest_run(_handled_graph(lambda s: {"error": "handled: " + s["error"]}))
-    assert errors == [("call_tool", "tool failed"), ("handler", "handled: tool failed")]
+def test_a_handler_that_rewords_the_error_is_disclosed_not_failed():
+    errors, gaps, _ = _ingest_run(_handled_graph(lambda s: {"error": "handled: " + s["error"]}))
+    assert errors == [("call_tool", "tool failed")]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
+
+
+class _ListErrorState(TypedDict):
+    error: Annotated[list[str], add]
+    log: Annotated[list, add]
+
+
+def test_a_reducer_that_grows_the_error_is_disclosed_not_failed():
+    # A healthy handler returning the whole state doubles a list-reducer error channel: the
+    # value changes although nothing failed again.
+    g = StateGraph(_ListErrorState)
+    g.add_node("call_tool", lambda s: {"error": ["tool failed"]})
+    g.add_node("handler", lambda s: dict(s))
+    g.add_edge(START, "call_tool")
+    g.add_edge("call_tool", "handler")
+    g.add_edge("handler", END)
+    errors, gaps, _ = _ingest_run(g, inputs=({"error": [], "log": []},))
+    assert [name for name, _ in errors] == ["call_tool"]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
 
 
 def test_continuation_input_is_never_a_failure_or_a_rewrite():
@@ -673,10 +694,10 @@ def test_an_outer_error_is_not_a_new_failure_after_a_subgraph_returns():
     assert [(s.name, s.error_msg) for s in root if s.status is StepStatus.ERROR] == [
         ("fail_outer", "outer-error")
     ]
-    # Inside the subgraph, the node that wrote a different error is now recorded.
-    inner_errors = [s for s in raw.steps if ":" in s.step_id and s.error_msg == "inner-error"]
-    assert [s.name for s in inner_errors] == ["inner_fail"]
-    assert "langgraph.rewritten_error_channel" not in gaps
+    # Inside the subgraph, the node that wrote another error over the propagated one is
+    # disclosed, not recorded; the return to the outer namespace discloses nothing.
+    assert not [s for s in raw.steps if s.error_msg == "inner-error"]
+    assert gaps["langgraph.rewritten_error_channel"] == 1
 
 
 def _linear(*values, versions=None):
@@ -718,12 +739,14 @@ def test_a_value_that_can_be_neither_compared_nor_rendered_counts_as_persisted()
     adapter = LangGraphCheckpointAdapter(_StubSaver([]))
     cp = {"channel_values": {"error": Opaque()}, "channel_versions": {"error": "2"}}
     parent = {"channel_values": {"error": Opaque()}, "channel_versions": {"error": "1"}}
-    assert adapter._error_introduced(cp, [(parent, True)], by_value=True) == (None, True)
+    assert adapter._error_introduced(cp, [(parent, True)], node_written=True) == (None, True)
+    del cp["channel_versions"]  # without versions, an incomparable value is the same one
+    assert adapter._error_introduced(cp, [(parent, True)], node_written=True) == (None, False)
 
 
-def test_without_versions_a_new_value_is_a_failure_and_the_same_one_is_not_disclosed():
+def test_without_versions_a_new_value_is_disclosed_and_the_same_one_is_not():
     errors, gaps = _linear(None, "A", "B")
-    assert errors == ["001", "002"] and gaps == {}
+    assert errors == ["001"] and gaps == {"langgraph.rewritten_error_channel": 1}
     errors, gaps = _linear(None, "A", "A")
     assert errors == ["001"] and gaps == {}
     errors, gaps = _linear(None, "A", "A", versions=["1", "2", "3"])
@@ -731,7 +754,7 @@ def test_without_versions_a_new_value_is_a_failure_and_the_same_one_is_not_discl
 
 
 @pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
-@pytest.mark.parametrize("second, n_errors, rewritten", [("B", 2, None), ("A", 1, 1)])
+@pytest.mark.parametrize("second, n_errors, rewritten", [("B", 1, 1), ("A", 1, 1)])
 def test_a_fork_copy_is_neither_a_failure_nor_a_rewrite(saver_kind, second, n_errors, rewritten):
     # update_state(..., as_node="__copy__") runs no node: it copies a checkpoint and links the
     # copy to that checkpoint's parent, so comparing it by value would read copied state as a
