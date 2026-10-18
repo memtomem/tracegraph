@@ -3,7 +3,7 @@
 ## 현재 전달 상태 — 2026-10-18, `361ad03` 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `361ad03`(PR #86 병합)이고,
-  그 위의 `c4d3b7d`(PR #88)는 버전과 CHANGELOG만 바꿨다. 시작 전에
+  그 위의 `c4d3b7d`(PR #88)는 버전·`uv.lock`·CHANGELOG·이 문서만 바꿨고 제품 소스는 그대로다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
 - **0.5.0 공개 완료(2026-10-18).** `agent-tracegraph` 0.5.0이 PyPI 최신이다. `test-v0.5.0`과 `v0.5.0`이
   모두 `c4d3b7d`를 가리킨다. 0.4.0은 artifact v1~v5만 읽으므로 v7을 쓰는 이 릴리스는 minor다. 범위는
