@@ -705,3 +705,23 @@ def test_a_task_failure_lost_to_a_malformed_write_cannot_decide_topology():
     assert _one(_run(malformed, clean, SHAPE)) == "INSUFFICIENT_EVIDENCE"
     assert _one(_run(recorded, malformed, SHAPE)) == "INSUFFICIENT_EVIDENCE"
     assert _one(_run(recorded, clean, SHAPE)) == "FAIL"
+
+
+OMITS_STEPS = ["langgraph.malformed_pending_writes", "langgraph.undecided_interrupt",
+               "langgraph.unapplied_command_goto", "langgraph.unknown_send_target"]
+
+
+@pytest.mark.parametrize("code", OMITS_STEPS)
+@pytest.mark.parametrize("rule", [FAILURES, pattern("tool-failure"), pattern("tool-retry-failure"), SHAPE])
+def test_every_rule_treats_a_possibly_missing_step_as_unknown(code, rule):
+    def lg(status, gaps=None):
+        return _trace("t", [("x", TOOL, "call_tool", status)], source="langgraph", links=None, gaps=gaps)
+    # A step that may be missing from the current blocks PASS; from the baseline, FAIL.
+    assert _one(_run(lg(OK, {code: 1}), lg(OK), rule)) == "INSUFFICIENT_EVIDENCE"
+    against_gapped_baseline = _one(_run(lg(ERR), lg(OK, {code: 1}), rule))
+    if rule == pattern("tool-retry-failure"):
+        # The current has no retry match at all; a step missing from the baseline can only add
+        # baseline matches, so "not increased" stands.
+        assert against_gapped_baseline == "PASS"
+    else:
+        assert against_gapped_baseline == "INSUFFICIENT_EVIDENCE"

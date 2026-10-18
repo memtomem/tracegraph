@@ -125,7 +125,7 @@ because no source records which step of one run is which step of another; two sa
 trading which one fails is not detected (`analyze --baseline` shows the positional view).
 Evidence that is unknown is never read as zero. When something the selected rule depends on is
 unknown — an `unset` status, a value the adapter substituted (`unknown_fields`) or a missing
-name on a step the rule could count, or a capture gap that can hide a failure — it blocks PASS
+name on a step the rule could count, or a capture gap that may have left a step out of the artifact — it blocks PASS
 on the current side and FAIL on the baseline side, so the rule reports `INSUFFICIENT_EVIDENCE`.
 Unknowns a rule cannot count leave it decided: an unset CHAIN does not block
 `pattern-not-increased:tool-failure`, and a withheld error message blocks only `timeout`.
