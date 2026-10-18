@@ -323,6 +323,16 @@ def _select_trace(adapter: Any, trace_id: str | None, *, what: str) -> str:
     return ids[0]
 
 
+def _require_selected_trace(
+    nt: NormalizedTrace, source: str, trace_id: str | None, option: str
+) -> None:
+    """An artifact holds exactly one trace, so a selector on it must name that trace."""
+    if trace_id is not None and trace_id != nt.trace.trace_id:
+        raise typer.BadParameter(
+            f"{source} holds trace {nt.trace.trace_id!r}, not {trace_id!r}", param_hint=option
+        )
+
+
 def _load_analysis_source(
     source: str, trace_id: str | None = None, *, option: str = "--trace"
 ) -> NormalizedTrace:
@@ -360,10 +370,8 @@ def _load_analysis_input(
         validate_normalized(nt)
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot load analysis input {source}: {_load_reason(exc)}") from exc
-    if kind == "artifact" and trace_id is not None and trace_id != nt.trace.trace_id:
-        raise typer.BadParameter(
-            f"{source} holds trace {nt.trace.trace_id!r}, not {trace_id!r}", param_hint=option
-        )
+    if kind == "artifact":
+        _require_selected_trace(nt, source, trace_id, option)
     return _AnalysisInput(nt, kind)
 
 
@@ -1087,13 +1095,14 @@ def ingest_otlp(
 @app.command(name="ingest-phoenix")
 def ingest_phoenix(
     file: str = typer.Option(..., "--file", "-f", help="Phoenix CLI trace JSON or '-' for stdin."),
-    trace: str = typer.Option(None, "--trace", "-t", help="traceId (required for multi-trace exports)."),
+    trace: str = typer.Option(None, "--trace", "-t", help="traceId (required for multi-trace exports); on an artifact it must be the artifact's own."),
     out: Path = typer.Option(None, "--out", "-o", help="Body-free artifact path."),
 ) -> None:
     """Ingest one Phoenix CLI trace export into a body-free portable artifact."""
     try:
         payload = load_json(_read_source(file))
-        if isinstance(payload, dict) and "schema_version" in payload:
+        is_artifact = isinstance(payload, dict) and "schema_version" in payload
+        if is_artifact:
             nt = artifact.from_obj(payload)
         else:
             # Forced adapter: this command names the format, so no shape routing. A document
@@ -1107,6 +1116,8 @@ def ingest_phoenix(
         raise typer.BadParameter(f"cannot load analysis input {file}: {_load_reason(exc)}") from exc
     if nt.trace.source_kind != "phoenix_cli":
         raise typer.BadParameter("--file must contain a Phoenix CLI trace export")
+    if is_artifact:
+        _require_selected_trace(nt, file, trace, "--trace")
     target = out or artifact.default_path(nt.trace.trace_id)
     _distinct_paths([Path(file)] if file != "-" else [], [target])
     _save_ingested(nt, target, explicit=out is not None)

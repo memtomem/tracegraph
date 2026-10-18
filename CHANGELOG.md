@@ -113,8 +113,13 @@ explicitly.
   with `Invalid value for --trace: <input> holds trace '<id>', not '<selector>'` (or
   `--baseline-trace`) and writes no report, as `check` already did and as a missing trace in an
   OTLP or Phoenix export does. A selector naming the artifact's own trace is still accepted, and
-  the report is byte-identical to the one without it. `ingest-phoenix` given a Phoenix-sourced
-  artifact still ignores `--trace` (#69).
+  the report is byte-identical to the one without it.
+- **`ingest-phoenix --trace` no longer ignores the selector on a Phoenix-sourced artifact** (#69).
+  Re-ingesting such an artifact with a selector naming another trace exited 0 and re-saved the
+  artifact's own trace. It now exits 2 with the same message as `analyze` and writes nothing, to
+  `--out` or to the default path. A matching selector re-saves the artifact byte for byte, as
+  before. An artifact from any other source keeps its existing error, `--file must contain a
+  Phoenix CLI trace export`.
 
 ## 0.4.0 - 2026-10-14
 
