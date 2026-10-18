@@ -909,8 +909,8 @@ def _no_valid_artifacts(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
 
 def _strict_refused(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
     return typer.BadParameter(
-        f"--strict: {len(skipped)} discovered file(s) are not tracegraph artifacts (listed "
-        "above); fix or remove them, or drop --strict to skip them"
+        f"--strict: {len(skipped)} discovered file(s) could not be loaded as tracegraph "
+        "artifacts (listed above); fix or remove them, or drop --strict to skip them"
     )
 
 

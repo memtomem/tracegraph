@@ -3085,3 +3085,19 @@ def test_query_strict_refusal_precedes_a_deferred_matching_failure(tmp_path, mon
     res = runner.invoke(app, ["query", "error", str(d), "--strict"])
     assert res.exit_code == 2
     assert "--strict: 1 discovered" in _panel_text(res.stderr)
+
+
+def test_export_review_candidates_strict_refusal_never_calls_the_writer(tmp_path, monkeypatch):
+    d = _corrupt_beside_clean(tmp_path)
+    out = tmp_path / "absent" / "candidates.json"
+
+    def no_write(*args, **kwargs):
+        raise AssertionError("the report writer ran on a strict refusal")
+
+    monkeypatch.setattr(cli_mod, "save_candidate_report", no_write)
+    res = runner.invoke(
+        app, ["export-review-candidates", "tool-failure", str(d), "-o", str(out), "--strict"]
+    )
+    assert res.exit_code == 2, res.output
+    assert "could not be loaded as tracegraph artifacts" in _panel_text(res.stderr)
+    assert not out.exists() and not out.parent.exists()
