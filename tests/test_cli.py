@@ -2975,3 +2975,129 @@ def test_ladybug_label_failure_stays_the_context_of_a_close_failure(
     assert isinstance(res.exception, OSError), res.output
     assert str(res.exception) == "close broke"
     assert isinstance(res.exception.__context__, _Injected)
+
+
+# --- --strict: a skipped directory file fails the batch (#50) -------------------------------
+
+
+def _corrupt_beside_clean(tmp_path):
+    """The #50 shape: the run holding the tool failure is truncated; the other run is clean."""
+    d = tmp_path / "arts"
+    d.mkdir()
+    _failing_traces(d, "A")
+    (d / "A.json").write_text((d / "A.json").read_text()[:40], encoding="utf-8")
+    _write_linear_trace(d / "B.json", "B", ("plan", StepKind.CHAIN, StepStatus.OK))
+    return d
+
+
+def test_query_skipped_corrupt_artifact_passes_a_no_match_gate_without_strict(tmp_path):
+    d = _corrupt_beside_clean(tmp_path)
+    res = runner.invoke(app, ["query", "tool-failure", str(d)])
+    assert res.exit_code == 1  # the leniency #50 is about, unchanged by default
+    assert "A.json" in _panel_text(res.stderr)
+
+
+@pytest.mark.parametrize("backend", ["memory", "ladybug"])
+def test_query_strict_fails_on_a_skipped_directory_file(tmp_path, backend):
+    if backend == "ladybug":
+        _ladybug_store()
+    d = _corrupt_beside_clean(tmp_path)
+    res = runner.invoke(app, ["query", "tool-failure", str(d), "--strict", "--backend", backend])
+    assert res.exit_code == 2
+    err = _panel_text(res.stderr)
+    assert err.index("skipped 1 non-artifact file(s): A.json") < err.index("--strict: 1 discovered")
+    assert "no matches" not in res.stdout and "match(es)" not in res.stdout
+
+
+def test_query_strict_with_only_strays_reports_strict_not_no_valid_artifacts(tmp_path):
+    d = tmp_path / "arts"
+    d.mkdir()
+    (d / "stray.json").write_text("{}", encoding="utf-8")
+    res = runner.invoke(app, ["query", "error", str(d), "--strict"])
+    assert res.exit_code == 2
+    err = _panel_text(res.stderr)
+    assert "--strict: 1 discovered" in err and "no valid artifacts" not in err
+
+
+def test_query_strict_yields_to_an_explicit_load_error_and_precedes_duplicates(tmp_path):
+    d = tmp_path / "arts"
+    d.mkdir()
+    a, = _failing_traces(d, "A")
+    (d / "stray.json").write_text("{}", encoding="utf-8")
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not json", encoding="utf-8")
+    res = runner.invoke(app, ["query", "error", str(d), str(bad), "--strict"])
+    assert res.exit_code == 2
+    assert "cannot load artifact" in _panel_text(res.stderr)
+    dup = tmp_path / "again.json"
+    dup.write_bytes(a.read_bytes())
+    res = runner.invoke(app, ["query", "error", str(d), str(dup), "--strict"])
+    assert res.exit_code == 2
+    err = _panel_text(res.stderr)
+    assert "--strict: 1 discovered" in err and "duplicate trace_id" not in err
+
+
+@pytest.mark.parametrize("extra", [[], ["--limit", "1"], ["--explain"]])
+def test_query_strict_without_strays_changes_nothing(tmp_path, extra):
+    d = tmp_path / "arts"
+    d.mkdir()
+    _failing_traces(d, "A", "B")
+    plain = runner.invoke(app, ["query", "error", str(d), *extra])
+    strict = runner.invoke(app, ["query", "error", str(d), *extra, "--strict"])
+    assert (strict.exit_code, strict.stdout, strict.stderr) == (
+        plain.exit_code, plain.stdout, plain.stderr
+    )
+
+
+def test_export_review_candidates_strict_fails_and_leaves_the_output_alone(tmp_path):
+    d = _corrupt_beside_clean(tmp_path)
+    out = tmp_path / "candidates.json"
+    res = runner.invoke(app, ["export-review-candidates", "tool-failure", str(d), "-o", str(out)])
+    assert res.exit_code == 0 and out.exists()  # default: exported with a skip warning
+    before = out.read_bytes()
+    res = runner.invoke(
+        app, ["export-review-candidates", "tool-failure", str(d), "-o", str(out), "--strict"]
+    )
+    assert res.exit_code == 2
+    assert "--strict: 1 discovered" in _panel_text(res.stderr)
+    assert out.read_bytes() == before
+
+
+def test_export_review_candidates_strict_without_strays_writes_the_same_report(tmp_path):
+    d = tmp_path / "arts"
+    d.mkdir()
+    _write_linear_trace(d / "B.json", "B", ("plan", StepKind.CHAIN, StepStatus.OK))
+    plain, strict = tmp_path / "plain.json", tmp_path / "strict.json"
+    runner.invoke(app, ["export-review-candidates", "tool-failure", str(d), "-o", str(plain)])
+    res = runner.invoke(
+        app, ["export-review-candidates", "tool-failure", str(d), "-o", str(strict), "--strict"]
+    )
+    assert res.exit_code == 0, res.output
+    assert strict.read_bytes() == plain.read_bytes()
+
+
+def test_query_strict_refusal_precedes_a_deferred_matching_failure(tmp_path, monkeypatch):
+    d = tmp_path / "arts"
+    d.mkdir()
+    _failing_traces(d, "A")
+    (d / "stray.json").write_text("{}", encoding="utf-8")
+    _break_memory_matcher(monkeypatch)
+    res = runner.invoke(app, ["query", "error", str(d), "--strict"])
+    assert res.exit_code == 2
+    assert "--strict: 1 discovered" in _panel_text(res.stderr)
+
+
+def test_export_review_candidates_strict_refusal_never_calls_the_writer(tmp_path, monkeypatch):
+    d = _corrupt_beside_clean(tmp_path)
+    out = tmp_path / "absent" / "candidates.json"
+
+    def no_write(*args, **kwargs):
+        raise AssertionError("the report writer ran on a strict refusal")
+
+    monkeypatch.setattr(cli_mod, "save_candidate_report", no_write)
+    res = runner.invoke(
+        app, ["export-review-candidates", "tool-failure", str(d), "-o", str(out), "--strict"]
+    )
+    assert res.exit_code == 2, res.output
+    assert "could not be loaded as tracegraph artifacts" in _panel_text(res.stderr)
+    assert not out.exists() and not out.parent.exists()

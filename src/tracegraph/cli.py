@@ -907,6 +907,13 @@ def _no_valid_artifacts(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
     )
 
 
+def _strict_refused(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
+    return typer.BadParameter(
+        f"--strict: {len(skipped)} discovered file(s) could not be loaded as tracegraph "
+        "artifacts (listed above); fix or remove them, or drop --strict to skip them"
+    )
+
+
 def _duplicate_trace_id(tid: str, first: Path, again: Path) -> typer.BadParameter:
     return typer.BadParameter(
         f"duplicate trace_id {tid!r}: {first} and {again}. Each artifact "
@@ -915,7 +922,7 @@ def _duplicate_trace_id(tid: str, first: Path, again: Path) -> typer.BadParamete
 
 
 def _load_many_evidence(
-    paths: list[Path], *, exclude: Path | None = None
+    paths: list[Path], *, exclude: Path | None = None, strict: bool = False
 ) -> list[_LoadedArtifact]:
     """Expand files and directories (``*.json``) into a list of validated traces.
 
@@ -924,7 +931,8 @@ def _load_many_evidence(
     (configs, exports), so a globbed ``*.json`` that isn't a valid artifact is skipped (with
     a warning) rather than crashing the whole query. An **explicitly named** file is
     **strict**: if the user points directly at a file, a load failure is a clean, fatal
-    error — they meant that file.
+    error — they meant that file. With ``strict``, a skipped directory file is an error too,
+    raised after the skip warning, so a corrupt artifact cannot silently drop out of a batch.
 
     Rejects duplicate ``trace_id`` across the loaded set. The portable artifact is a system
     of record keyed by ``trace_id``, so two files claiming the same id are ambiguous — and
@@ -951,6 +959,8 @@ def _load_many_evidence(
             skipped.append((f, _load_reason(exc)))
 
     _warn_skipped(skipped)
+    if strict and skipped:
+        raise _strict_refused(skipped)
     if not loaded:
         raise _no_valid_artifacts(skipped)
 
@@ -1093,7 +1103,13 @@ class _QueryPass:
 
 
 def _query_pass(
-    paths: list[Path], pattern, backend: QueryBackend, *, limit: int | None, keep_traces: bool
+    paths: list[Path],
+    pattern,
+    backend: QueryBackend,
+    *,
+    limit: int | None,
+    keep_traces: bool,
+    strict: bool = False,
 ) -> _QueryPass:
     """Load, validate and match one artifact at a time, keeping only what ``query`` prints.
 
@@ -1120,6 +1136,8 @@ def _query_pass(
         _warn_skipped(scan.skipped)
         raise
     _warn_skipped(scan.skipped)
+    if strict and scan.skipped:
+        raise _strict_refused(scan.skipped)
     if not scan.n_traces:
         raise _no_valid_artifacts(scan.skipped)
     if scan.duplicate is not None:
@@ -1679,6 +1697,12 @@ def query(
         case_sensitive=False,
         help="Query backend to use for pattern matching and optional explanations.",
     ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail (exit 2) if a directory holds a *.json file that is not a valid artifact, "
+             "instead of skipping it with a warning.",
+    ),
 ) -> None:
     """Find a causal pattern across one or many traces. Exits 1 if no match is found."""
     pattern = PRESETS.get(preset)
@@ -1688,7 +1712,9 @@ def query(
         )
     if limit is not None and limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
-    found = _query_pass(artifacts, pattern, backend, limit=limit, keep_traces=explain)
+    found = _query_pass(
+        artifacts, pattern, backend, limit=limit, keep_traces=explain, strict=strict
+    )
     matches = found.matches
     # --explain stores are built lazily below, AFTER --limit truncation, so a 10-of-500
     # cap opens at most 10 backend DBs regardless of how many traces matched.
@@ -1765,6 +1791,12 @@ def export_review_candidates(
         case_sensitive=False,
         help="Pattern-matching backend; both backends produce identical candidates.",
     ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail (exit 2) if a directory holds a *.json file that is not a valid artifact, "
+             "instead of skipping it with a warning.",
+    ),
 ) -> None:
     """Export body-free, versioned governance review candidates. Empty matches succeed."""
     pattern = PRESETS.get(preset)
@@ -1775,7 +1807,7 @@ def export_review_candidates(
     if not is_review_exportable(pattern):
         raise typer.BadParameter(f"preset {preset!r} is not review-exportable")
 
-    loaded = _load_many_evidence(artifacts, exclude=out)
+    loaded = _load_many_evidence(artifacts, exclude=out, strict=strict)
     traces = [item.trace for item in loaded]
     matches = _search_with_backend(traces, pattern, backend)
     traces_by_id = {item.trace.trace.trace_id: item.trace for item in loaded}
