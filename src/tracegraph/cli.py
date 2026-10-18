@@ -6,6 +6,7 @@ Every source is normalized into the same raw causal DAG plus derived structural 
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -389,6 +390,14 @@ def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECON
         raise _PxError(
             "Phoenix CLI `px` was not found; install/configure @arizeai/phoenix-cli first"
         ) from exc
+    except OSError as exc:
+        # The OS's own text for the errno, never str(exc): an OSError's message is caller-supplied.
+        detail = os.strerror(exc.errno) if isinstance(exc.errno, int) else type(exc).__name__
+        hint = (
+            "; check that `px` on PATH is an executable file"
+            if exc.errno in (errno.EACCES, errno.ENOEXEC) else ""
+        )
+        raise _PxError(f"Phoenix CLI `px` failed with an OS error ({detail}){hint}") from exc
     except subprocess.TimeoutExpired as exc:
         raise _PxError(f"{action} timed out after {timeout} seconds") from exc
     except subprocess.CalledProcessError as exc:
