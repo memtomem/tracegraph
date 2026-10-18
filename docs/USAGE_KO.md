@@ -478,6 +478,12 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
   task·interrupt·scheduled step은 표시하지 않습니다.
 - OTLP의 `graph.node.parent_id`를 시작 시각으로 골랐거나 따르지 못하고 `parentSpanId`를 쓴
   경우에도 gap으로 남고, stderr 경고가 새로 한 줄 나옵니다.
+- OTLP span link 중 원인으로 기록하지 못한 것도 종류별로 gap이 됩니다. 이 trace를 가리키지만
+  export에 없는 span을 가리키는 link는 `otlp.unresolved_span_link`, trace를 지정하지 않은 link는
+  `otlp.unscoped_span_link`, 다른 trace를 가리키는 link는 `otlp.foreign_trace_link`입니다. 앞의
+  두 개는 이 trace의 span이 export에서 빠졌을 수 있다는 뜻이라 `check`에서 step이 빠졌을 수 있는
+  gap과 똑같이 다룹니다. trace를 넘는 원인은 어차피 비교하지 않으므로 마지막 것은 판정에
+  영향을 주지 않습니다.
 - 새로 ingest한 artifact의 digest와, 그것으로 만든 분석 보고서·incident memo의 digest가
   바뀝니다. 보고서·memo 형식, 그 밖의 CLI 출력, exit code는 그대로입니다.
 

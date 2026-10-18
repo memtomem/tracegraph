@@ -444,7 +444,11 @@ Missing observed errors still do not
 prove success: an artifact ingested by an older build, or one using an unrecognized checkpoint
 layout, carries no derived step and looks exactly like a clean run, which is why the capture
 disclosure is unconditional. Link preservation
-means valid in-trace links only. Structural diff compares the derived tree and discloses
+means valid in-trace links only: `declared_dag` and `links_preserved` say how links were read,
+not that every declared link resolved. A link that names this trace but no span in the export,
+names no trace, or names another trace is not recorded as a cause; each kind is disclosed on
+stderr and recorded as a capture gap (`otlp.unresolved_span_link`, `otlp.unscoped_span_link`,
+`otlp.foreign_trace_link`), and `check` treats the first two like a step that may be missing. Structural diff compares the derived tree and discloses
 lossy step counts. Metrics sum available span observations: partial coverage and producer
 aggregation can undercount or double count. Coverage gaps are disclosed rather than absorbed
 — a wall duration derived from a subset of steps says so, one whose end precedes its start is

@@ -46,6 +46,7 @@ Documented MVP assumptions:
 
 from __future__ import annotations
 
+from collections import Counter
 import heapq
 import json
 from datetime import datetime, timezone
@@ -738,6 +739,7 @@ class OTLPSpanAdapter:
         causes: dict[str, list[str]] = {sid: [] for sid in by_id}
         seen: set[tuple[str, str]] = set()
         origins: dict[tuple[str, str], EdgeOrigin] = {}
+        dropped: Counter[str] = Counter()  # links not recorded as causes, by capture gap code
 
         def add(effect: str, cause: str, origin: EdgeOrigin) -> None:
             if cause == effect or (effect, cause) in seen:
@@ -768,10 +770,14 @@ class OTLPSpanAdapter:
                     lsid = _first(link, "spanId", "span_id")
                     if any(value is not None and not isinstance(value, str) for value in (link_trace, lsid)):
                         raise ValueError("links[].traceId and spanId must be strings")
-                    if link_trace != own_trace:
-                        continue
-                    if lsid in by_id:
+                    if not link_trace:
+                        dropped["otlp.unscoped_span_link"] += 1
+                    elif link_trace != own_trace:
+                        dropped["otlp.foreign_trace_link"] += 1
+                    elif lsid and lsid in by_id:
                         add(sid, lsid, EdgeOrigin.SPAN_LINK)
+                    else:
+                        dropped["otlp.unresolved_span_link"] += 1
         if by_timing:
             disclosures.add(
                 "otlp.graph_parent_by_timing",
@@ -785,6 +791,26 @@ class OTLPSpanAdapter:
                 f"{fallback} span(s) declare a graph.node.parent_id that resolves to no single "
                 "preceding span; their parentSpanId was used instead.",
                 fallback,
+            )
+        if n := dropped["otlp.unresolved_span_link"]:
+            disclosures.add(
+                "otlp.unresolved_span_link",
+                f"{n} span link(s) name this trace but no span in the export; no cause was "
+                "recorded for them (the export may be partial).",
+                n,
+            )
+        if n := dropped["otlp.unscoped_span_link"]:
+            disclosures.add(
+                "otlp.unscoped_span_link",
+                f"{n} span link(s) name no trace; they were not recorded as causes, though they "
+                "may refer to a span of this trace, which may be missing from the export.",
+                n,
+            )
+        if n := dropped["otlp.foreign_trace_link"]:
+            disclosures.add(
+                "otlp.foreign_trace_link",
+                f"{n} span link(s) name another trace; cross-trace causes are not recorded.",
+                n,
             )
         return causes, origins
 

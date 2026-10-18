@@ -550,3 +550,54 @@ def test_an_update_from_the_input_checkpoint_is_not_exempt():
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
     [update] = [s for s in raw.steps if s.source is StepSource.UPDATE]
     assert update.unknown_fields == ["kind", "name"]
+
+
+# --- dropped OTLP span links (#49) ------------------------------------------------------------
+
+
+def _linked(*links):
+    span = _span("b")
+    span["links"] = list(links)
+    return _doc(_span("a"), span)
+
+
+@pytest.mark.parametrize("link, code", [
+    ({"traceId": "t", "spanId": "ghost"}, "otlp.unresolved_span_link"),
+    ({"traceId": "t", "spanId": ""}, "otlp.unresolved_span_link"),
+    ({"traceId": "t"}, "otlp.unresolved_span_link"),
+    ({"spanId": "a"}, "otlp.unscoped_span_link"),
+    ({"traceId": "", "spanId": "a"}, "otlp.unscoped_span_link"),
+    ({"spanId": "ghost"}, "otlp.unscoped_span_link"),
+    ({"traceId": "other", "spanId": "a"}, "otlp.foreign_trace_link"),
+])
+def test_a_dropped_span_link_is_a_gap_of_its_kind(link, code):
+    raw = OTLPSpanAdapter(_linked(link)).ingest("t")
+    assert gap_counts(raw) == {code: 1}
+    assert [e.dst for e in raw.causal_edges if e.src == "b"] == []
+    assert len(raw.ingest_warnings) == 1
+
+
+def test_dropped_span_links_are_counted_per_kind_and_resolved_ones_are_not_gaps():
+    raw = OTLPSpanAdapter(_linked(
+        {"traceId": "t", "spanId": "a"},
+        {"traceId": "t", "spanId": "ghost"}, {"traceId": "t", "spanId": "ghost2"},
+        {"spanId": "a"},
+        {"traceId": "other", "spanId": "a"},
+    )).ingest("t")
+    assert gap_counts(raw) == {"otlp.foreign_trace_link": 1, "otlp.unresolved_span_link": 2,
+                               "otlp.unscoped_span_link": 1}
+    assert [e.dst for e in raw.causal_edges if e.src == "b"] == ["a"]
+    assert raw.ingest_warnings == [
+        "2 span link(s) name this trace but no span in the export; no cause was recorded for "
+        "them (the export may be partial).",
+        "1 span link(s) name no trace; they were not recorded as causes, though they may refer "
+        "to a span of this trace, which may be missing from the export.",
+        "1 span link(s) name another trace; cross-trace causes are not recorded.",
+    ]
+    nt = normalize(raw)
+    assert gap_counts(artifact.loads(artifact.dumps(nt))) == gap_counts(raw)
+
+
+def test_links_not_read_as_causes_are_not_gaps():
+    raw = OTLPSpanAdapter(_linked({"traceId": "t", "spanId": "ghost"}), links_as_causes=False).ingest("t")
+    assert gap_counts(raw) == {}
