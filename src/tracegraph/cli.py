@@ -13,6 +13,8 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
@@ -113,6 +115,7 @@ def _max_artifact_bytes() -> int:
 _PX_MIN_VERSION = (1, 0, 4)
 _PX_SCAN_LIMIT = 20
 _PX_TIMEOUT_SECONDS = 60
+_PX_POLL_SECONDS = 0.05
 _PX_VERSION_RE = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)")
 
 
@@ -376,16 +379,82 @@ def _load_analysis_input(
     return _AnalysisInput(nt, kind)
 
 
+class _PxOutputTooLarge(Exception):
+    """``px`` wrote more to stdout than ``TRACEGRAPH_MAX_ARTIFACT_BYTES`` allows."""
+
+
+def _px_exec(command: list[str], *, timeout: float) -> bytes:
+    """Run ``px`` and return its stdout, held to the artifact byte ceiling.
+
+    Stdout goes to an anonymous temporary file rather than a pipe, and one thread polls both the
+    child and the file's size: overflow, then the deadline, then exit are checked in that order
+    with nothing to race, and a descendant that inherits stdout cannot hold a pipe open. The
+    cost is disk instead of memory, up to about one poll interval past the limit. ``px`` is
+    trusted like any executable the user installed: it is stopped and reaped, but processes it
+    starts are not contained, and one still writing after ``px`` exits keeps the unlinked file
+    growing until it stops. The capture is the file up to its size once ``px``'s exit has been
+    observed. Stderr is
+    discarded, as it was never shown. Raises what ``subprocess.run(check=True, timeout=...)``
+    raised, plus :class:`_PxOutputTooLarge`; the child is killed and reaped on every early exit.
+    """
+    limit = _max_artifact_bytes()
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.DEVNULL
+        )
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    returncode = proc.wait(
+                        timeout=max(0.0, min(_PX_POLL_SECONDS, deadline - time.monotonic()))
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if limit and os.fstat(out.fileno()).st_size > limit:
+                    raise _PxOutputTooLarge
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(command, timeout)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        # The same order holds when the exit was observed only after the deadline.
+        size = os.fstat(out.fileno()).st_size
+        if limit and size > limit:
+            raise _PxOutputTooLarge
+        if time.monotonic() > deadline:
+            raise subprocess.TimeoutExpired(command, timeout)
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, command)
+        return _read_px_output(out, size)
+
+
+def _read_px_output(out: Any, size: int) -> bytes:
+    """The first ``size`` bytes of the captured stdout, ``size`` sampled after ``px`` exited.
+
+    A process ``px`` left behind shares the file's offset. Rewinding it would let a write landing
+    between the rewind and the read overwrite the capture, so on POSIX the bytes are read by
+    position (``os.pread``) and the offset is never moved. Elsewhere the file is rewound, which
+    leaves that race open.
+    """
+    if hasattr(os, "pread"):
+        buf = bytearray()
+        while len(buf) < size:
+            chunk = os.pread(out.fileno(), min(_READ_CHUNK_BYTES, size - len(buf)), len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        return bytes(buf)
+    out.seek(0)
+    return out.read(size)
+
+
 def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECONDS) -> str:
     """Run one read-only ``px`` command without echoing its potentially-sensitive output."""
     try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        stdout = _px_exec(command, timeout=timeout)
     except FileNotFoundError as exc:
         raise _PxError(
             "Phoenix CLI `px` was not found; install/configure @arizeai/phoenix-cli first"
@@ -405,7 +474,15 @@ def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECON
             f"{action} failed with exit {exc.returncode}; verify Phoenix endpoint, authentication, "
             "and project configuration"
         ) from exc
-    return result.stdout
+    except _PxOutputTooLarge as exc:
+        raise _PxError(
+            f"{action} output exceeded the {_max_artifact_bytes()}-byte limit; raise "
+            "TRACEGRAPH_MAX_ARTIFACT_BYTES, or set it to 0 to disable the limit"
+        ) from exc
+    try:
+        return stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _PxError(f"{action} returned output that is not UTF-8 text") from exc
 
 
 def _px_floor() -> str:

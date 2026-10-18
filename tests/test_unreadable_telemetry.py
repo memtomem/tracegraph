@@ -12,10 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 from test_capture_provenance import gap_counts
+from test_cli import _patch_px
 from typer.testing import CliRunner
 
 from tracegraph import artifact
-from tracegraph import cli as cli_mod
 from tracegraph.adapters import OTLPSpanAdapter, PhoenixExportAdapter
 from tracegraph.analysis.diagnose import analyze
 from tracegraph.cli import app
@@ -394,7 +394,7 @@ def test_cli_phoenix_diagnose_discloses_on_stderr(tmp_path, monkeypatch, explici
             return SimpleNamespace(stdout=json.dumps([payload]))
         raise AssertionError(f"unexpected px command: {command}")
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    _patch_px(monkeypatch, fake_run)
     saved = tmp_path / "a.json"
     args = ["phoenix", "diagnose", *(["phx"] if explicit else []), "--save-artifact", str(saved)]
     result = runner.invoke(app, args)
