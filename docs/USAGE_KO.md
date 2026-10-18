@@ -180,7 +180,8 @@ exit code가 판정입니다. `0`은 PASS, `1`은 FAIL(규칙 위반이 확실�
 이름의 step 둘이 실패를 서로 바꾼 경우는 잡지 못하며, 위치 기준 비교는 `analyze --baseline`이
 보여 줍니다. 모르는 증거는 0으로 세지 않습니다. 선택한 규칙이 세는 step의 `unset` status, adapter가
 대신 채운 값(`unknown_fields`)이나 없는 이름, step을 artifact에서 빠뜨렸을 수 있는 capture gap이 현재 쪽에 있으면
-PASS를, baseline 쪽에 있으면 FAIL을 낼 수 없어 INSUFFICIENT_EVIDENCE가 됩니다. 규칙이 셀 수 없는
+PASS를, baseline 쪽에 있으면 FAIL을 낼 수 없어 INSUFFICIENT_EVIDENCE가 됩니다. topology 규칙은 개수가
+아니라 트리를 비교하므로, step을 빠뜨렸을 수 있는 gap이 어느 쪽에 있든 관측된 트리가 같아도 판정 불가입니다. 규칙이 셀 수 없는
 미지는 판정을 막지 않습니다. 예를 들어 `unset` CHAIN은 `pattern-not-increased:tool-failure`를
 막지 않고, 보관하지 않은 오류 메시지는 `timeout`만 막습니다. source가 다르거나 수집 provenance가
 없는(artifact v7 이전) 쌍은 모든 규칙에서, 인과 설정이 다르거나 ingest 때 인과 edge를 추정으로
