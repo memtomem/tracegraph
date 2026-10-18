@@ -8,6 +8,7 @@ import re
 import subprocess
 from types import SimpleNamespace
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -707,6 +708,61 @@ def test_px_descendant_holding_stdout_does_not_hold_the_call(tmp_path):
         assert time.monotonic() - started < 10
     finally:
         os.kill(int(pid_file.read_text()), 9)
+
+
+def test_px_output_written_after_the_exit_size_is_not_captured(tmp_path, monkeypatch):
+    # A process px leaves behind writes after the size was sampled; the capture stops there.
+    go, done = tmp_path / "go", tmp_path / "done"
+    writer = (
+        "import os, sys, time\n"
+        f"deadline = time.monotonic() + 30\n"
+        f"while not os.path.exists({str(go)!r}) and time.monotonic() < deadline:\n"
+        "    time.sleep(0.01)\n"
+        "sys.stdout.write('BBBB'); sys.stdout.flush()\n"
+        f"open({str(done)!r}, 'w').close()\n"
+    )
+    command = _px_script(tmp_path, f"""
+        import subprocess
+        sys.stdout.write("AAAA"); sys.stdout.flush()
+        subprocess.Popen([sys.executable, "-c", {writer!r}])
+    """)
+    real = cli_mod._read_px_output
+
+    def at_the_boundary(out, size):
+        go.touch()
+        deadline = time.monotonic() + 10
+        while not done.exists():
+            assert time.monotonic() < deadline, "the late writer never wrote"
+            time.sleep(0.01)
+        return real(out, size)
+
+    monkeypatch.setattr(cli_mod, "_read_px_output", at_the_boundary)
+    assert cli_mod._px_run(command, action="px probe") == "AAAA"
+
+
+@pytest.mark.skipif(not hasattr(os, "pread"), reason="positional reads are POSIX")
+def test_px_capture_read_does_not_rewind_the_shared_offset():
+    # Every process px left behind writes through the same file offset. A reader that rewound it
+    # would let a write landing between its seek and its read overwrite the capture.
+    class SharedOffset:
+        def __init__(self, f):
+            self._f = f
+
+        def fileno(self):
+            return self._f.fileno()
+
+        def seek(self, *args):
+            position = self._f.seek(*args)
+            os.write(self._f.fileno(), b"BBBB")  # the descendant, right after the rewind
+            return position
+
+        def read(self, size=-1):
+            return self._f.read(size)
+
+    with tempfile.TemporaryFile() as f:
+        f.write(b"AAAA")
+        f.flush()
+        assert cli_mod._read_px_output(SharedOffset(f), 4) == b"AAAA"
 
 
 def test_px_overflow_wins_over_a_passed_deadline(tmp_path, monkeypatch):

@@ -389,8 +389,11 @@ def _px_exec(command: list[str], *, timeout: float) -> bytes:
     Stdout goes to an anonymous temporary file rather than a pipe, and one thread polls both the
     child and the file's size: overflow, then the deadline, then exit are checked in that order
     with nothing to race, and a descendant that inherits stdout cannot hold a pipe open. The
-    cost is disk instead of memory, up to about one poll interval past the limit; a descendant
-    still writing after ``px`` exits keeps the unlinked file growing until it stops. Stderr is
+    cost is disk instead of memory, up to about one poll interval past the limit. ``px`` is
+    trusted like any executable the user installed: it is stopped and reaped, but processes it
+    starts are not contained, and one still writing after ``px`` exits keeps the unlinked file
+    growing until it stops. The capture is the file up to its size once ``px``'s exit has been
+    observed. Stderr is
     discarded, as it was never shown. Raises what ``subprocess.run(check=True, timeout=...)``
     raised, plus :class:`_PxOutputTooLarge`; the child is killed and reaped on every early exit.
     """
@@ -418,17 +421,34 @@ def _px_exec(command: list[str], *, timeout: float) -> bytes:
                 proc.kill()
                 proc.wait()
         # The same order holds when the exit was observed only after the deadline.
-        if limit and os.fstat(out.fileno()).st_size > limit:
+        size = os.fstat(out.fileno()).st_size
+        if limit and size > limit:
             raise _PxOutputTooLarge
         if time.monotonic() > deadline:
             raise subprocess.TimeoutExpired(command, timeout)
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, command)
-        out.seek(0)
-        try:
-            return bytes(_read_bounded(out))
-        except ValueError as exc:  # a descendant appended after the size check
-            raise _PxOutputTooLarge from exc
+        return _read_px_output(out, size)
+
+
+def _read_px_output(out: Any, size: int) -> bytes:
+    """The first ``size`` bytes of the captured stdout, ``size`` sampled after ``px`` exited.
+
+    A process ``px`` left behind shares the file's offset. Rewinding it would let a write landing
+    between the rewind and the read overwrite the capture, so on POSIX the bytes are read by
+    position (``os.pread``) and the offset is never moved. Elsewhere the file is rewound, which
+    leaves that race open.
+    """
+    if hasattr(os, "pread"):
+        buf = bytearray()
+        while len(buf) < size:
+            chunk = os.pread(out.fileno(), min(_READ_CHUNK_BYTES, size - len(buf)), len(buf))
+            if not chunk:
+                break
+            buf += chunk
+        return bytes(buf)
+    out.seek(0)
+    return out.read(size)
 
 
 def _px_run(command: list[str], *, action: str, timeout: int = _PX_TIMEOUT_SECONDS) -> str:

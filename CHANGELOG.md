@@ -135,8 +135,11 @@ explicitly.
   echoing the output: doctor `FAIL` exit 1, diagnose exit 2. Stderr is discarded; it was never
   shown. Two smaller changes come with it. Output that is not UTF-8 is now reported as such:
   before, `doctor` printed the codec error and `diagnose` crashed with a traceback. And a
-  descendant of `px` that keeps stdout open no longer holds the call until the timeout. Timeout,
-  nonzero-exit and launch-error messages are unchanged.
+  descendant of `px` that keeps stdout open no longer holds the call until the timeout, and
+  the capture stops at the size sampled once `px` has exited, read by position on POSIX so a
+  descendant's later writes cannot overwrite it. Such descendants are not
+  stopped: `px` is trusted like any installed executable. Timeout, nonzero-exit and
+  launch-error messages are unchanged.
 - **`SECURITY.md` now states the `ingest --graph` trust boundary** (#55). It said tracegraph
   "does not execute graphs" and called a checkpoint database the one input that can run code,
   but `--graph` imports the module you name, running its top-level code, and then runs the
