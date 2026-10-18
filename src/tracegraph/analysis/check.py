@@ -46,8 +46,16 @@ CHECK_KIND: Final = "tracegraph.check"
 Outcome = Literal["PASS", "FAIL", "INSUFFICIENT_EVIDENCE"]
 
 #: What each capture gap can hide. A code this build does not know is assumed to hide all of it.
-_HIDES_FAILURES = frozenset({"langgraph.malformed_pending_writes", "langgraph.undecided_interrupt"})
-_HIDES_SCHEDULED = frozenset({"langgraph.unapplied_command_goto", "langgraph.unknown_send_target"})
+#: Every one of these gaps means a step may be missing from the artifact — a failed or paused
+#: task whose write could not be read, or a task the supplied graph would schedule but that
+#: could not be listed — and a missing step's status, kind and name are all unknown, so every
+#: rule treats them alike.
+_MAY_OMIT_STEPS = frozenset({
+    "langgraph.malformed_pending_writes",
+    "langgraph.undecided_interrupt",
+    "langgraph.unapplied_command_goto",
+    "langgraph.unknown_send_target",
+})
 _HEURISTIC_EDGES = frozenset({"otlp.graph_parent_by_timing", "otlp.graph_parent_fallback"})
 
 LANGGRAPH_LIMITATION = (
@@ -280,10 +288,10 @@ def _could_be_hidden(nt: NormalizedTrace, pattern: PathPattern) -> bool:
 
     A step is relevant only when a predicate constrains a field that is unknown on it and the
     step's known fields satisfy the rest; an unset CHAIN cannot become a failing TOOL, and a step
-    between gap endpoints is constrained by nothing. A gap that can hide a failure counts for any
-    preset that constrains status.
+    between gap endpoints is constrained by nothing. A gap that may have omitted a step counts
+    for every preset: nothing about the missing step is known.
     """
-    if any(pred.status is not None for pred in pattern.steps) and _gap_hides(nt, _HIDES_FAILURES):
+    if _gap_hides(nt, _MAY_OMIT_STEPS):
         return True
     constrained = _constrained(pattern)
     for step in nt.steps:
@@ -375,7 +383,7 @@ def _failure_counts(nt: NormalizedTrace) -> tuple[Counter, dict, int, bool]:
     open_ended = (
         unknown_signature > 0
         or any(step.status is StepStatus.UNSET for step in nt.steps)
-        or _gap_hides(nt, _HIDES_FAILURES)
+        or _gap_hides(nt, _MAY_OMIT_STEPS)
     )
     return by_signature, ids, unknown_signature, open_ended
 
@@ -489,12 +497,11 @@ def _topology_rule(
     reasons = _causal_reasons(current, baseline)
     if not same_projection:
         reasons.append("the traces' derived trees were projected under different rules")
-    if (current.trace.schedule_graph, baseline.trace.schedule_graph) != (None, None):
-        if current.trace.schedule_graph != baseline.trace.schedule_graph:
-            reasons.append("the traces were read against different compiled graphs")
-        for label, nt in (("current", current), ("baseline", baseline)):
-            if _gap_hides(nt, _HIDES_SCHEDULED):
-                reasons.append(f"{label}: some scheduled tasks could not be listed at ingest")
+    if current.trace.schedule_graph != baseline.trace.schedule_graph:
+        reasons.append("the traces were read against different compiled graphs")
+    for label, nt in (("current", current), ("baseline", baseline)):
+        if _gap_hides(nt, _MAY_OMIT_STEPS):
+            reasons.append(f"{label}: some steps may be missing from the artifact")
     if compare == "labels":
         for label, nt in (("current", current), ("baseline", baseline)):
             if any(not _signature_known(step) for step in nt.steps):

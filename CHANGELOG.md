@@ -15,9 +15,10 @@ explicitly.
   `pattern-not-increased:<preset>`, `topology-unchanged[:shape]`; no default set). Exits 0 PASS,
   1 FAIL, 3 INSUFFICIENT_EVIDENCE, 2 invalid input (no report written). Rules compare counts
   per step `(kind, name)`; unknown evidence the selected rule depends on — an `unset` status, a
-  substituted value or missing name on a step it could count, a capture gap that can hide a
-  failure, or an artifact without capture provenance — blocks PASS on the current side and
-  FAIL on the baseline side instead of counting as zero. Pairs from different
+  substituted value or missing name on a step it could count, a capture gap that may have
+  left a step out of the artifact, or an artifact without capture provenance — blocks PASS on the current side and
+  FAIL on the baseline side instead of counting as zero (a step-omitting gap on either side makes
+  the topology rule insufficient, since it compares trees, not counts). Pairs from different
   sources are insufficient for every rule, and pairs read with different causal settings for the
   rules that read causal structure. New contract `tracegraph.check` v1
   (`contracts/check-report.schema.json`), bound to both canonical artifact digests and each

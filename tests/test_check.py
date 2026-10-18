@@ -678,3 +678,50 @@ def test_the_model_holds_the_schema_constraints():
             Draft202012Validator(SCHEMA).validate(payload)
         with pytest.raises(ValueError):
             check.CheckReport.model_validate(payload)
+
+
+# --- review of the merged range ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("code", ["langgraph.malformed_pending_writes", "langgraph.undecided_interrupt",
+                                  "otlp.from_a_newer_writer"])
+def test_a_gap_that_can_hide_task_steps_blocks_topology(code):
+    def lg(gaps=None):
+        return _trace("t", [("x", CHAIN, None, OK)], source="langgraph", links=None, gaps=gaps)
+    for pair in ((lg({code: 1}), lg()), (lg(), lg({code: 1}))):
+        assert _one(_run(*pair, SHAPE)) == "INSUFFICIENT_EVIDENCE"
+
+
+def test_a_task_failure_lost_to_a_malformed_write_cannot_decide_topology():
+    from test_langgraph_adapter import _StubSaver, _ck
+
+    def ingest(writes):
+        return normalize(LangGraphCheckpointAdapter(_StubSaver([_ck("c1", "", 1, None, pending_writes=writes)])).ingest("A"))
+
+    malformed = ingest([("task-x", "__error__")])            # not a (task, channel, value) triple
+    recorded = ingest([("task-x", "__error__", "RuntimeError('boom')")])
+    clean = ingest([])
+    assert len(recorded.steps) == len(malformed.steps) + 1  # the recorded write adds a task step
+    assert _one(_run(malformed, clean, SHAPE)) == "INSUFFICIENT_EVIDENCE"
+    assert _one(_run(recorded, malformed, SHAPE)) == "INSUFFICIENT_EVIDENCE"
+    assert _one(_run(recorded, clean, SHAPE)) == "FAIL"
+
+
+OMITS_STEPS = ["langgraph.malformed_pending_writes", "langgraph.undecided_interrupt",
+               "langgraph.unapplied_command_goto", "langgraph.unknown_send_target"]
+
+
+@pytest.mark.parametrize("code", OMITS_STEPS)
+@pytest.mark.parametrize("rule", [FAILURES, pattern("tool-failure"), pattern("tool-retry-failure"), SHAPE])
+def test_every_rule_treats_a_possibly_missing_step_as_unknown(code, rule):
+    def lg(status, gaps=None):
+        return _trace("t", [("x", TOOL, "call_tool", status)], source="langgraph", links=None, gaps=gaps)
+    # A step that may be missing from the current blocks PASS; from the baseline, FAIL.
+    assert _one(_run(lg(OK, {code: 1}), lg(OK), rule)) == "INSUFFICIENT_EVIDENCE"
+    against_gapped_baseline = _one(_run(lg(ERR), lg(OK, {code: 1}), rule))
+    if rule == pattern("tool-retry-failure"):
+        # The current has no retry match at all; a step missing from the baseline can only add
+        # baseline matches, so "not increased" stands.
+        assert against_gapped_baseline == "PASS"
+    else:
+        assert against_gapped_baseline == "INSUFFICIENT_EVIDENCE"
