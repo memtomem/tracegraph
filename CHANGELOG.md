@@ -127,6 +127,15 @@ explicitly.
   message: `doctor` prints `FAIL` and exits 1, `diagnose` exits 2, as for their other `px`
   failures. When the OS refused to launch `px`, the message adds a hint to check that `px` on
   PATH is an executable file.
+- **`SECURITY.md` now states the `ingest --graph` trust boundary** (#55). It said tracegraph
+  "does not execute graphs" and called a checkpoint database the one input that can run code,
+  but `--graph` imports the module you name, running its top-level code, and then runs the
+  graph's state callbacks while reading. A new section says what runs (no node does), that
+  checkpoint payloads stay under the empty serializer allowlist while the named code itself is
+  unsandboxed, and that the graph is never inferred. A table at the top separates JSON parsing,
+  hardened checkpoint deserialization and explicitly supplied graph code. The same file no
+  longer says piped stdin is read without a size cap: since direct OTLP analysis (#63), `-` goes
+  through the same `TRACEGRAPH_MAX_ARTIFACT_BYTES` ceiling as a named file. Documentation only.
 
 ## 0.4.0 - 2026-10-14
 
