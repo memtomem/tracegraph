@@ -3,12 +3,14 @@
 ## 현재 전달 상태 — 2026-10-18, `361ad03` 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `361ad03`(PR #86 병합)이고,
-  이 문서는 그 위에 문서만 더한다. 시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
-  PyPI 최신은 여전히 0.4.0이고, 아래 표의 제품 변경 PR #78·#80·#81·#83·#84·#86은 0.4.0 이후의 다른 변경과 함께
-  `CHANGELOG.md`의 `0.5.0 - 2026-10-18`에 있다. 0.4.0은 artifact v1~v5만 읽으므로 v7을 쓰는 이번 릴리스는
-  minor인 0.5.0이다. 준비 커밋은 브랜치 `release/0.5.0`에 있고, 남은 순서는 병합 → `test-v0.5.0` 예행 →
-  `v0.5.0`이다.
-- **0.5.0 노트에서 놓치기 쉬운 동작 변경**(아래 `b18fd1a` 기준 절의 것에 더해). 전체 목록은
+  그 위의 `c4d3b7d`(PR #88)는 버전과 CHANGELOG만 바꿨다. 시작 전에
+  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
+- **0.5.0 공개 완료(2026-10-18).** `agent-tracegraph` 0.5.0이 PyPI 최신이다. `test-v0.5.0`과 `v0.5.0`이
+  모두 `c4d3b7d`를 가리킨다. 0.4.0은 artifact v1~v5만 읽으므로 v7을 쓰는 이 릴리스는 minor다. 범위는
+  `CHANGELOG.md`의 `0.5.0 - 2026-10-18`, 업그레이드 주의는
+  [GitHub Release v0.5.0](https://github.com/memtomem/tracegraph/releases/tag/v0.5.0)의 "Before you upgrade"에 있다.
+  릴리스 검증은 아래 "남은 결정과 후속 항목" 5번에 적었다. 그다음 릴리스에 들어갈 변경은 아직 없다.
+- **0.5.0에서 놓치기 쉬운 동작 변경**(아래 `b18fd1a` 기준 절의 것에 더해). 전체 목록은
   `CHANGELOG.md` `0.5.0 - 2026-10-18`의 해당 항목이다:
   - library writer `artifact.save()`/`save_atomic()`가 reader가 거부할 trace를 쓰지 않고 `ValueError`
     (pydantic `ValidationError` 포함)를 낸다(PR #83). 잘못된 타입의 `seq`는 이전엔 raw `TypeError`였고,
@@ -36,6 +38,8 @@
 | #83 | `737e889` | #67: 두 writer가 model round-trip → `validate_normalized` → 검증된 복사본 직렬화 순으로 확인한 뒤에만 쓴다. `dumps()`만 남은 `TypeError`는 #82로 등록 |
 | #84 | `d5e31e4` | #49: OTLP importer가 cause로 기록하지 못한 span link를 종류별 stderr 한 줄과 capture gap으로 공시. 앞의 두 코드는 `check`의 `_MAY_OMIT_STEPS`에 들어간다 |
 | #86 | `361ad03` | #47: 오류 채널이 이미 set인 동안 node가 그 채널을 다시 쓰면 공시만 한다(`langgraph.rewritten_error_channel`). 실패 기록 규칙은 그대로. `check`는 count rule을 gap 쪽으로 one-sided로, success 의존 pattern을 INSUFFICIENT_EVIDENCE로 읽는다. subgraph `__start__`의 중복 기록은 #85로 등록 |
+| #87 | `9bb37a5` | 이 절의 handoff 문서(문서만) |
+| #88 | `c4d3b7d` | 0.5.0 준비: 버전 0.4.0 → 0.5.0, CHANGELOG 날짜, 리뷰 3라운드가 찾은 릴리스 노트 오류 4건 수정 |
 
 ### 이번 세션의 결정(2026-10-18, PR #78~#86)
 
@@ -86,8 +90,20 @@
 3. **기능 제안:** #60(명시한 trace 묶음의 반복 인과 패턴 요약). 이슈가 #54의 bounded query와 함께
    설계하라고 하므로 #79 결정 뒤가 맞다.
 4. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
-5. **0.5.0 릴리스:** [릴리스 런북](releasing.md) 3~5단계(병합 → `test-v0.5.0` 예행과 게시 파일 검증 →
-   `v0.5.0`). GitHub Release 노트에는 위와 `b18fd1a` 기준 절의 동작 변경을 넣을 것.
+5. **0.5.0 릴리스: 완료(2026-10-18).** [릴리스 런북](releasing.md)대로 했다.
+   - 준비 PR #88의 로컬 게이트: `pytest` 1541 passed, `twine@7.0.0 check` 통과, sdist 38 members 모두 허용
+     목록 안. 리뷰 3라운드가 PR마다 쌓인 CHANGELOG 문장 중 릴리스 전체로는 틀린 것 4개를 찾았다(#63의
+     "still unbounded", `check`의 provenance 설명, 노트북의 "every core command", `inspect`의 "unchanged").
+   - TestPyPI 예행: [run 39132870808](https://github.com/memtomem/tracegraph/actions/runs/39132870808).
+     production: [run 39136213678](https://github.com/memtomem/tracegraph/actions/runs/39136213678).
+   - wheel `c69a3080…f092`, sdist `56cbef8d…0371`. 예행 build, TestPyPI 파일, production build,
+     PyPI 파일이 바이트 단위로 같고, 두 파일 모두 `release.yml`·`pypi` environment의 publish
+     attestation이 있다.
+   - TestPyPI와 PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치(Python 3.12.11)에서
+     `scripts/verify_wheel.py` 통과(cypher backend parity 포함). PyPI description은 `v0.5.0`의
+     `README.md`와 바이트 단위로 같고 페이지는 HTTP 200, `uvx --from agent-tracegraph==0.5.0`은 바로 설치됐다.
+   - [GitHub Release v0.5.0](https://github.com/memtomem/tracegraph/releases/tag/v0.5.0)은 prerelease로
+     만들었다. 노트는 claims 리뷰 2라운드를 거쳤다(12건, 7건. 2라운드 7건 중 3건은 1라운드 수정에서 나왔다).
 
 ---
 
