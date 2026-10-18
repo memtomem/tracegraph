@@ -495,6 +495,11 @@ def _topology_rule(
         for label, nt in (("current", current), ("baseline", baseline)):
             if _gap_hides(nt, _HIDES_SCHEDULED):
                 reasons.append(f"{label}: some scheduled tasks could not be listed at ingest")
+    for label, nt in (("current", current), ("baseline", baseline)):
+        # A failed or paused task the read could not record is a node missing from the tree,
+        # so the same gaps that hide failures hide structure.
+        if _gap_hides(nt, _HIDES_FAILURES):
+            reasons.append(f"{label}: some task or interrupt steps may be missing from the tree")
     if compare == "labels":
         for label, nt in (("current", current), ("baseline", baseline)):
             if any(not _signature_known(step) for step in nt.steps):
