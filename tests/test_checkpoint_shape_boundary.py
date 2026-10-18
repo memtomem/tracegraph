@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
+from test_capture_provenance import gap_counts, without_provenance
 from typer.testing import CliRunner
 
 from tracegraph import artifact
@@ -91,7 +92,10 @@ BASELINE_DIGEST = "sha256:000d30f2acd313b3f73cfec9053583feccad4f8f31a0ffea554077
 
 
 def _digest(raw) -> str:
-    return "sha256:" + hashlib.sha256(artifact.dumps(normalize(raw)).encode()).hexdigest()
+    # Without capture provenance, which postdates the baseline: stripping it must leave exactly
+    # the bytes that build produced.
+    nt = without_provenance(normalize(raw))
+    return "sha256:" + hashlib.sha256(artifact.dumps(nt).encode()).hexdigest()
 NEWEST = 0  # SqliteSaver lists newest first; this one has a parent
 
 _BOUNDARY_PHRASES = ("malformed", "has no id", "has no thread_id", "has no checkpoint_id", "disagrees",
@@ -231,7 +235,9 @@ def test_a_legacy_checkpoint_layout_is_accepted():
 
 
 def test_valid_history_is_byte_identical():
-    assert _digest(_ingest(_tuples())) == BASELINE_DIGEST
+    raw = _ingest(_tuples())
+    assert _digest(raw) == BASELINE_DIGEST
+    assert gap_counts(raw) == {}
 
 
 # --- pending writes ------------------------------------------------------------------------
@@ -245,6 +251,7 @@ def test_malformed_writes_are_ignored_and_disclosed():
     raw = _ingest(tuples)
     assert _digest(raw) == BASELINE_DIGEST
     assert any(w.startswith("5 pending write(s)") for w in raw.ingest_warnings), raw.ingest_warnings
+    assert gap_counts(raw) == {"langgraph.malformed_pending_writes": 5}
     assert "abc" not in json.dumps(raw.ingest_warnings)
 
 

@@ -54,6 +54,7 @@ from pathlib import Path
 import re
 from typing import Any, Iterator
 
+from tracegraph.adapters.base import Disclosures
 from tracegraph.input_validation import loads, object_field
 
 from tracegraph.model import (
@@ -71,6 +72,7 @@ from tracegraph.model import (
     StepSource,
     StepStatus,
     Trace,
+    UnknownField,
 )
 
 _SPAN_KIND_ATTR = "openinference.span.kind"
@@ -191,7 +193,8 @@ def _exception_message(span: dict) -> str | None:
     return None
 
 
-def _status(span: dict) -> tuple[StepStatus, str | None]:
+def _status(span: dict) -> tuple[StepStatus, str | None, bool]:
+    """Status, message, and whether the message is a stand-in for one the span did not send."""
     st = object_field(span.get("status"), "status")
     code = st.get("code")
     if isinstance(code, bool):
@@ -199,14 +202,15 @@ def _status(span: dict) -> tuple[StepStatus, str | None]:
         raise ValueError("status.code must be OK, ERROR, or UNSET")
     exception = _exception_message(span)
     if code in (1, "STATUS_CODE_OK", "OK"):
-        return StepStatus.OK, None
+        return StepStatus.OK, None, False
     if code in (2, "STATUS_CODE_ERROR", "ERROR"):
-        return StepStatus.ERROR, st.get("message") or exception or "error"
+        message = st.get("message") or exception
+        return StepStatus.ERROR, message or "error", not message
     if code not in (0, "STATUS_CODE_UNSET", "UNSET", None):
         raise ValueError("status.code must be OK, ERROR, or UNSET")
     if exception is not None:
-        return StepStatus.ERROR, exception
-    return StepStatus.UNSET, None
+        return StepStatus.ERROR, exception, False
+    return StepStatus.UNSET, None, False
 
 
 def _parse_nanos(value: Any) -> int | None:
@@ -453,27 +457,37 @@ class OTLPSpanAdapter:
             for sid, span in by_id.items()
             if _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano")) is None
         }
-        causes, origins = self._causes(by_id, attrs, prerank, parent_span, untimed)
+        disclosures = Disclosures()
+        causes, origins = self._causes(by_id, attrs, prerank, parent_span, untimed, disclosures)
         seq = self._topo_seq(by_id, causes, prerank)
 
         steps: list[Step] = []
         for sid in by_id:
             span = by_id[sid]
-            status, err = _status(span)
+            status, err, fallback = _status(span)
             if status is StepStatus.UNSET and not self._preserve_unset_status:
                 status = StepStatus.OK
+            declared_kind = str(attrs[sid].get(_SPAN_KIND_ATTR, "")).upper()
+            unknown: list[UnknownField] = []
+            if status is StepStatus.ERROR and (fallback or not self._include_error_messages):
+                unknown.append("error_msg")
+            if declared_kind not in _KIND_MAP:
+                unknown.append("kind")
+            if not span.get("name"):
+                unknown.append("name")
             steps.append(
                 Step(
                     step_id=sid,
                     trace_id=trace_id,
                     seq=seq[sid],
                     ts=_iso_ts(_first(span, "startTimeUnixNano", "start_time_unix_nano")),
-                    kind=_KIND_MAP.get(str(attrs[sid].get(_SPAN_KIND_ATTR, "")).upper(), StepKind.CHAIN),
+                    kind=_KIND_MAP.get(declared_kind, StepKind.CHAIN),
                     source=StepSource.LOOP,  # spans carry no LangGraph source semantics
                     name=span.get("name"),
                     status=status,
                     error_msg=err if self._include_error_messages else None,
                     evidence=_evidence(span, attrs[sid], self._evaluation_channel),
+                    unknown_fields=unknown,
                 )
             )
         steps.sort(key=lambda s: s.seq)
@@ -510,29 +524,36 @@ class OTLPSpanAdapter:
                 )
             )
         )
-        warnings = (
-            [
+        if unreadable:
+            disclosures.add(
+                "otlp.unreadable_timestamp",
                 f"{unreadable} span(s) carry a start or end timestamp that cannot be read as a "
                 "time; that timestamp, and any duration derived from it, is reported as "
-                "unavailable."
-            ]
-            if unreadable
-            else []
-        )
+                "unavailable.",
+                unreadable,
+            )
         dropped = [_unreadable_telemetry(attrs[sid]) for sid in by_id]
-        for kind, consequence in (
-            ("token count", "that count is reported as unavailable"),
-            ("prompt or completion cost", "that cost is reported as unavailable"),
-            ("total cost", "the run's total cost is withheld rather than understated"),
-            ("cost currency", "that cost is reported without a currency"),
+        for kind, code, consequence in (
+            ("token count", "otlp.unreadable_token_count", "that count is reported as unavailable"),
+            ("prompt or completion cost", "otlp.unreadable_component_cost",
+             "that cost is reported as unavailable"),
+            ("total cost", "otlp.unreadable_total_cost",
+             "the run's total cost is withheld rather than understated"),
+            ("cost currency", "otlp.unreadable_cost_currency",
+             "that cost is reported without a currency"),
         ):
             count = sum(1 for found in dropped if kind in found)
             if count:
                 names = ", ".join(sorted(set().union(*(found.get(kind, set()) for found in dropped))))
-                warnings.append(
-                    f"{count} span(s) carry a {kind} that cannot be read ({names}); {consequence}."
+                disclosures.add(
+                    code,
+                    f"{count} span(s) carry a {kind} that cannot be read ({names}); {consequence}.",
+                    count,
                 )
-        return RawTrace(trace=trace, steps=steps, causal_edges=edges, ingest_warnings=warnings)
+        trace.capture = disclosures.capture()
+        return RawTrace(
+            trace=trace, steps=steps, causal_edges=edges, ingest_warnings=list(disclosures.texts)
+        )
 
     # --- helpers ---
 
@@ -699,8 +720,14 @@ class OTLPSpanAdapter:
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
         untimed: set[str],
+        disclosures: Disclosures,
     ) -> tuple[dict[str, list[str]], dict[tuple[str, str], EdgeOrigin]]:
-        """Reconstruct ``effect -> [causes]`` from declared signals: one parent + links."""
+        """Reconstruct ``effect -> [causes]`` from declared signals: one parent + links.
+
+        A logical parent chosen by start time among several candidates, or not honored at all,
+        is a heuristic edge; each is counted as a capture gap, since a comparison of two traces
+        cannot tell such an edge from a declared one.
+        """
         node_index: dict[str, list[str]] = {}
         if self._prefer_graph_parent:
             for sid in sorted(by_id, key=lambda s: prerank[s]):  # prerank order
@@ -719,10 +746,13 @@ class OTLPSpanAdapter:
             causes[effect].append(cause)
             origins[(effect, cause)] = origin
 
+        by_timing = fallback = 0
         for sid in by_id:
-            parent, parent_origin = self._resolve_parent(
+            parent, parent_origin, resolution = self._resolve_parent(
                 sid, attrs, node_index, prerank, parent_span, untimed
             )
+            by_timing += resolution == "by_timing"
+            fallback += resolution == "fallback"
             if parent is not None:
                 add(sid, parent, parent_origin)
             if self._links_as_causes:
@@ -742,6 +772,20 @@ class OTLPSpanAdapter:
                         continue
                     if lsid in by_id:
                         add(sid, lsid, EdgeOrigin.SPAN_LINK)
+        if by_timing:
+            disclosures.add(
+                "otlp.graph_parent_by_timing",
+                f"{by_timing} span(s) declare a graph.node.parent_id that several spans carry; "
+                "the nearest preceding one by start time was taken as the parent.",
+                by_timing,
+            )
+        if fallback:
+            disclosures.add(
+                "otlp.graph_parent_fallback",
+                f"{fallback} span(s) declare a graph.node.parent_id that resolves to no single "
+                "preceding span; their parentSpanId was used instead.",
+                fallback,
+            )
         return causes, origins
 
     def _resolve_parent(
@@ -752,7 +796,7 @@ class OTLPSpanAdapter:
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
         untimed: set[str],
-    ) -> tuple[str | None, EdgeOrigin]:
+    ) -> tuple[str | None, EdgeOrigin, str | None]:
         """The single chosen parent cause: the logical graph parent if resolvable, else the
         declared span parent.
 
@@ -770,6 +814,9 @@ class OTLPSpanAdapter:
         fabricate a root for a declared parent we cannot honor (mirroring the dangling-parent
         guard). When no ``graph.node.parent_id`` is declared, ``parentSpanId`` is the parent;
         ``None`` only when the span truly has no declared parent of either kind.
+
+        The third value says how a declared logical parent was resolved when that was not
+        unambiguous: ``"by_timing"`` or ``"fallback"``; otherwise ``None``.
         """
         pid = parent_span.get(sid)
         if self._prefer_graph_parent:
@@ -777,11 +824,11 @@ class OTLPSpanAdapter:
             if pnode is not None:
                 candidates = [c for c in node_index.get(str(pnode), []) if c != sid]
                 if len(candidates) == 1:
-                    return candidates[0], EdgeOrigin.GRAPH_PARENT
+                    return candidates[0], EdgeOrigin.GRAPH_PARENT, None
                 timed = sid not in untimed and not any(c in untimed for c in candidates)
                 preceding = [c for c in candidates if timed and prerank[c] < prerank[sid]]
                 if preceding:
-                    return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT
+                    return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT, "by_timing"
                 if pid is None:
                     detail = "no in-trace span" if not candidates else "multiple ambiguous spans"
                     raise ValueError(
@@ -789,7 +836,8 @@ class OTLPSpanAdapter:
                         f"{detail} and has no parentSpanId fallback; tracegraph will not "
                         "fabricate a root for a declared logical parent it cannot honor"
                     )
-        return pid, EdgeOrigin.SPAN_PARENT_FALLBACK
+                return pid, EdgeOrigin.SPAN_PARENT_FALLBACK, "fallback"
+        return pid, EdgeOrigin.SPAN_PARENT_FALLBACK, None
 
     @staticmethod
     def _topo_seq(

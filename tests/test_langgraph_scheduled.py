@@ -33,6 +33,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import CachePolicy, Command, Send, interrupt
 from pydantic import BaseModel, field_validator
 import pytest
+from test_capture_provenance import gap_counts, without_provenance
 from typer.testing import CliRunner
 
 from tracegraph import artifact
@@ -490,6 +491,7 @@ def test_an_unapplied_goto_input_is_disclosed(saver):
     assert _scheduled(raw) == []
     [warning] = raw.ingest_warnings
     assert "1 input write(s) (a Command goto) wait to be applied" in warning
+    assert gap_counts(raw) == {"langgraph.unapplied_command_goto": 1}
 
 
 def test_an_unapplied_goto_send_is_disclosed(saver):
@@ -510,6 +512,7 @@ def test_send_packets_to_a_node_the_graph_lacks_are_disclosed(saver):
     assert _scheduled(raw) == []
     [warning] = raw.ingest_warnings
     assert "3 Send packet(s) address node(s) the supplied graph does not have (w)" in warning
+    assert gap_counts(raw) == {"langgraph.unknown_send_target": 3}
 
 
 # --- binding: tracegraph's saver, the head, and nothing of the graph's own ---
@@ -595,13 +598,14 @@ def test_a_callback_calling_sys_exit_refuses_the_ingest(saver):
 def _held_artifact_text():
     saver = InMemorySaver()
     _linear("a", "b").compile(checkpointer=saver, interrupt_before=["b"]).invoke({"log": []}, CONFIG)
-    return artifact.dumps(normalize(_ingest(saver, _linear("a", "b").compile())))
+    # As a build without capture provenance writes it; v7 outranks every rule tested here.
+    return artifact.dumps(without_provenance(normalize(_ingest(saver, _linear("a", "b").compile()))))
 
 
 def _checked_artifact_text():
     saver = InMemorySaver()
     app = _completed_linear(saver)
-    return artifact.dumps(normalize(_ingest(saver, app)))
+    return artifact.dumps(without_provenance(normalize(_ingest(saver, app))))
 
 
 @pytest.mark.parametrize("text", [_held_artifact_text, _checked_artifact_text], ids=["scheduled", "header-only"])
@@ -913,7 +917,8 @@ def test_cli_ingest_reports_the_task_a_kill_left_unwritten(killed_run, tmp_path,
     assert res.exit_code == 0, res.output
     nt = artifact.load(out)
     assert [s.name for s in nt.steps if s.source is StepSource.SCHEDULED] == ["y"]
-    assert json.loads(out.read_text())["schema_version"] == 6
+    assert json.loads(out.read_text())["schema_version"] == 7
+    assert json.loads(artifact.dumps(without_provenance(nt)))["schema_version"] == 6
 
     text = _inspect(monkeypatch, out)
     assert "y  ◌ scheduled\n" in text
@@ -932,7 +937,10 @@ def test_cli_ingest_without_graph_keeps_the_fixture_bytes(tmp_path, monkeypatch)
     out = tmp_path / "t.json"
     res = runner.invoke(cli_app, ["ingest", "--sqlite", str(fixture), "-t", "t", "-o", str(out)])
     assert res.exit_code == 0, res.output
-    assert hashlib.sha256(out.read_bytes()).hexdigest() == _FIXTURE_ARTIFACT_SHA256
+    nt = artifact.load(out)
+    assert gap_counts(nt) == {}
+    stripped = artifact.dumps(without_provenance(nt)).encode()
+    assert hashlib.sha256(stripped).hexdigest() == _FIXTURE_ARTIFACT_SHA256
     text = _inspect(monkeypatch, out)
     assert hashlib.sha256(text.encode()).hexdigest() == _FIXTURE_INSPECT_SHA256
 
@@ -943,7 +951,8 @@ def test_cli_ingest_without_graph_is_unchanged(killed_run, tmp_path):
     res = runner.invoke(cli_app, ["ingest", "--sqlite", str(db), "-t", "k", "-o", str(out)])
     assert res.exit_code == 0, res.output
     payload = json.loads(out.read_text())
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 7
+    assert payload["trace"]["trace"]["capture"] == {"gaps": []}
     assert "schedule_graph" not in payload["trace"]["trace"]
     assert payload["trace"]["trace"]["trace_id"] == "k"
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from tracegraph.adapters.base import Disclosures
 from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _attributes, _first, _span_array
 from tracegraph.input_validation import loads, object_field
 from tracegraph.model import RawTrace
@@ -174,10 +175,14 @@ class PhoenixExportAdapter:
             evaluation_channel="_tracegraph_evaluations",
         ).ingest(trace_id)
         if unreadable_scores:
-            raw.ingest_warnings.append(
+            disclosures = Disclosures()
+            disclosures.add(
+                "phoenix.unreadable_evaluation_score",
                 f"{unreadable_scores} evaluation score(s) cannot be read as a finite number; "
-                "each is reported as null."
+                "each is reported as null.",
+                unreadable_scores,
             )
+            disclosures.apply(raw)
         return raw
 
     @staticmethod

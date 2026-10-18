@@ -406,8 +406,35 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
 - **코드가 실행됩니다.** 모듈을 import하므로 top-level 코드가 돌고, checkpoint를 읽는 동안 그래프의
   state callback(schema mapper·validator, reducer, custom channel, managed value, cache-key 함수)이
   실행됩니다. 노드는 실행되지 않습니다. `--graph`를 직접 줄 때만 쓰며 추론하지 않습니다.
-- `--graph`로 읽은 artifact는 `schema_version` 6을 선언하므로 0.4.x 이하 버전은 읽지 않습니다.
-  trace status는 그대로입니다.
+- `--graph`로 읽은 artifact는 0.4.x 이하 버전이 읽지 않습니다. 내용상 `schema_version` 6이
+  필요하고, 이 릴리스의 새 ingest는 아래 수집 provenance 때문에 7을 선언합니다. trace status는
+  그대로입니다.
+
+### 수집 provenance (capture)
+
+새로 ingest한 artifact는 adapter가 관측하지 못한 것을 함께 기록하고 `schema_version` 7을
+선언합니다. 그 이전 릴리스가 만든 artifact는 읽고 다시 저장해도 이전 릴리스가 쓰던 그대로입니다
+(v2–v6은 바이트까지 같고, v1은 지금처럼 v2로 migration됩니다). provenance가 새로 붙지는 않습니다.
+
+- `trace.capture.gaps`: ingest 경고 하나마다 고정 코드와 개수가 남습니다. 읽을 때는 형식에 맞는
+  코드라면 처음 보는 코드도 그대로 보존합니다(예:
+  `langgraph.malformed_pending_writes`, `otlp.graph_parent_by_timing`). 경고 문장은 지금처럼
+  stderr에만 나가고, 코드에는 checkpoint id·task id·producer 값이 들어가지 않습니다. 놓친 것이
+  없으면 `{"gaps": []}`로 남으므로 "기록했고 공시할 것이 없었음"과 "기록하지 않음"이
+  구분됩니다. step 하나의 값을 대신 채운 경우는 gap이 아니라 아래 `unknown_fields`에 남습니다.
+- `steps[].unknown_fields`: adapter가 값을 대신 채운 필드입니다. `kind`·`name`(인식되는
+  OpenInference kind나 쓸 수 있는 이름이 없는 span, 식별자 형태가 아니라 버려진 Phoenix 이름,
+  귀속하지 못한 LangGraph task), `error_msg`(OTLP의 `"error"` 대체 문구, 보관하지 않은 메시지,
+  LangGraph의 "직렬화되지 않은 예외" 표시)가 있습니다.
+- LangGraph checkpoint는 자기를 쓴 노드를 기록하지 않습니다. 이름은 부모 checkpoint의 routing
+  채널에서 추론하므로(병렬이면 여러 후보 중 첫 번째, `Send`·update면 없음) input checkpoint와 그
+  입력을 적용하는 loop checkpoint를 뺀 모든 checkpoint step에 이름이 있든 없든 `kind`·`name`이
+  표시됩니다. 표시된 이름은 화면용으로 그대로 남습니다. LangGraph task id로 이름을 확인한
+  task·interrupt·scheduled step은 표시하지 않습니다.
+- OTLP의 `graph.node.parent_id`를 시작 시각으로 골랐거나 따르지 못하고 `parentSpanId`를 쓴
+  경우에도 gap으로 남고, stderr 경고가 새로 한 줄 나옵니다.
+- 새로 ingest한 artifact의 digest와, 그것으로 만든 분석 보고서·incident memo의 digest가
+  바뀝니다. 보고서·memo 형식, 그 밖의 CLI 출력, exit code는 그대로입니다.
 
 ### step id
 

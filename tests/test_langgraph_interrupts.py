@@ -29,6 +29,7 @@ from tracegraph.analysis import analyze
 from tracegraph.model import EdgeOrigin, EdgeType, StepSource, StepStatus
 from tracegraph.normalize import normalize
 
+from test_capture_provenance import gap_counts, without_provenance
 from test_langgraph_adapter import _StubSaver, _ck
 
 CONFIG = {"configurable": {"thread_id": "t"}}
@@ -169,6 +170,7 @@ def test_resumed_task_without_a_result_is_never_reported(saver):
     finished_marker = any(w[1] == "__no_writes__" for w in saver.get_tuple(CONFIG).pending_writes)
     disclosed = any("1 task(s) recorded an interrupt" in w and UNDECIDED in w for w in raw.ingest_warnings)
     assert disclosed is not finished_marker
+    assert ("langgraph.undecided_interrupt" in gap_counts(raw)) is disclosed
 
 
 def test_second_interrupt_in_one_node_is_disclosed_not_reported(saver):
@@ -325,6 +327,8 @@ def test_unresolvable_interrupted_task_stays_unnamed():
     [step] = [s for s in raw.steps if s.source is StepSource.INTERRUPT]
     assert step.name is None
     assert any("interrupted task task-x could not be attributed" in w for w in raw.ingest_warnings)
+    assert gap_counts(raw) == {"langgraph.unattributed_interrupted_task": 1}
+    assert step.unknown_fields == ["kind", "name"]
 
 
 def test_non_hex_checkpoint_id_leaves_the_task_unnamed():
@@ -363,7 +367,8 @@ def _paused_artifact_text():
     _graph({"ask": _asks("ask")}, [(START, "ask"), ("ask", END)]).compile(
         checkpointer=saver
     ).invoke({"log": []}, CONFIG)
-    return artifact.dumps(normalize(_ingest(saver)))
+    # As a build without capture provenance writes it; v7 outranks every rule tested here.
+    return artifact.dumps(without_provenance(normalize(_ingest(saver))))
 
 
 def test_interrupt_steps_stamp_schema_version_5_and_round_trip():
@@ -386,7 +391,9 @@ def test_runs_without_interrupt_steps_keep_their_version():
     _graph({"a": _append("a")}, [(START, "a"), ("a", END)]).compile(checkpointer=saver).invoke(
         {"log": []}, CONFIG
     )
-    assert json.loads(artifact.dumps(normalize(_ingest(saver))))["schema_version"] == 2
+    nt = normalize(_ingest(saver))
+    assert json.loads(artifact.dumps(without_provenance(nt)))["schema_version"] == 2
+    assert json.loads(artifact.dumps(nt))["schema_version"] == 7
 
 
 def test_lower_envelope_around_interrupt_content_is_rejected():

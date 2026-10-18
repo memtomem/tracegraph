@@ -10,6 +10,26 @@ explicitly.
 
 ### Added
 
+- **Capture provenance, artifact schema version 7** (groundwork for #59): every ingest now
+  records in the artifact what the adapter could not observe, so a later comparison can tell
+  "recorded, nothing disclosed" from "not recorded". `trace.capture.gaps` keeps one fixed code and count
+  per ingest disclosure (the stderr text is unchanged and stays out of the artifact; the code
+  carries no checkpoint id, task id or producer value), and `capture` is present with an empty
+  list when the read raised no disclosure; values substituted on one step are recorded
+  separately. `steps[].unknown_fields` names values an adapter substituted:
+  `kind` and `name` (a span without a recognized OpenInference kind or a usable name, including
+  Phoenix names dropped as non-identifiers; an unattributed LangGraph task; and every LangGraph
+  checkpoint step except the input checkpoint and the loop step that applies it, named or not,
+  because a checkpoint does not record its writer and its name is inferred from the parent's
+  routing) and `error_msg` (OTLP's `"error"` fallback, withheld messages, LangGraph's
+  unserialized-exception label). Task, interrupt and scheduled steps named from LangGraph's own
+  task ids are not flagged. Two OTLP parent resolutions that were silent are now recorded too: a `graph.node.parent_id` resolved by start time among
+  several spans, and one not honored in favour of `parentSpanId`; each also prints a new stderr
+  warning. Every newly ingested artifact declares 7 and 0.4.x refuses it by name; an artifact
+  written by an earlier release re-serializes exactly as the previous release wrote it (v2–v6
+  byte for byte, v1 migrated to v2 as before) and never gains provenance. Newly ingested
+  artifacts therefore have new digests, as do analysis reports and incident memos built from
+  them; report and memo shapes, other CLI output and exit codes are unchanged.
 - **`analyze` reads OTLP span exports directly** (#57): a JSON or Collector JSONL export
   (`resourceSpans`) is diagnosed in memory with the same adapter settings as `ingest-otlp`, so
   the report is byte-identical to analysing the ingested artifact; `--trace` selects one trace of
@@ -54,9 +74,9 @@ explicitly.
   but no node. `inspect` marks such a step `◌ scheduled` and adds `· N scheduled` to the
   summary.
 - **Artifact schema version 6**, stamped by content: an artifact read with `--graph` (it has
-  `schedule_graph`, or a `scheduled` step) declares 6, and 0.4.x refuses it by name. Every
-  artifact ingested without `--graph` keeps its version and its bytes; the header field is
-  omitted, not written as `null`.
+  `schedule_graph`, or a `scheduled` step) declares 6, and 0.4.x refuses it by name. The header
+  field is omitted, not written as `null`. (A fresh ingest by this release declares 7 for its
+  capture record, which outranks 6.)
 - **A hands-on getting-started notebook in Korean**, `examples/getting_started_ko.ipynb`, for
   first-time users working from a repository checkout. It runs the example agent and every
   core command offline, interprets each output, and works through two applied scenarios:

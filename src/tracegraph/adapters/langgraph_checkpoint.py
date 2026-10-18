@@ -93,6 +93,7 @@ from typing import Any, Iterable, Iterator, get_type_hints
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from pydantic import TypeAdapter, ValidationError
 
+from tracegraph.adapters.base import Disclosures
 from tracegraph.input_validation import object_field
 from tracegraph.model import (
     CausalFidelity,
@@ -106,6 +107,7 @@ from tracegraph.model import (
     ScheduleGraph,
     StepStatus,
     Trace,
+    UnknownField,
 )
 
 _ROOT_NS = ""
@@ -342,6 +344,13 @@ class LangGraphCheckpointAdapter:
                 step.name = name
                 if _looks_like_tool_node(name):
                     step.kind = StepKind.TOOL
+            if not self._has_no_producing_node(step, steps.get(display_parent_id or "")):
+                # A checkpoint does not record which node wrote it. The name is read off the
+                # parent's routing channels — the first of several when nodes ran in parallel,
+                # none for a Send or an update — and the kind is inferred from that name, so
+                # both stay display labels and are recorded as unknown, named or not. Task,
+                # interrupt and scheduled steps are named by LangGraph's own task ids instead.
+                step.unknown_fields = ["kind", "name"]
             causal_parent_ids = parents_by_step.get(step_id, [])
             error_parent_cps = [checkpoints[parent_id] for parent_id in causal_parent_ids]
             err = self._error_introduced(checkpoints[step_id], error_parent_cps)
@@ -353,10 +362,10 @@ class LangGraphCheckpointAdapter:
         # (`checkpoints[step_id]`, `key_by_step_id[step_id]`), and a derived id has no entry
         # in either. Building them here also means they inherit each carrying step's *final*
         # seq, after `_topo_seq` may have re-sequenced the whole thread.
-        ingest_warnings = self._derive_task_steps(
+        disclosures = self._derive_task_steps(
             trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
         )
-        ingest_warnings.extend(
+        disclosures.extend(
             self._derive_interrupt_steps(
                 trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
             )
@@ -365,16 +374,18 @@ class LangGraphCheckpointAdapter:
         if self._schedule_graph is not None:
             from tracegraph.graph_ref import fingerprint
 
-            ingest_warnings.extend(
+            disclosures.extend(
                 self._derive_scheduled_steps(
                     trace_id, steps, checkpoints, key_by_step_id, writes_by_step, edges
                 )
             )
             schedule_graph = ScheduleGraph(fingerprint=fingerprint(self._schedule_graph))
         if malformed_writes:
-            ingest_warnings.append(
+            disclosures.add(
+                "langgraph.malformed_pending_writes",
                 f"{malformed_writes} pending write(s) are not a (task id, channel, value) "
-                "triple and were ignored; a task failure recorded in one would not be reported."
+                "triple and were ignored; a task failure recorded in one would not be reported.",
+                malformed_writes,
             )
 
         any_error = any(s.status is StepStatus.ERROR for s in steps.values())
@@ -385,10 +396,11 @@ class LangGraphCheckpointAdapter:
             status=StepStatus.ERROR if any_error else StepStatus.OK,
             causal_fidelity=CausalFidelity.DECLARED_DAG,
             schedule_graph=schedule_graph,
+            capture=disclosures.capture(),
         )
         return RawTrace(
             trace=trace,
-            ingest_warnings=ingest_warnings,
+            ingest_warnings=list(disclosures.texts),
             steps=sorted(steps.values(), key=lambda s: (s.seq, s.step_id)),
             causal_edges=edges,
         )
@@ -411,14 +423,14 @@ class LangGraphCheckpointAdapter:
         original_seq: dict[str, int],
         writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]],
         edges: list[Edge],
-    ) -> list[str]:
+    ) -> Disclosures:
         """Add one ERROR step per failed task and return any ingestion disclosures.
 
         The failing task becomes a child of the checkpoint that scheduled it. Marking that
         checkpoint instead would blame the wrong node: its name is the node that *produced*
         it, so a ``call_tool`` exception would be reported against ``plan``.
         """
-        warnings: list[str] = []
+        disclosures = Disclosures()
         derived: list[tuple[str, Step]] = []
         derived_ids: set[str] = set()
         for step_id in sorted(steps, key=lambda sid: (steps[sid].seq, sid)):
@@ -427,9 +439,11 @@ class LangGraphCheckpointAdapter:
             ns, cid = key_by_step_id[step_id]
             undecodable = cls._undecodable_sends(cp)
             if undecodable:
-                warnings.append(
+                disclosures.add(
+                    "langgraph.undecodable_send_packets",
                     f"checkpoint {cid}: {undecodable} Send packet(s) could not be decoded "
-                    "(langgraph is not installed), so a failure in one cannot be named."
+                    "(langgraph is not installed), so a failure in one cannot be named.",
+                    undecodable,
                 )
             for task_id, task_writes in writes.items():
                 if task_id == _NULL_TASK_ID:
@@ -445,11 +459,16 @@ class LangGraphCheckpointAdapter:
                 message = cls._error_message(error)
                 cancelled = message.startswith(_CANCELLED_PREFIX)
                 if name is None and not cancelled:
-                    warnings.append(
+                    disclosures.add(
+                        "langgraph.unattributed_failed_task",
                         f"checkpoint {cid}: failed task {task_id} could not be attributed to a "
                         "node; no candidate reproduced its task id, which is also what a change "
-                        "in LangGraph's task-id algorithm would look like."
+                        "in LangGraph's task-id algorithm would look like.",
                     )
+                unknown: list[UnknownField] = [] if name else ["kind", "name"]
+                if error is None and not cancelled:
+                    # _error_message's placeholder: the checkpointer kept no exception text.
+                    unknown.insert(0, "error_msg")
                 derived_id = f"{step_id}#task:{task_id}"
                 if derived_id in steps or derived_id in derived_ids:
                     # Checkpoint ids are unrestricted strings, so this is conceivable. The
@@ -475,6 +494,7 @@ class LangGraphCheckpointAdapter:
                         # that actually raised.
                         status=StepStatus.UNSET if cancelled else StepStatus.ERROR,
                         error_msg=None if cancelled else message,
+                        unknown_fields=unknown,
                     ),
                 ))
         for parent_step_id, step in derived:
@@ -489,7 +509,7 @@ class LangGraphCheckpointAdapter:
                     origin=EdgeOrigin.CHECKPOINT_PARENT,
                 )
             )
-        return warnings
+        return disclosures
 
     @classmethod
     def _derive_interrupt_steps(
@@ -501,7 +521,7 @@ class LangGraphCheckpointAdapter:
         original_seq: dict[str, int],
         writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]],
         edges: list[Edge],
-    ) -> list[str]:
+    ) -> Disclosures:
         """Add one UNSET step per task the head checkpoint records as interrupted, never resumed.
 
         Only the thread's head — the newest root checkpoint, which is what LangGraph itself
@@ -518,11 +538,11 @@ class LangGraphCheckpointAdapter:
         """
         head_id = cls._head_step_id(checkpoints, key_by_step_id)
         if head_id is None:
-            return []
+            return Disclosures()
         head = steps[head_id]
         cp = checkpoints[head_id]
         _, cid = key_by_step_id[head_id]
-        warnings: list[str] = []
+        disclosures = Disclosures()
         undecided = 0
         for task_id, task_writes in (writes_by_step.get(head_id) or {}).items():
             if task_id == _NULL_TASK_ID:
@@ -536,10 +556,11 @@ class LangGraphCheckpointAdapter:
                 continue
             name = cls._resolve_task_name(cp, _ROOT_NS, original_seq[head_id], task_id, task_writes)
             if name is None:
-                warnings.append(
+                disclosures.add(
+                    "langgraph.unattributed_interrupted_task",
                     f"checkpoint {cid}: interrupted task {task_id} could not be attributed to a "
                     "node; no candidate reproduced its task id, which is also what a change in "
-                    "LangGraph's task-id algorithm would look like."
+                    "LangGraph's task-id algorithm would look like.",
                 )
             derived_id = f"{head_id}#interrupt:{task_id}"
             if derived_id in steps:
@@ -558,6 +579,7 @@ class LangGraphCheckpointAdapter:
                 # The task has no outcome yet. The interrupt's value is whatever the node asked
                 # its caller, which is user content, so it is not carried as a message.
                 status=StepStatus.UNSET,
+                unknown_fields=[] if name else ["kind", "name"],
             )
             edges.append(
                 Edge(
@@ -569,12 +591,14 @@ class LangGraphCheckpointAdapter:
                 )
             )
         if undecided:
-            warnings.append(
+            disclosures.add(
+                "langgraph.undecided_interrupt",
                 f"checkpoint {cid}: {undecided} task(s) recorded an interrupt together with a "
                 "resume or an error and no result; the checkpoint does not record whether each "
-                "is still paused, so none is reported as interrupted."
+                "is still paused, so none is reported as interrupted.",
+                undecided,
             )
-        return warnings
+        return disclosures
 
     @staticmethod
     def _head_step_id(
@@ -597,7 +621,7 @@ class LangGraphCheckpointAdapter:
         key_by_step_id: dict[str, _CheckpointKey],
         writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]],
         edges: list[Edge],
-    ) -> list[str]:
+    ) -> Disclosures:
         """Add one UNSET step per task the supplied graph schedules at the head with no write.
 
         The graph is bound to this adapter's saver with its own config and store cleared, and
@@ -608,7 +632,7 @@ class LangGraphCheckpointAdapter:
         """
         head_id = self._head_step_id(checkpoints, key_by_step_id)
         if head_id is None:
-            return []
+            return Disclosures()
         head = steps[head_id]
         cp = checkpoints[head_id]
         _, cid = key_by_step_id[head_id]
@@ -661,16 +685,18 @@ class LangGraphCheckpointAdapter:
                 )
             )
 
-        warnings: list[str] = []
+        disclosures = Disclosures()
         triggers = {str(t) for node in graph.nodes.values() for t in node.triggers} | {_TASKS}
         unapplied = sum(
             1 for channel, _ in head_writes.get(_NULL_TASK_ID, ()) if channel in triggers
         )
         if unapplied:
-            warnings.append(
+            disclosures.add(
+                "langgraph.unapplied_command_goto",
                 f"checkpoint {cid}: {unapplied} input write(s) (a Command goto) wait to be "
                 "applied when a run resumes from this checkpoint; LangGraph does not list the "
-                "tasks they would start, so none is reported as scheduled."
+                "tasks they would start, so none is reported as scheduled.",
+                unapplied,
             )
         packets = self._send_packets(graph, cp)
         unknown = sorted(
@@ -682,12 +708,14 @@ class LangGraphCheckpointAdapter:
         )
         if unknown:
             count = sum(1 for packet in packets if getattr(packet, "node", None) in unknown)
-            warnings.append(
+            disclosures.add(
+                "langgraph.unknown_send_target",
                 f"checkpoint {cid}: {count} Send packet(s) address node(s) the supplied graph "
                 f"does not have ({', '.join(unknown)}); LangGraph schedules nothing for them, "
-                "so none is reported as scheduled."
+                "so none is reported as scheduled.",
+                count,
             )
-        return warnings
+        return disclosures
 
     @staticmethod
     def _send_packets(graph: Any, cp: dict) -> list[Any]:
@@ -1071,6 +1099,17 @@ class LangGraphCheckpointAdapter:
             return None
         next_ns = relative_ns.split("|", 1)[0]
         return next_ns.split(":", 1)[0] or None
+
+    @staticmethod
+    def _has_no_producing_node(step: Step, parent: Step | None) -> bool:
+        """True for the checkpoints no graph node writes: the caller's input checkpoint, and
+        the loop checkpoint that applies it (LangGraph's ``__start__``). Their missing name is a
+        known absence. An update or fork written from the input checkpoint is not exempt."""
+        return step.source is StepSource.INPUT or (
+            step.source is StepSource.LOOP
+            and parent is not None
+            and parent.source is StepSource.INPUT
+        )
 
     @staticmethod
     def _producing_node(parent_cp: dict | None, branch_target: str | None = None) -> str | None:

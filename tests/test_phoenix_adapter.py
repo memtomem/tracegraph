@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_capture_provenance import gap_counts
 
 from tracegraph import artifact
 from tracegraph.adapters import PhoenixExportAdapter
@@ -43,9 +44,14 @@ def test_phoenix_export_maps_parent_kind_status_and_metrics():
     assert metrics.cost_currency == "USD"
 
 
-def test_phoenix_artifact_is_body_free_and_v2():
-    text = artifact.dumps(normalize(PhoenixExportAdapter(phoenix_trace()).ingest("trace-1")))
-    assert json.loads(text)["schema_version"] == 2
+def test_phoenix_artifact_is_body_free_and_records_what_it_withheld():
+    nt = normalize(PhoenixExportAdapter(phoenix_trace()).ingest("trace-1"))
+    text = artifact.dumps(nt)
+    assert json.loads(text)["schema_version"] == 7
+    # The prompt-shaped root name is dropped and the tool's status message is never kept;
+    # both are recorded as unknown rather than left to look like an unnamed, message-less run.
+    assert {s.step_id: s.unknown_fields for s in nt.steps} == {"root": ["name"], "tool": ["error_msg"]}
+    assert gap_counts(nt) == {"otlp.unreadable_component_cost": 1}
     for forbidden in (
         "TOP SECRET",
         "PRIVATE RESULT",
