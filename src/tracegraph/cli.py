@@ -1101,7 +1101,8 @@ def _query_pass(
     ``limit``, without holding every trace and every match: each file is handled by
     :func:`_query_file`, whose trace is released when it returns unless ``keep_traces`` is set
     and one of its matches is kept, and only the first ``limit`` paths become :class:`Match`
-    objects (the total still counts them all). The two-phase error order is preserved: every
+    objects (the total still counts them all; a labelling fault past the limit, which would be
+    an internal bug, is therefore not raised). The two-phase error order is preserved: every
     file is loaded and validated even after matching fails, and a matching failure is raised
     only after the load, "no valid artifacts" and duplicate trace_id errors would have been.
     ``MemoryError`` and interrupts propagate at once, after flushing the skip warnings

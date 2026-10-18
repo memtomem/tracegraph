@@ -451,9 +451,10 @@ reports token counts, other costs, currencies and evaluation scores it cannot re
 unavailable, disclosing each on stderr; the producer's value is never kept. File input, stdin
 and Phoenix `px` output share one size limit (`TRACEGRAPH_MAX_ARTIFACT_BYTES`). `query` reads
 artifacts one after another and keeps only the matches it prints (plus the traces `--explain`
-renders), so its peak memory does not grow with the number of artifacts. It still enumerates
-every match of the trace it is reading, to report the exact total: one trace with very many
-matches is not bounded by `--limit`.
+renders). With `--limit`, its peak memory therefore grows with the number of artifacts only
+by a small per-file record (path, trace id); without it, by the matches it prints. It still
+enumerates every match of the trace it is reading, to report the exact total: one trace with
+very many matches is not bounded by `--limit`.
 
 Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;
 Ladybug's existing insertion semantics are unchanged. Use `is_isomorphic` or `diff` for

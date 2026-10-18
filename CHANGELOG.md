@@ -153,11 +153,13 @@ explicitly.
   and validated all artifacts, matched them all, and only then sliced the result to `--limit`,
   so `--limit 1` over 200 artifacts of 2000 steps (248 MB on disk) peaked at 1374 MiB. It now
   loads, validates and matches one artifact after another, keeps only the matches it prints
-  (and, with `--explain`, the traces they belong to), and builds labels only for those, so peak
-  memory no longer grows with the number of artifacts: 70 MiB for the same query, 105 MiB
-  without `--limit`. Output, exit codes and error precedence are
+  (and, with `--explain`, the traces they belong to), and builds labels only for those. With
+  `--limit`, peak memory grows with the number of artifacts only by a small per-file record:
+  70 MiB for the same query. Without `--limit` it holds the matches it prints: 105 MiB. Output, exit codes and error precedence are
   unchanged: every input is still validated, a later file's load error or a duplicate
-  trace_id still wins over a matching failure, and the footer's total stays exact. One trace
+  trace_id still wins over a matching failure, and the footer's total stays exact. Matches past
+  `--limit` are counted but no longer labelled, so a labelling fault there (an internal bug:
+  labels look up step ids the matcher just returned) would no longer surface. One trace
   with very many matches still enumerates them all (3.1M matches: 971 MiB, down from 986 MiB
   but 5.4 s instead of 17 s); bounding that needs a decision about the `--limit` total and is
   tracked as #79. An interrupt or `MemoryError` now surfaces at the artifact being read,
