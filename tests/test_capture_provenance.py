@@ -313,7 +313,23 @@ def _bad_code(nt):
     nt.trace.capture.gaps[0].code = "Not A Code"
 
 
-@pytest.mark.parametrize("mutate", [_reordered_flags, _duplicated_gap, _bad_code])
+def _set_flags(value):
+    def mutate(nt):
+        nt.steps[0].unknown_fields = value
+    mutate.__name__ = f"flags={value!r}"
+    return mutate
+
+
+def _set_capture(nt):
+    nt.trace.capture = {}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [_reordered_flags, _duplicated_gap, _bad_code, _set_capture,
+     *(_set_flags(v) for v in (None, {}, "", False, "kind", ["status"]))],
+    ids=lambda f: f.__name__,
+)
 @pytest.mark.parametrize(
     "write",
     [artifact.dumps,

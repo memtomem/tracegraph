@@ -327,14 +327,19 @@ def check_provenance(trace: Trace, steps: list[Step]) -> None:
     Construction validates it, but a model changed afterwards (a list extended in place, a
     header reassigned) is not revalidated, so writers and ``validate_normalized`` call this too.
     """
-    if trace.capture is not None:
-        Capture.model_validate(trace.capture.model_dump())
-    flagged = [step for step in steps if step.unknown_fields]
-    for step in flagged:
+    capture = trace.capture
+    if capture is not None:
+        if not isinstance(capture, Capture):
+            raise ValueError("trace capture must be a capture record")
+        Capture.model_validate(capture.model_dump())
+    # Every step, not only the flagged ones: None or {} would otherwise pass as "no flags".
+    flagged = False
+    for step in steps:
         _canonical_unknown_fields(_UNKNOWN_FIELDS.validate_python(step.unknown_fields))
+        flagged = flagged or bool(step.unknown_fields)
     # Substitution flags without a capture record would be provenance an older envelope could
     # carry and an older reader would silently drop; the pair is written together or not at all.
-    if trace.capture is None and flagged:
+    if capture is None and flagged:
         raise ValueError("steps carry unknown_fields but the trace has no capture record")
 
 
