@@ -1,8 +1,96 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-18 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-18, `361ad03` 기준 (Asia/Seoul)
 
-- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋(이 문서를 올린 docs PR의 병합). 제품 코드의
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `361ad03`(PR #86 병합)이고,
+  이 문서는 그 위에 문서만 더한다. 시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
+  PyPI 최신은 여전히 0.4.0이고, 아래 표의 제품 변경 PR #78·#80·#81·#83·#84·#86도 모두 `CHANGELOG.md`의 Unreleased에 있다. 다음
+  릴리스는 0.5.0이다(릴리스는 아직 소유자 지시 대기).
+- **0.5.0 노트에서 놓치기 쉬운 동작 변경**(아래 `b18fd1a` 기준 절의 것에 더해). 전체 목록은
+  `CHANGELOG.md` Unreleased의 해당 항목이다:
+  - library writer `artifact.save()`/`save_atomic()`가 reader가 거부할 trace를 쓰지 않고 `ValueError`
+    (pydantic `ValidationError` 포함)를 낸다(PR #83). 잘못된 타입의 `seq`는 이전엔 raw `TypeError`였고,
+    provenance 위반도 writer에서는 `check_provenance` 문구 대신 `ValidationError`로 나온다.
+  - 새 capture gap 코드 4개(schema는 v7 그대로). 이런 입력에서는 artifact와 그 보고서 digest가 바뀐다.
+    `check`에 주는 영향은 코드마다 다르다:
+    - `otlp.unresolved_span_link`·`otlp.unscoped_span_link`(PR #84): `_MAY_OMIT_STEPS`. count rule은
+      gap 쪽으로 one-sided가 되고, topology는 어느 쪽에 gap이 있어도 INSUFFICIENT_EVIDENCE다.
+    - `otlp.foreign_trace_link`(PR #84): 판정에 영향 없음.
+    - `langgraph.rewritten_error_channel`(PR #86): count rule만 one-sided, success 의존 pattern은
+      INSUFFICIENT_EVIDENCE, topology는 영향 없음.
+  - `query`에서 interrupt와 `MemoryError`는 읽던 artifact에서 바로 드러나고, `--limit` 밖 match는
+    label을 만들지 않아 거기서 나던 label 오류도 더는 나지 않는다(PR #80).
+  - `--strict`(PR #81)는 opt-in이라 기본 동작은 그대로다. 켜면 건너뛴 파일이 있을 때 exit 2이고 export는 아무것도 쓰지 않는다.
+- **열린 이슈 5개:** 소유자 결정 대기 #79·#82·#85, 일부 해결 #54(닫을지 결정 필요), 기능 제안 #60.
+
+### `b18fd1a` 이후 착지한 변경
+
+| PR | merge | 내용 |
+| --- | --- | --- |
+| #77 | `06daf97` | `b18fd1a` 기준 절의 handoff 문서(문서만) |
+| #78 | `66d66c9` | #52: `repeated-agent-failure`의 unbounded two-step 경로가 이름이 맞을 수 없는 endpoint를 순회 없이 건너뛰고, 역방향 탐색을 seq window로 제한. star 모양의 longest-path DP도 부모 edge 완화로 바꿨다. n=4000 distinct 이름 체인 5.821 s → 0.0024 s |
+| #80 | `13a10b7` | #54의 corpus 절반: `query`가 artifact를 하나씩 읽고 출력할 match만 남긴다. 200개 artifact `--limit 1` 1370 MiB → 70 MiB. 출력과 exit는 옛 CLI와 154개 호출에서 같다. trace 안의 절반은 #79로 분리 |
+| #81 | `f4f44a3` | #50: `query`·`export-review-candidates`에 opt-in `--strict`. 디렉터리에서 건너뛴 파일이 하나라도 있으면 exit 2, export는 아무것도 쓰지 않는다. 기본 동작은 그대로 |
+| #83 | `737e889` | #67: 두 writer가 model round-trip → `validate_normalized` → 검증된 복사본 직렬화 순으로 확인한 뒤에만 쓴다. `dumps()`만 남은 `TypeError`는 #82로 등록 |
+| #84 | `d5e31e4` | #49: OTLP importer가 cause로 기록하지 못한 span link를 종류별 stderr 한 줄과 capture gap으로 공시. 앞의 두 코드는 `check`의 `_MAY_OMIT_STEPS`에 들어간다 |
+| #86 | `361ad03` | #47: 오류 채널이 이미 set인 동안 node가 그 채널을 다시 쓰면 공시만 한다(`langgraph.rewritten_error_channel`). 실패 기록 규칙은 그대로. `check`는 count rule을 gap 쪽으로 one-sided로, success 의존 pattern을 INSUFFICIENT_EVIDENCE로 읽는다. subgraph `__start__`의 중복 기록은 #85로 등록 |
+
+### 이번 세션의 결정(2026-10-18, PR #78~#86)
+
+1. **#50:** 이슈의 옵션 1, opt-in `--strict`. `validate`는 이미 모든 무효 파일을 보고하고 exit 1이므로
+   flag를 받지 않는다. 우선순위는 명시한 손상 파일 → strict 거부 → "no valid artifacts" → 첫 중복
+   trace_id → `query`가 들고 있던 matching 실패.
+2. **#67:** 두 writer 모두 쓰기 전에 검사. 처음 고른 `validate_structure`는 commit 리뷰가 store는
+   거부하지만 이 검사는 통과하는 canonical 위반 4개를 보여 줘서 `validate_normalized`로 넓혔다
+   (6000 step에서 +0.061 s).
+3. **#49:** 옵션 1, `Disclosures.add`로 ingest 시 공시. 새 header 필드는 없고 `links_preserved`도
+   바꾸지 않는다. `traceId`가 없는 link는 그 span이 local일 수 있어 foreign과 다른 코드로 나눴다.
+4. **#47: 공시만 한다.** 반복 실패를 기록하려던 규칙(이슈의 version-only, 그 뒤 value-change
+   `226d406`)은 리뷰 다섯 라운드 연속으로 정상 node에 실패를 지어내는 모양이 하나씩 더 나왔다
+   (subgraph 경계, caller input, fork copy, success 의존 pattern, reducer). 소유자가 범위를 공시만으로
+   좁혔다(`16d7b90`). checkpoint는 어떤 node가 raise했는지 기록하지 않으므로 이 범위로 다시 열지 않는다.
+5. **#54 분리:** corpus 절반은 PR #80으로 처리했고, trace 안의 match 열거 제한은 #79로 옮겼다.
+   #54는 열어 둔 채다.
+
+### 검증 증거
+
+환경: macOS/arm64. 수치는 각 PR 본문에 적은 그 PR head의 결과이고, 이 문서를 위해 다시 돌리지 않았다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 `pytest` | PR별 1418(#78) → 1445(#80) → 1457(#81) → 1485(#83) → 1508(#84) → **1541**(#86) passed, 11 skipped. #86은 LangGraph 1.2.15 / checkpoint 4.3.0에서도 `-m "not perf"` 1533 passed |
+| 성능 guard | #78이 `-m perf` doubling guard 4개를 더했다(옛 matcher에서 모두 실패) |
+| lint·타입 | 모든 PR에서 ruff와 mypy를 CI 방식으로 돌려 통과 |
+| 골든 하네스 | 모든 PR에서 직전 merge와 비교해 커밋된 fixture 출력 265개 중 다른 파일 0개. 대조군 `0bbe9e6`→`43f5ccb`는 39개가 달랐다(#78에서 확인). 절차는 아래 `b18fd1a` 기준 절에 있다 |
+| 회귀 테스트 판별력 | PR마다 mutation을 넣어 새 테스트가 빨개짐을 확인(각 PR 본문의 Mutations 목록) |
+| CI | #78·#80·#81·#83·#84는 check 15개, #86은 17개 모두 통과. merge 커밋 `361ad03`의 push `tests` 실행도 통과 |
+| 리뷰 게이트 | #78 3라운드, #80 5라운드(계획 2, diff 2, commit 1), #81 2라운드, #83 4라운드, #84 4라운드(계획 2, diff·commit 각 1), #86 8라운드(계획 2, diff 2, commit 1, 최종 1, PR 범위 2). 마지막 라운드는 #81·#83·#84·#86이 SHIP이다. #78은 commit 라운드가 문서 문구 2건으로 NEEDS-FIX였고 `6ca360f`에서 고쳤으며, #80은 commit 라운드가 지적한 메모리 문구 2건을 `41bc87a`에서 고쳤다(판정은 본문에 없다). |
+
+기록 위치: 결정 근거와 측정은 PR #78·#80·#81·#83·#84·#86의 본문과 이슈 #79·#82·#85의 본문에 있다.
+이 PR들의 리뷰 원문은 저장소에 보존하지 않았다. 저장소의 `.dev-trio/log/default/`가 아니라 그 작업 세션의 임시
+디렉터리(`/private/tmp/claude-501/` 아래 세션 `13efa5c6-…`의 `scratchpad/devtrio-log/default/`)에 있고, 임시 경로이므로
+오래 남는다고 가정하지 않는다.
+
+### 남은 결정과 후속 항목
+
+1. **소유자 결정 대기:**
+   - #79(trace 안의 match 열거 제한): `--limit`을 exact로 유지하며 materialize하지 않고 세기,
+     total을 계산하지 않는 명시적 bounded 모드 추가, 또는 한계를 문서로만 두기. 선택지는 이슈 본문에 있다.
+   - #82(`artifact.dumps()`의 `TypeError`): writer와 같은 round-trip을 `dumps()`에도 넣기, 또는
+     `TypeError`만 `ValueError`로 바꿔 던지기, 또는 `dumps()`를 입력을 신뢰하는 serializer로 문서화하기
+     (#67의 CHANGELOG 항목은 지금 `dumps()`를 model·structure 검사 없는 serializer로 적고 있다).
+   - #85(subgraph `__start__`에서 전파된 오류를 다시 기록): #47 이전부터 있던 결함이다.
+2. **#54 닫기:** corpus 절반은 PR #80으로 끝났고 남은 절반은 #79에 있다. 닫을지는 소유자가 정한다.
+3. **기능 제안:** #60(명시한 trace 묶음의 반복 인과 패턴 요약). 이슈가 #54의 bounded query와 함께
+   설계하라고 하므로 #79 결정 뒤가 맞다.
+4. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
+5. **0.5.0 릴리스:** [릴리스 런북](releasing.md)대로. 위와 `b18fd1a` 기준 절의 동작 변경을 노트에 넣을 것.
+
+---
+
+## 이전 전달 상태 — 2026-10-18, `b18fd1a` 기준 (Asia/Seoul)
+
+- **다음 세션 시작점:** `tracegraph-mvp` @ `06daf97`(이 절을 올린 docs PR #77의 병합). 제품 코드의
   기준은 `b18fd1a`(PR #76 병합)이고, 이 문서는 그 위에 문서만 더한다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PyPI 최신은
   여전히 0.4.0이다. 0.4.0 이후 `tracegraph-mvp`에 들어간 변경(PR #41, PR #44, 그리고 아래 표)은 `CHANGELOG.md`의 Unreleased에
