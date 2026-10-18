@@ -1,6 +1,104 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-14 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-18 (Asia/Seoul)
+
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋(이 문서를 올린 docs PR의 병합). 제품 코드의
+  기준은 `b18fd1a`(PR #76 병합)이고, 이 문서는 그 위에 문서만 더한다. 시작 전에
+  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PyPI 최신은
+  여전히 0.4.0이다. 0.4.0 이후 `tracegraph-mvp`에 들어간 변경(PR #41, PR #44, 그리고 아래 표)은 `CHANGELOG.md`의 Unreleased에
+  있고, artifact가 v6·v7로 올라가며 새 보고서 계약 `tracegraph.check` v1이 생겼으므로 다음 릴리스는
+  0.5.0이다(릴리스는 아직 소유자 지시 대기).
+- **0.5.0 노트에 꼭 들어갈 동작 변경:** 아래 PR #70·#71로 artifact 입력에 다른 trace를 고르는
+  `analyze --trace`/`--baseline-trace`와 `ingest-phoenix --trace`가 exit 0에서 exit 2가 됐다.
+  PR #76으로 `phoenix doctor`/`diagnose`의 `px` stdout에도 `TRACEGRAPH_MAX_ARTIFACT_BYTES`가 적용된다.
+- **열린 이슈 7개:** 소유자 결정 대기 #47·#49·#50·#67, 성능 #52·#54, 기능 제안 #60.
+
+### 2026-10-14 이후 착지한 변경
+
+| PR | merge | 내용 |
+| --- | --- | --- |
+| #48, #51 | `f6e90c4`, `b6b4480` | 한국어 getting-started 노트북 `examples/getting_started_ko.ipynb`와 리뷰 후속 |
+| — | `609882f` | 구현·제품 사용성 리뷰 기록 `docs/reviews/2026-10-16-*.md`(이슈 #52~#60의 출처) |
+| — | `1ee2cf3` | 이슈 #58: `analyze`·`phoenix diagnose` 뒤의 조사 안내(정확한 step id, `explain` 명령 또는 저장 템플릿). PR 없이 직접 커밋돼 이슈는 2026-10-18에 조건별 확인 댓글과 함께 닫았다 |
+| #61, #62 | `81e2bfb`, `706b73d` | stdin·`/dev/fd`·`/proc/<pid>/fd` 같은 descriptor alias 입력은 재생 템플릿으로 안내. 디렉터리 descriptor로 가는 symlink는 남은 한계(결정 기록) |
+| #63 | `0bbe9e6` | OTLP export를 `analyze`로 바로 진단, stdin도 `TRACEGRAPH_MAX_ARTIFACT_BYTES`로 제한(#53의 stdin 절반) |
+| #65 | `43f5ccb` | capture provenance(`trace.capture.gaps`, step `unknown_fields`), artifact `schema_version` 7 |
+| #66, #68 | `45a25e9`, `a86dde9` | `tracegraph check`(PASS 0 / FAIL 1 / INSUFFICIENT_EVIDENCE 3 / 사용 오류 2)와 step을 빠뜨릴 수 있는 capture gap의 일관 처리 |
+| #70 | `3173c95` | #64: artifact 입력의 selector는 그 artifact의 trace id와 같아야 함(`analyze`, `check` 공용 loader) |
+| #71 | `591fa81` | #69: 같은 규칙을 Phoenix artifact를 받은 `ingest-phoenix`에 적용(`_require_selected_trace`) |
+| #72 | `cebe39a` | #56: 실행할 수 없는 `px`(권한·디렉터리·형식 오류)가 traceback 대신 `doctor`는 `FAIL`/exit 1, `diagnose`는 사용 오류/exit 2. 고정 문구에 OS 오류 부분만 `os.strerror(errno)`로 넣고, 실행 거부(`EACCES`/`ENOEXEC`)면 실행 파일 확인 안내를 덧붙인다 |
+| #74 | `0e3f3a8` | #73: `killed_run` fixture가 sleep 대신 x의 write가 SQLite에 기록될 때까지 기다림(테스트만) |
+| #75 | `3639633` | #55: `SECURITY.md`에 `ingest --graph` 신뢰 경계와 입력 세 종류 표, stdin 크기 제한 정정(문서만) |
+| #76 | `b18fd1a` | #53: `px` stdout을 이름 없는 임시 파일로 받아 크기 polling, stderr 버림, UTF-8 아님 보고, 위치 읽기 |
+
+### 이번 세션의 결정(2026-10-18)
+
+1. **#64·#69 selector 규칙:** 옵션 1(일치하지 않으면 exit 2)을 골랐다. artifact에 selector를 아예
+   거부하는 옵션 2는 `check`가 이미 받아들이던 일치 selector와 어긋나서 버렸다.
+2. **#46 not planned:** `__pregel_tasks`가 Topic 채널 값이 된 것은 LangGraph `4e8fbe4525`
+   (2025-05-25)부터이고, `Topic.checkpoint()`는 그보다 앞선 `f2ec99b9a8`(2024-08-27)부터 list를 쓴다.
+   tuple 형태를 쓴 공식 버전이 없어서 닫았다. 옛 형태는 이슈가 말한 `(flag, packets)`가 아니라
+   `(seen, values)`다. 아래 2026-10-14 절의 15번이 이 건이다.
+3. **#53 `px` 출력:** stdout은 기존 `TRACEGRAPH_MAX_ARTIFACT_BYTES`(기본 256 MiB, `0`은 해제),
+   stderr는 DEVNULL. 처음 계획한 pipe + reader 스레드 설계는 계획 리뷰 2라운드의 Major 4건이 모두
+   reader에 몰려 버리고, 임시 파일 + 한 스레드 polling으로 바꿨다. 그 뒤 리뷰가 `px`의 자손 프로세스
+   문제를 거듭 지적했고, 프로세스 그룹 kill은 이미 회수한 리더의 pgid가 재사용되면 무관한 그룹을
+   죽일 수 있어 버렸다(macOS Python에는 회수 없이 종료를 확인할 `os.waitid`가 없다). **자손 격리는
+   범위 밖**으로 정했다. `px`는 사용자가 설치한 신뢰 실행 파일이고(`--graph` 모듈과 같은 경계), #53
+   이전의 `subprocess.run`도 자손을 가두지 않았다. 대신 캡처는 종료를 관측한 시점의 크기까지
+   `os.pread`로 읽어(POSIX) 자손의 늦은 write가 덮어쓰지 못하게 했다. 이 범위로 다시 열지 않는다.
+4. **#58 completed, #73 신규 등록 후 해결.** #73의 원인은 측정으로 확인했다(sleep 0이면 10/10 실패,
+   CI의 `[]`와 같은 모양).
+
+### 검증 증거
+
+환경: macOS/arm64, Python 3.12.11, `b18fd1a`.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 `pytest -q -m "not perf"` | **1366 passed**, 11 skipped |
+| 성능 guard `pytest -m perf` | **4 passed** |
+| lint `uvx ruff@0.14.2 check src tests scripts examples` | 통과 |
+| 타입 `mypy`(CI와 같은 `--extra cypher --group typing` 환경) | 0 errors |
+| 골든 하네스 | 코드를 바꾼 PR #70·#71·#72·#76마다 직전 merge와 비교해 커밋된 fixture 출력 265개가 바이트 동일. #74(테스트만)·#75(문서만)는 돌리지 않았다 |
+| 회귀 테스트 판별력 | 테스트를 더한 PR마다 새 테스트가 수정 전 소스에서 실패함을 확인(seam이 옮겨져서만 실패하는 것은 PR 본문에 따로 적었다) |
+| CI | PR #70·#71·#72·#74·#75·#76 모두 check 15개 통과(required 8개 포함), `b18fd1a`의 `tests` 통과 |
+| 리뷰 게이트 | PR당 4~8라운드(계획, 구현, PR 범위). #75는 계획 없이 문서 리뷰 3라운드 + PR 범위 1라운드, #76은 설계 교체와 범위 결정을 거쳐 8라운드. 모든 지적을 반영하거나 결정으로 범위를 정했다 |
+
+골든 비교 절차(저장소 밖 스크립트 `~/.claude/plans/tracegraph-golden/golden.sh <src-root> <out-dir>`,
+한쪽 출력만 만들고 out-dir을 지운 뒤 다시 쓴다. fixture와 Python은 현재 checkout의 것을 쓴다):
+
+```bash
+git worktree add /tmp/tg-base <base-sha>
+~/.claude/plans/tracegraph-golden/golden.sh /tmp/tg-base/src /tmp/g-base
+~/.claude/plans/tracegraph-golden/golden.sh "$PWD/src" /tmp/g-new
+diff -r /tmp/g-base /tmp/g-new && echo identical
+git worktree remove --force /tmp/tg-base
+```
+
+기록 위치: 결정 근거는 PR #70·#71·#72·#74·#75·#76의 본문과 이슈 닫는 댓글(#46, #58)에 있다. 이번 세션의 계획·범위
+결정·재현 스크립트는 저장소 밖 `~/.claude/plans/tracegraph-2026-10-18/`(`scope53.md`가 #53의
+자손 범위 결정, `probes/`에 재현 스크립트)에 있다. 리뷰 원문은 커밋하지 않은 로컬
+`.dev-trio/log/default/`(PR 범위 리뷰)에 있고, 세션 중의 계획·구현 리뷰 로그는 세션 임시 디렉터리에
+있었으므로 남지 않는다.
+
+### 남은 결정과 후속 항목
+
+1. **소유자 결정 대기:** #47(오류 채널이 남아 있는 동안의 반복 실패), #49(사라진 span link의 무공시),
+   #50(`query <dir>`이 손상 artifact를 건너뛰어 CI gate가 통과하고, 2026-10-16 댓글대로
+   `export-review-candidates`도 손상 입력을 건너뛴 채 빈 보고서를 exit 0으로 낸다), #67(library writer가 CLI가 거부할
+   artifact를 쓸 수 있음). 선택지는 각 이슈 본문에 있다.
+2. **성능:** #52(이름이 맞을 수 없는데도 반복 agent 매칭이 이차), #54(`query --limit` 전에 모든 match를
+   만듦). 소유자 결정 없이 진행할 수 있다.
+3. **기능 제안:** #60(명시한 trace 묶음의 반복 인과 패턴 요약).
+4. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
+5. **0.5.0 릴리스:** [릴리스 런북](releasing.md)대로. `scripts/verify_wheel.py`에는 새 ingest가
+   v7과 `capture`를 선언하는지 보는 smoke가 이미 있으니, 공개된 wheel로 그 smoke가 통과하는지
+   확인할 것.
+
+---
+
+## 이전 전달 상태 — 2026-10-14 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp` @ `3a955a1`(PR #44 병합), 작업 트리 깨끗. PyPI 최신은
   0.4.0이다. 그 뒤 착지한 미릴리스 변경은 PR #41(11번), PR #43(13번, 테스트만), PR #44(14번,
