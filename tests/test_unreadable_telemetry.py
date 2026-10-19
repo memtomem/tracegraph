@@ -65,7 +65,7 @@ def _read(bad: dict, good: dict | None = None):
 @pytest.mark.parametrize(
     "value",
     [{"stringValue": "abc"}, {"doubleValue": -1}, {"stringValue": "NaN"}, {"boolValue": True},
-     {"arrayValue": {"values": []}}],
+     {"arrayValue": {"values": []}}, {"stringValue": "1e1000000"}, {"doubleValue": 1e300}],
 )
 def test_unreadable_total_cost_withholds_the_total(value):
     raw, report = _read({"llm.cost.total": value})
@@ -128,6 +128,23 @@ def test_unreadable_component_cost_is_disclosed(name):
     assert gap_counts(raw) == {"otlp.unreadable_component_cost": 1}
     # Component costs are never summed, so the total is unaffected.
     assert report.metrics.total_cost == "0.5"
+
+
+@pytest.mark.parametrize("name", ["llm.cost.prompt", "llm.cost.input", "llm.cost.completion", "llm.cost.output"])
+def test_a_component_cost_too_long_to_write_out_is_not_stored(name):
+    """Written out, "1e1000000" is a million characters: it must not reach the artifact."""
+    raw, report = _read({name: {"stringValue": "1e1000000"}})
+    evidence = raw.steps[1].evidence
+    assert evidence is None or (evidence.prompt_cost, evidence.completion_cost) == (None, None)
+    assert gap_counts(raw) == {"otlp.unreadable_component_cost": 1}
+    assert report.metrics.total_cost == "0.5"
+
+
+def test_a_readable_cost_alias_still_wins_over_one_too_long_to_write_out():
+    raw, _ = _read({"llm.cost.prompt": {"stringValue": "1e1000000"},
+                    "llm.cost.input": {"stringValue": "0.25"}})
+    assert raw.steps[1].evidence.prompt_cost == "0.25"
+    assert raw.ingest_warnings == []
 
 
 @pytest.mark.parametrize("value", [{"intValue": "840"}, {"stringValue": "US$"}, {"boolValue": True}])

@@ -73,6 +73,7 @@ from tracegraph.model import (
     StepSource,
     StepStatus,
     Trace,
+    cost_is_bounded,
     UnknownField,
 )
 
@@ -255,7 +256,9 @@ def _as_decimal(value: Any) -> str | None:
         parsed = Decimal(str(value))
     except InvalidOperation:
         return None
-    return format(parsed, "f") if parsed.is_finite() and parsed >= 0 else None
+    if not (parsed.is_finite() and parsed >= 0 and cost_is_bounded(parsed)):
+        return None
+    return format(parsed, "f")
 
 
 def _as_currency(value: Any) -> str | None:

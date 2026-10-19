@@ -53,6 +53,20 @@ explicitly.
 
 ### Fixed
 
+- **A cost too long to write out is no longer summed or stored** (#100). A few characters of
+  exponent stand for a number of any size. A model-valid `total_cost` of `"1e1000000"` made
+  `analyze` fail with `decimal.Overflow`, an `ArithmeticError` rather than the promised
+  `ValueError`, with or without a baseline; `"9e999999"` did not overflow but wrote a
+  million-digit total into the report. OTLP ingest wrote such a value out in full, so a 10-byte
+  attribute `"1e99999999"` became a 100,000,000-character `total_cost` in the artifact. A cost is
+  now read only if, written out in full, it is at most 64 characters (`model.MAX_COST_CHARS`),
+  checked from its digits and exponent without writing it out. `analyze` withholds the total
+  with its own note, as for an unreadable cost; OTLP ingest treats a longer cost as unreadable,
+  so the total and component costs are disclosed as `otlp.unreadable_total_cost` and
+  `otlp.unreadable_component_cost` as before, and a readable alias is still used. Artifacts are
+  not refused at load. The bound is on each cost read: two 64-character costs sum to a
+  65-character total, and a million of them to 71.
+
 - **A lone surrogate in a producer string no longer ends a command in a traceback** (#101). JSON
   can carry one (`"\ud800"`), and the artifact loads and validates, but strict UTF-8 refused it
   in several places: `analyze` and `summarize` (and `check`, which shares the helper) hashing a

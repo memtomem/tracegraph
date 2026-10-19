@@ -22,6 +22,7 @@ See ``normalize.py`` for how the derived layer is computed from the raw layer.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from enum import Enum
 import re
 from typing import Literal
@@ -119,6 +120,28 @@ class EvaluationSummary(BaseModel):
     name: str
     label: str | None = None
     score: float | None = Field(default=None, allow_inf_nan=False)
+
+
+#: Longest a cost may be when written out in full (``format(value, "f")``). A few characters of
+#: exponent stand for a number of any size: "1e1000000" overflows Decimal arithmetic, and
+#: "9e999999" is a million-digit report field. No monetary amount comes near this length.
+MAX_COST_CHARS = 64
+
+
+def cost_is_bounded(value: Decimal) -> bool:
+    """Whether a finite cost written out in full fits in ``MAX_COST_CHARS``.
+
+    Computed from the digits and exponent, never by writing the value out: that is the cost
+    this bound exists to avoid.
+    """
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):  # NaN or infinity: no fixed-point form at all
+        return False
+    if exponent >= 0:
+        length = 1 if value.is_zero() else len(digits) + exponent
+    else:
+        length = max(len(digits) + 1, 2 - exponent)
+    return sign + length <= MAX_COST_CHARS
 
 
 class StepEvidence(BaseModel):

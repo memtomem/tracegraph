@@ -19,12 +19,14 @@ from tracegraph.analysis.ahu import diff as tree_diff
 from tracegraph.analysis.patterns import PRESETS, build_index, find_matches
 from tracegraph.model import (
     EXPLICIT_ORIGINS,
+    MAX_COST_CHARS,
     CausalFidelity,
     EdgeType,
     NormalizedTrace,
     Step,
     StepStatus,
     _validated_copy,
+    cost_is_bounded,
 )
 from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
@@ -377,6 +379,7 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
     cost_currencies: set[str] = set()
     has_currencyless_cost = False
     unusable_costs = 0
+    unbounded_costs = 0
     for evidence in evidence_items:
         if evidence.total_cost is not None:
             try:
@@ -386,6 +389,9 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
                 continue
             if not (parsed.is_finite() and parsed >= 0):
                 unusable_costs += 1
+                continue
+            if not cost_is_bounded(parsed):
+                unbounded_costs += 1
                 continue
             costs.append(parsed)
             if evidence.cost_currency:
@@ -408,6 +414,13 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
         notes.append(
             f"total_cost unavailable: {unusable_costs} step(s) reported a cost that is not a "
             "finite non-negative decimal, so the remaining costs would understate the total."
+        )
+    if unbounded_costs:
+        ambiguous_cost = True
+        notes.append(
+            f"total_cost unavailable: {unbounded_costs} step(s) reported a cost longer than "
+            f"{MAX_COST_CHARS} characters written out in full, which is not summed, so the "
+            "remaining costs would understate the total."
         )
     complete = {
         field
