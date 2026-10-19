@@ -16,7 +16,7 @@ from pathlib import Path
 
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.input_validation import loads as json_loads
-from tracegraph.model import NormalizedTrace, StepSource, check_provenance
+from tracegraph.model import NormalizedTrace, StepSource
 from tracegraph.normalize import validate_normalized
 
 #: Bump when the on-disk shape changes incompatibly.
@@ -76,13 +76,40 @@ def _required_version(nt: NormalizedTrace) -> int:
 def dumps(nt: NormalizedTrace) -> str:
     """Serialize a trace to a JSON string (stable key order for diff-friendly output).
 
-    Raises ``ValueError`` rather than emitting the non-standard ``NaN``/``Infinity`` tokens,
-    which strict JSON parsers reject. The model refuses non-finite floats on validation, so
-    only a model built around validation (``model_construct``, attribute assignment) gets here.
+    Serializes a copy the model has validated, so a trace changed in place after it was built
+    (pydantic does not revalidate on attribute assignment) or assembled with
+    ``model_construct`` either becomes bytes the model reads back or raises ``ValueError``
+    (pydantic's ``ValidationError`` is one), never another exception type. That covers a
+    mistyped field, a container replaced by ``None``, the provenance pairing and non-finite
+    floats. It checks fields, not structure: a dangling edge or a stale trace status is still
+    written, as the analyses that digest non-canonical traces need. :func:`save` and
+    :func:`save_atomic` check structure too.
     """
-    # The model refuses this pairing on validation; a trace changed afterwards must not become
-    # a file this module's own reader rejects.
-    check_provenance(nt.trace, nt.steps)
+    return _serialize(_validated_copy(nt))
+
+
+def _validated_copy(nt: NormalizedTrace) -> NormalizedTrace:
+    """Round-trip ``nt`` through the model; raises only ``ValueError``.
+
+    The copy, not ``nt``, is what callers check and write: a value the model coerces (``"0"``
+    for a seq, ``"CAUSED_BY"`` for an edge type) would otherwise reach the structural check
+    and the serializer still unconverted.
+    """
+    try:
+        payload = nt.model_dump(mode="json")
+    except ValueError:
+        raise
+    except Exception as exc:
+        # Dumping runs before validation and consumes whatever the attributes hold, so a
+        # caller-supplied lazy sequence can raise anything at all. Report it the way
+        # ``_migrate_v1`` reports a failing edge sequence at the load boundary. Only the type
+        # is formatted: ``str(exc)`` runs the caller's ``__str__``, which can raise as well.
+        raise ValueError(f"trace could not be serialized: {type(exc).__name__}") from exc
+    return NormalizedTrace.model_validate(payload)
+
+
+def _serialize(nt: NormalizedTrace) -> str:
+    """Serialize a trace the model has already validated."""
     trace = nt.model_dump(mode="json")
     # An empty ``unknown_fields`` is left out so a step with nothing substituted keeps the
     # bytes it had before the field existed. Done here rather than in a Step serializer: under
@@ -212,16 +239,12 @@ def _checked_dumps(nt: NormalizedTrace) -> str:
     :func:`validate_normalized`, the check the stores and ``validate`` apply on load (legacy
     projections included). Raises ``ValueError`` (pydantic's
     ``ValidationError`` is one). The model goes first and checks everything it can, including
-    a container replaced by ``None`` and the provenance pairing; anything run before it would
-    dereference unvalidated values (:func:`dumps` re-derives the projection to pick a schema
-    version, and on a mistyped field fails with a raw ``TypeError``).
+    a container replaced by ``None`` and the provenance pairing; the structural check would
+    otherwise dereference unvalidated values and fail with a raw ``TypeError``.
     """
-    # Check and write the validated copy, not ``nt``: a value the model coerces (``"0"`` for a
-    # seq, ``"CAUSED_BY"`` for an edge type) would otherwise reach the structural check and the
-    # serializer still unconverted.
-    checked = NormalizedTrace.model_validate(nt.model_dump(mode="json"))
+    checked = _validated_copy(nt)
     validate_normalized(checked)
-    return dumps(checked)
+    return _serialize(checked)
 
 
 def save(nt: NormalizedTrace, path: str | Path) -> None:

@@ -728,10 +728,18 @@ def test_writers_write_the_validated_value_of_a_coercible_assignment(tmp_path, w
     assert artifact.load(target) == _canonical_two_step()
 
 
-@pytest.mark.filterwarnings("ignore::UserWarning")
-@pytest.mark.parametrize("break_it", ["steps=None", "steps[0]=None", "trace=None", "steps[0]=object"])
-@pytest.mark.parametrize("writer", ["save", "save_atomic"])
-def test_writers_refuse_a_replaced_container_with_a_value_error(tmp_path, writer, break_it):
+_BROKEN_CONTAINERS = [
+    "steps=None", "steps[0]=None", "trace=None", "steps[0]=object", "edges=None",
+    "steps=failing-iterator", "steps=iterator-with-failing-str",
+]
+
+
+class _UnprintableError(RuntimeError):
+    def __str__(self) -> str:
+        raise RuntimeError("str() of the error")
+
+
+def _container_replaced(break_it: str) -> NormalizedTrace:
     nt = _canonical_two_step()
     if break_it == "steps=None":
         nt.steps = None  # type: ignore[assignment]
@@ -739,11 +747,77 @@ def test_writers_refuse_a_replaced_container_with_a_value_error(tmp_path, writer
         nt.steps[0] = None  # type: ignore[call-overload]
     elif break_it == "trace=None":
         nt.trace = None  # type: ignore[assignment]
-    else:
+    elif break_it == "steps[0]=object":
         nt.steps[0] = object()  # type: ignore[call-overload]
+    elif break_it == "edges=None":
+        nt.edges = None  # type: ignore[assignment]
+    else:
+        # Serializing consumes the sequence before the model sees it, so whatever a lazy one
+        # raises would otherwise escape as itself.
+        error = RuntimeError if break_it == "steps=failing-iterator" else _UnprintableError
+
+        def failing(steps):
+            yield steps[0]
+            raise error("bad iterator")
+
+        nt.steps = failing(list(nt.steps))  # type: ignore[assignment]
+    return nt
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize("break_it", _BROKEN_CONTAINERS)
+@pytest.mark.parametrize("writer", ["save", "save_atomic"])
+def test_writers_refuse_a_replaced_container_with_a_value_error(tmp_path, writer, break_it):
+    nt = _container_replaced(break_it)
     target = tmp_path / "a.json"
     target.write_text("previous", encoding="utf-8")
     with pytest.raises(ValueError):
         getattr(artifact, writer)(nt, target)
     assert target.read_text(encoding="utf-8") == "previous"
     assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize(
+    "build",
+    [
+        *(f"change:{c}" for c in ("seq", "status", "step_id", "seq-object", "cyclic-unknown")),
+        *(f"container:{b}" for b in _BROKEN_CONTAINERS),
+    ],
+)
+def test_dumps_refuses_what_the_model_refuses_with_a_value_error(build):
+    kind, name = build.split(":")
+    if kind == "container":
+        nt = _container_replaced(name)
+    elif name in ("seq", "status"):
+        nt = _changed_in_place(name)
+    else:
+        nt = _canonical_two_step()
+        if name == "step_id":
+            nt.steps[0].step_id = 5  # type: ignore[assignment]
+        elif name == "seq-object":
+            nt.steps[0].seq = object()  # type: ignore[assignment]
+        else:
+            cyclic: dict = {}
+            cyclic["self"] = cyclic
+            nt.steps[0].unknown_fields = cyclic  # type: ignore[assignment]
+    with pytest.raises(ValueError):
+        artifact.dumps(nt)
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")  # pydantic's serializer warns on the str seq
+def test_dumps_writes_the_validated_value_of_a_coercible_assignment():
+    nt = _canonical_two_step()
+    nt.steps[0].seq = "0"  # type: ignore[assignment]
+    assert artifact.dumps(nt) == artifact.dumps(_canonical_two_step())
+
+
+@pytest.mark.parametrize("change", ["dangling-edge", "stale-status"])
+def test_dumps_checks_fields_not_structure(change):
+    # Readers and analyses gate structure; dumps() must still write such a trace (analyze()
+    # digests non-canonical baselines, and reader-rejection tests need the bytes).
+    trace = json.loads(artifact.dumps(_changed_in_place(change)))["trace"]
+    if change == "dangling-edge":
+        assert [e["dst"] for e in trace["edges"] if e["type"] == "CAUSED_BY"] == ["ghost"]
+    else:
+        assert trace["trace"]["status"] == "error"

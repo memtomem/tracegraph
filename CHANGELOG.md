@@ -34,6 +34,22 @@ explicitly.
 
 ### Fixed
 
+- **`artifact.dumps()` raises only `ValueError`** (#82). A trace changed in place after it was
+  built (pydantic does not revalidate on attribute assignment) could make it raise a raw
+  `TypeError` (`seq = "zero"`, `steps = None`, `edges = None`) or write a field the readers
+  reject (`status = "maybe"`, an integer `step_id`). `dumps()` now serializes a copy the model
+  has validated, as the writers already did, and raises `ValueError` for anything the model
+  refuses or cannot serialize: pydantic's `ValidationError` for a mistyped field, a
+  serialization error (also a `ValueError`) for a value it cannot dump at all, such as
+  `trace = None`. A value the model coerces (`"0"` for a `seq`) is written as it would be read.
+  A lazy sequence that fails while being serialized, through `dumps()` or either writer, is now
+  reported as a `ValueError` too, instead of whatever it raised. `dumps()` still checks fields,
+  not structure: a dangling edge or a stale trace status is written, because `analyze()`
+  digests such traces. Unknown-field flags without a capture record now reach a `dumps()`
+  caller as `ValidationError`, as they already did for the writers. A valid trace is
+  serialized byte for byte as before. Cost on a 6000-step chain: `dumps()` 0.15 s → 0.20 s;
+  `analyze()` digests the current trace through it, a baseline comparison and `check` digest
+  both.
 - **An error already in the parent graph is no longer recorded again around a subgraph** (#85).
   A LangGraph checkpoint is an error where the error channel holds one and none of the
   checkpoints it was built from did, but the check read only a checkpoint's causal parents, and
