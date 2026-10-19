@@ -53,6 +53,15 @@ explicitly.
 
 ### Fixed
 
+- **Cost totals and their baseline delta are exact** (#111). They were computed at `Decimal`'s
+  default precision of 28 significant digits and rounded without a note, while the total was
+  still reported as complete: a cost of `0.12345678901234567890123456789` was totalled as
+  `0.1234567890123456789012345679`, and `10000000000000000000000000000` plus `0.01` as
+  `10000000000000000000000000000`. They are now computed at a precision of 160, which is exact
+  for any sum of costs within the 64-character bound up to about 10^32 steps. Past that, the total
+  (or only the delta) is withheld with a note instead of rounded. Ordinary costs report the same
+  digits as before (`1.00 + 1.00` is still `2.00`).
+
 - **A cost too long to write out is no longer summed or stored** (#100). A few characters of
   exponent stand for a number of any size. A model-valid `total_cost` of `"1e1000000"` made
   `analyze` fail with `decimal.Overflow`, an `ArithmeticError` rather than the promised
@@ -64,8 +73,8 @@ explicitly.
   with its own note, as for an unreadable cost; OTLP ingest treats a longer cost as unreadable,
   so the total and component costs are disclosed as `otlp.unreadable_total_cost` and
   `otlp.unreadable_component_cost` as before, and a readable alias is still used. Artifacts are
-  not refused at load. The bound is on each cost read: two 64-character costs sum to a
-  65-character total, and a million of them to 71.
+  not refused at load. The bound is on each cost read, not on the total: summed exactly (#111),
+  two 64-character costs can make a 127-character total, and a million of them 133.
 
 - **A lone surrogate in a producer string no longer ends a command in a traceback** (#101). JSON
   can carry one (`"\ud800"`), and the artifact loads and validates, but strict UTF-8 refused it

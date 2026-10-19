@@ -8,7 +8,15 @@ import re
 from typing import Any, overload
 from collections import deque
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import (
+    Context,
+    Decimal,
+    DivisionByZero,
+    Inexact,
+    InvalidOperation,
+    Overflow,
+    localcontext,
+)
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -149,6 +157,15 @@ class AnalysisReport(BaseModel):
     comparison: ComparisonSummary | None = None
     warnings: list[str] = Field(default_factory=list)
     privacy_profile: str = "safe-v1"
+
+
+#: Costs are summed, and their baseline delta taken, in this context, so a total is exact or not
+#: reported. Each cost is at most ``MAX_COST_CHARS`` written out, so the widest exact sum of two
+#: needs 126 significant digits, and each tenfold more steps adds one: this covers about 10**32
+#: steps. Past that the result would be rounded, which ``Inexact`` turns into a withheld value.
+_COST_CONTEXT = Context(
+    prec=2 * MAX_COST_CHARS + 32, traps=[InvalidOperation, DivisionByZero, Overflow, Inexact]
+)
 
 
 #: The exact shape ``_safe`` emits, used to detect aliases that reached the final report.
@@ -422,6 +439,17 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
             f"{MAX_COST_CHARS} characters written out in full, which is not summed, so the "
             "remaining costs would understate the total."
         )
+    total_cost: Decimal | None = None
+    if costs and not ambiguous_cost:
+        try:
+            with localcontext(_COST_CONTEXT):
+                total_cost = sum(costs, Decimal(0))
+        except Inexact:
+            ambiguous_cost = True
+            notes.append(
+                "total_cost unavailable: the exact sum of the reported costs needs more than "
+                f"{_COST_CONTEXT.prec} significant digits, and a rounded total is not reported."
+            )
     complete = {
         field
         for field in ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -448,7 +476,7 @@ def _metrics_with_notes(nt: NormalizedTrace) -> tuple[MetricSummary, list[str], 
         prompt_tokens=total_int("prompt_tokens"),
         completion_tokens=total_int("completion_tokens"),
         total_tokens=total_int("total_tokens"),
-        total_cost=(format(sum(costs), "f") if costs and not ambiguous_cost else None),
+        total_cost=None if total_cost is None else format(total_cost, "f"),
         cost_currency=(
             next(iter(cost_currencies))
             if len(cost_currencies) == 1 and not ambiguous_cost
@@ -583,7 +611,16 @@ def _comparison(
             "currencies, and costs are never converted."
         )
     elif covered("total_cost") and current_cost is not None and baseline_cost is not None:
-        cost_delta = format(Decimal(current_cost) - Decimal(baseline_cost), "f")
+        try:
+            with localcontext(_COST_CONTEXT):
+                delta = Decimal(current_cost) - Decimal(baseline_cost)
+        except Inexact:
+            notes.append(
+                "total_cost delta unavailable: the exact difference needs more than "
+                f"{_COST_CONTEXT.prec} significant digits, and a rounded delta is not reported."
+            )
+        else:
+            cost_delta = format(delta, "f")
     metric_deltas: dict[str, float | int | str | None] = {
         field: _delta(getattr(cm, field), getattr(bm, field)) if covered(field) else None
         for field in ("wall_duration_ms", "prompt_tokens", "completion_tokens", "total_tokens")
