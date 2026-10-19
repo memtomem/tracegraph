@@ -409,7 +409,10 @@ fork and resuming. The subgraph's next start records the error again, whether th
 held it (#90) or a `Send` payload carried it (#96). The copy holds the same channels as the input
 it copies but no link back to it. Each marker tried (an unread `__start__` value, a pending
 `__start__` task) also appears on a fork of a plain `Pregel` graph's loop checkpoint, where
-treating it as an input hid a genuine failure, so the duplicate is left in place.
+treating it as an input hid a genuine failure. Matching the copy to an input checkpoint with
+identical channels and versions fails too. A `Pregel` input's first step can run a user node, so
+the original run is no baseline for the copy's run. And a no-op `update_state(..., as_node="__input__")`
+can write an input identical to a loop checkpoint. So the duplicate is left in place.
 A node that writes the channel again while it still holds one may have failed again, or only
 have returned the whole state (and a reducer can change the value either way); the checkpoint
 cannot tell which, so such a write is not recorded as a failure but disclosed as the capture
