@@ -38,6 +38,7 @@ from typer.testing import CliRunner
 
 from tracegraph import artifact
 from tracegraph import cli as cli_mod
+from tracegraph import graph_ref
 from tracegraph.adapters import LangGraphCheckpointAdapter
 from tracegraph.cli import app as cli_app
 from tracegraph.graph_ref import fingerprint, load_graph
@@ -824,6 +825,34 @@ def test_a_module_getattr_that_exits_is_refused(tmp_path):
     path.write_text("def __getattr__(name):\n    raise SystemExit(7)\n", encoding="utf-8")
     with pytest.raises(ValueError, match="cannot load graph .*SystemExit: 7"):
         load_graph(f"{path}:graph")
+
+
+@pytest.mark.parametrize("name", ["my_graph.py", "\N{LATIN SMALL LETTER E WITH ACUTE}.py"])
+def test_a_utf8_path_keeps_its_module_name(tmp_path, name):
+    path = tmp_path / name
+    expected = "_tracegraph_graph_" + hashlib.sha256(str(path).encode()).hexdigest()[:16]
+    assert graph_ref._module_name(path) == expected
+
+
+def test_a_path_without_utf8_bytes_never_shares_a_utf8_paths_module_name(monkeypatch):
+    """Under Shift-JIS the bytes of "\u7e3a\udc82" (a surrogate-escaped name) are the UTF-8
+    bytes of "\u3042", so hashing both bare would register two files as one module."""
+    monkeypatch.setattr(
+        graph_ref.os, "fsencode", lambda p: os.fspath(p).encode("shift_jis", "surrogateescape")
+    )
+    utf8 = graph_ref._module_name(Path("/tmp/\u3042.py"))
+    fallback = graph_ref._module_name(Path("/tmp/\u7e3a\udc82.py"))
+    assert utf8.startswith("_tracegraph_graph_") and fallback.startswith("_tracegraph_graph_fs_")
+    assert utf8 != fallback
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux accepts a file name that is not UTF-8")
+def test_a_graph_file_whose_name_is_not_utf8_loads(tmp_path):
+    path = os.path.join(os.fsencode(tmp_path), b"g\xff.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(_GRAPH_MODULE)
+    graph = load_graph(f"{os.fsdecode(path)}:graph")
+    assert set(graph.nodes) == {"__start__", "x", "y"}
 
 
 def test_a_failed_reload_keeps_the_module_an_earlier_load_registered(graph_file):
