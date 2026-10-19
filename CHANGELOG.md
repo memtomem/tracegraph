@@ -53,6 +53,12 @@ explicitly.
 
 ### Fixed
 
+- **`--graph` loads a module file whose path is not valid UTF-8** (#110). On POSIX such a path
+  arrives surrogate-escaped, and naming the module from its strict UTF-8 encoding refused it:
+  `ingest --graph` exited 2 with a `UnicodeEncodeError` for a file it could import. Such a path
+  is now named from its file-system bytes, under its own prefix so it cannot take another
+  file's name. Every path that loaded before keeps its module name.
+
 - **Cost totals and their baseline delta are exact** (#111). They were computed at `Decimal`'s
   default precision of 28 significant digits and rounded without a note, while the total was
   still reported as complete: a cost of `0.12345678901234567890123456789` was totalled as

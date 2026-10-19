@@ -31,11 +31,24 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
+def _module_name(resolved: Path) -> str:
+    """A stable, collision-free module name for the file at ``resolved``.
+
+    A POSIX path whose bytes are not UTF-8 arrives surrogate-escaped, which strict UTF-8 refuses;
+    it is hashed from its file-system bytes instead. That name gets its own prefix: under a
+    non-UTF-8 file-system encoding those bytes can equal another path's UTF-8 bytes.
+    """
+    try:
+        return "_tracegraph_graph_" + hashlib.sha256(str(resolved).encode()).hexdigest()[:16]
+    except UnicodeEncodeError:
+        return "_tracegraph_graph_fs_" + hashlib.sha256(os.fsencode(resolved)).hexdigest()[:16]
+
+
 def _import_file(resolved: Path) -> Any:
-    # A stable, collision-free module name. The module is registered before it executes, as
-    # the import system does, because dataclasses and postponed annotations look their own
-    # module up in sys.modules while the class body runs.
-    name = "_tracegraph_graph_" + hashlib.sha256(str(resolved).encode()).hexdigest()[:16]
+    # The module is registered before it executes, as the import system does, because
+    # dataclasses and postponed annotations look their own module up in sys.modules while the
+    # class body runs.
+    name = _module_name(resolved)
     spec = importlib.util.spec_from_file_location(name, resolved)
     if spec is None or spec.loader is None:
         raise ImportError(f"{resolved} is not importable as a Python module")
