@@ -8,6 +8,7 @@ import pytest
 
 from jsonschema import Draft202012Validator
 
+from tracegraph.analysis import diagnose
 from tracegraph.analysis.diagnose import analyze, dumps
 from tracegraph.model import (
     MAX_COST_CHARS,
@@ -333,14 +334,62 @@ def test_a_cost_too_long_to_write_out_withholds_the_total(cost):
         ), compared.warnings
 
 
-@pytest.mark.parametrize("cost", ["9" * MAX_COST_CHARS, "1e31", "0." + "0" * 61 + "1", "0E+1000000"])
-def test_a_cost_at_the_length_bound_is_summed(cost):
+@pytest.mark.parametrize(
+    ("costs", "total"),
+    [
+        (["9" * MAX_COST_CHARS] * 2, "1" + "9" * 63 + "8"),
+        (["1e31"] * 2, "2" + "0" * 31),
+        (["0." + "0" * 61 + "1"] * 2, "0." + "0" * 61 + "2"),
+        (["0E+1000000"] * 2, "0"),
+        # The widest exact sum of two bounded costs: 126 significant digits.
+        (["9" * MAX_COST_CHARS, "0." + "0" * 61 + "1"], "9" * 64 + "." + "0" * 61 + "1"),
+        # The two rows of #111: rounded to 28 significant digits before.
+        (["0.12345678901234567890123456789"], "0.12345678901234567890123456789"),
+        (["10000000000000000000000000000", "0.01"], "10000000000000000000000000000.01"),
+    ],
+)
+def test_costs_within_the_length_bound_are_summed_exactly(costs, total):
     nt = _trace("bound-cost", StepStatus.OK)
-    nt.steps[0].evidence = StepEvidence(total_cost=cost, cost_currency="USD")
-    nt.steps[1].evidence = StepEvidence(total_cost=cost, cost_currency="USD")
+    for step, cost in zip(nt.steps, costs, strict=False):
+        step.evidence = StepEvidence(total_cost=cost, cost_currency="USD")
     report = analyze(nt)
-    # Two bounded costs can sum past the bound; the bound is on what is read, not the total.
-    assert report.metrics.total_cost == format(sum([Decimal(cost)] * 2), "f")
+    # The bound is on each cost read, not on the total: two bounded costs can sum past it.
+    assert report.metrics.total_cost == total
+    assert not any("total_cost" in w and "significant digits" in w for w in report.warnings)
+
+
+def _costed(trace_id, *costs):
+    nt = _trace(trace_id, StepStatus.OK)
+    for step, cost in zip(nt.steps, costs, strict=True):
+        step.evidence = StepEvidence(total_cost=cost, cost_currency="USD")
+    return nt
+
+
+def test_a_total_that_cannot_be_summed_exactly_is_withheld(monkeypatch):
+    """Backstop: past about 10**32 steps the sum could need more digits than the context holds."""
+    monkeypatch.setattr(diagnose, "_COST_CONTEXT", diagnose._COST_CONTEXT.copy())
+    diagnose._COST_CONTEXT.prec = 3
+    report = analyze(_costed("inexact", "100", "0.01", "0"))
+    assert report.metrics.total_cost is None
+    assert any(
+        w.startswith("total_cost unavailable") and "3 significant digits" in w
+        for w in report.warnings
+    ), report.warnings
+    compared = analyze(_costed("exact", "100", "0", "0"), baseline=_costed("exact-b", "1", "0", "0"))
+    assert compared.comparison.metric_deltas["total_cost"] == "99"
+
+
+def test_a_delta_that_cannot_be_computed_exactly_is_withheld_but_both_totals_stay(monkeypatch):
+    monkeypatch.setattr(diagnose, "_COST_CONTEXT", diagnose._COST_CONTEXT.copy())
+    diagnose._COST_CONTEXT.prec = 3
+    report = analyze(_costed("cur", "100", "0", "0"), baseline=_costed("base", "0.01", "0", "0"))
+    assert report.metrics.total_cost == "100"
+    assert report.comparison.metric_deltas["total_cost"] is None
+    assert any(
+        w.startswith("total_cost delta unavailable") and "3 significant digits" in w
+        for w in report.warnings
+    ), report.warnings
+    assert not any(w.startswith("baseline: total_cost unavailable") for w in report.warnings)
 
 
 @pytest.mark.parametrize(
