@@ -282,7 +282,8 @@ agrees, under the same source kind, causal fidelity and link setting, and the sa
 whether the trace discloses causal edges chosen heuristically at ingest (`motif-signature/v1`).
 That last answer is per trace: an OTLP export records a parent picked by timing with the same
 origin as an unambiguous one, and says only that some edge was picked that way, not which. A trace
-with no capture record gets `null`. A single-step preset has no edge, so the answer is always `false`.
+with no capture record gets `null`. A single-step preset has no edge, so the answer is always
+`false`.
 Trace and step ids, error text and artifact file paths are never part of it. Names pass the same
 safe-v1 rule as `analyze` reports. An identifier-shaped name is kept even when it looks like a path or an
 address, and anything else becomes `redacted:<sha256>`. An operation whose name changes from run
