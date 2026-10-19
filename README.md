@@ -404,6 +404,12 @@ from checkpoint pending writes. A checkpoint is an error where the channel first
 An error the parent graph already held is not recorded again where a subgraph receives it, nor
 where the parent graph continues after a subgraph that did not carry it, and a fork copy
 (`update_state(..., as_node="__copy__")`), which runs no node, never records one.
+One time-travel shape still records an error twice: copying a subgraph's *input* checkpoint as a
+fork and resuming. The subgraph's next start records the error again, whether the parent graph
+held it (#90) or a `Send` payload carried it (#96). The copy holds the same channels as the input
+it copies but no link back to it. Each marker tried (an unread `__start__` value, a pending
+`__start__` task) also appears on a fork of a plain `Pregel` graph's loop checkpoint, where
+treating it as an input hid a genuine failure, so the duplicate is left in place.
 A node that writes the channel again while it still holds one may have failed again, or only
 have returned the whole state (and a reducer can change the value either way); the checkpoint
 cannot tell which, so such a write is not recorded as a failure but disclosed as the capture
