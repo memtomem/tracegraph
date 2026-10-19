@@ -19,6 +19,7 @@ never touches this module.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Iterator
 import json
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,11 @@ from tracegraph import artifact
 from tracegraph.analysis.patterns import (
     PathPattern,
     UncompilablePattern,
+    build_index,
     compile_to_cypher,
+    first_matches,
+    iter_matches,
 )
-from tracegraph.analysis.patterns import find_matches as py_find_matches
 from tracegraph.model import (
     Edge,
     EdgeOrigin,
@@ -345,21 +348,37 @@ class LadybugStore:
         :meth:`ancestors` already uses for the same cap. The accelerator degrades to *slower*,
         never to *wrong*; ``fell_back_to_python`` records that it happened.
         """
+        return self.first_matches(pattern, None)[0]
+
+    def first_matches(self, pattern: PathPattern, n: int | None) -> tuple[list[list[str]], int]:
+        """The first ``n`` paths of :meth:`find_matches` (all when ``None``), and how many it has.
+
+        Rows are consumed one at a time and only ``n`` are kept, so a small ``n`` does not hold
+        the trace's every match in Python. The engine itself still materializes the query's
+        result set. The result is closed here, on every exit, rather than by the iterator that
+        reads it.
+        """
         self._check_open()
         self.fell_back_to_python = False
         if not pattern.steps:
             # Match the pure-Python convention so callers can be backend-agnostic; the
             # compile step would raise, but raising here would break that contract.
-            return []
+            return [], 0
         try:
             q = compile_to_cypher(pattern)
         except UncompilablePattern:
             self.fell_back_to_python = True
-            return py_find_matches(self.trace(), pattern)
-        rows = _collect(self._conn.execute(q.cypher, q.params))
+            nt = self.trace()
+            index = build_index(nt)
+            return first_matches(iter_matches(nt, pattern, index=index), index[0], n)
         steps_by_id = {s.step_id: s for s in self._load_all_steps()}
-        rows.sort(key=lambda row: tuple((steps_by_id[sid].seq, sid) for sid in row))
-        return [list(row) for row in rows]
+        result = self._conn.execute(q.cypher, q.params)
+        try:
+            return first_matches(_rows(result), steps_by_id, n)
+        finally:
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
 
     # --- internals ---
 
@@ -513,6 +532,12 @@ def _step_from_row(row: list[Any]) -> Step:
             json.loads(by_name["unknown_fields_json"]) if by_name["unknown_fields_json"] else []
         ),
     )
+
+
+def _rows(result: Any) -> Iterator[list[Any]]:
+    """A Ladybug QueryResult's rows, one at a time. The caller owns closing the result."""
+    while result.has_next():
+        yield list(result.get_next())
 
 
 def _collect(result: Any) -> list[list[Any]]:

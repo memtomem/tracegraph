@@ -469,9 +469,15 @@ unavailable, disclosing each on stderr; the producer's value is never kept. File
 and Phoenix `px` output share one size limit (`TRACEGRAPH_MAX_ARTIFACT_BYTES`). `query` reads
 artifacts one after another and keeps only the matches it prints (plus the traces `--explain`
 renders). With `--limit`, its peak memory therefore grows with the number of artifacts only
-by a small per-file record (path, trace id); without it, by the matches it prints. It still
-enumerates every match of the trace it is reading, to report the exact total: one trace with
-very many matches is not bounded by `--limit`.
+by a small per-file record (path, trace id); without it, by the matches it prints. Inside one
+trace, too, it keeps only the matches that still fit under `--limit`, but it still enumerates
+and counts every match to report the exact total, so time grows with the match count: one
+2500-step trace with 3.1M matches takes about 3 s at `--limit 1`, in 70 MiB. The search's own
+working state (steps reached at each distance of a gap) does not depend on `--limit`. With
+`--backend ladybug` on a pattern that compiles to Cypher, LadybugDB itself buffers the
+query's full result set: a 3001-step trace with 2.25M `tool-retry-failure` matches peaked
+at 757 MiB, where the store alone takes about 300 MiB. A plain read, `count(*)` and
+`ORDER BY … LIMIT` all buffered it in our measurements.
 
 Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;
 Ladybug's existing insertion semantics are unchanged. Use `is_isomorphic` or `diff` for

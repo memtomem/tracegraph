@@ -30,7 +30,9 @@ dropped.
 
 from __future__ import annotations
 
+import heapq
 from collections import deque
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
 from tracegraph.model import EdgeType, NormalizedTrace, Step, StepKind, StepStatus
@@ -218,18 +220,33 @@ def find_matches(
 
     Performance: two-step unbounded patterns such as ``tool-repeat-failure-heuristic`` and
     ``repeated-agent-failure`` take an endpoint-anchored fast path — see
-    :func:`_match_two_step_unbounded`. A naive forward walk from every tool would be O(n²) on the
+    :func:`_iter_two_step_unbounded`. A naive forward walk from every tool would be O(n²) on the
     deep-linear traces this project targets; the fast path skips endpoints no candidate can pair
     with and bounds each remaining walk by the earliest eligible candidate's ``seq``, so with a
     back-reference it is linear when no names repeat (it is not output-optimal in general). Every
-    other shape
-    uses :func:`_find_matches_forward`, which is linear for bounded/strict patterns (a bounded gap
-    is capped at :data:`MAX_GAP` hops). The fast path returns *exactly* the same matches as the
-    forward matcher (which remains the semantic reference); a randomized differential test pins
-    that equality.
+    other shape uses :func:`_find_matches_forward`, which is linear per match prefix for
+    bounded/strict patterns (a bounded gap walks at most its upper bound in hops); the number of
+    matches itself can be quadratic, e.g. many tools fanning into one retry step that fans out to
+    many failures. The fast path returns *exactly* the same matches as the forward matcher (which
+    remains the semantic reference); a randomized differential test pins that equality.
     """
     if not pattern.steps:
         return []
+    if index is None:
+        index = build_index(nt)
+    return sorted(iter_matches(nt, pattern, index=index), key=_row_key(index[0]))
+
+
+def iter_matches(
+    nt: NormalizedTrace, pattern: PathPattern, *, index: TraceIndex | None = None
+) -> Iterator[list[str]]:
+    """The paths :func:`find_matches` returns, each exactly once, in no particular order.
+
+    Nothing is retained per yielded path, so a caller that keeps only some of them (see
+    :func:`first_matches`) holds only those. Back-references are validated before this returns.
+    """
+    if not pattern.steps:
+        return iter(())
     _validate_backrefs(pattern.steps)
     if index is None:
         index = build_index(nt)
@@ -243,8 +260,38 @@ def find_matches(
         and preds[1].gap is not None
         and preds[1].gap[1] is None
     ):
-        return _match_two_step_unbounded(index, preds[0], preds[1])
-    return _find_matches_forward(index, pattern)
+        return _iter_two_step_unbounded(index, preds[0], preds[1])
+    return _iter_forward(index, pattern)
+
+
+def _row_key(steps: dict[str, Step]) -> Callable[[list[str]], tuple[tuple[int, str], ...]]:
+    """The match order: ``(seq, step_id)`` per column, compared column by column."""
+    return lambda row: tuple((steps[sid].seq, sid) for sid in row)
+
+
+def first_matches(
+    paths: Iterable[list[str]], steps: dict[str, Step], n: int | None
+) -> tuple[list[list[str]], int]:
+    """The first ``n`` of ``paths`` in match order (all when ``None``), and how many there are.
+
+    Holds at most ``n`` paths at a time, so a small ``n`` over a trace with millions of matches
+    stays small; counting still visits every path. Each path's key holds its step ids, so keys
+    are unique and the result equals ``sorted(paths, key=_row_key(steps))[:n]``.
+    """
+    it = iter(paths)
+    total = 0
+
+    def counted() -> Iterator[list[str]]:
+        nonlocal total
+        for path in it:
+            total += 1
+            yield path
+
+    key = _row_key(steps)
+    kept = sorted(counted(), key=key) if n is None else heapq.nsmallest(n, counted(), key=key)
+    for _ in it:  # nsmallest(0, ...) returns without iterating
+        total += 1
+    return kept, total
 
 
 def _name_ok(pred: StepPredicate, step: Step, bound: dict[int, str | None]) -> bool:
@@ -263,52 +310,52 @@ def _find_matches_forward(index: TraceIndex, pattern: PathPattern) -> list[list[
     """The general matcher: walk every predicate forward over the causal graph.
 
     This is the semantic reference for :func:`find_matches` — every other path must reproduce it
-    exactly. Linear for strict/bounded patterns; only an *unbounded* gap (which the dispatcher
-    routes elsewhere for the common 2-step shape) can make it quadratic.
+    exactly. For strict/bounded patterns the walk from each prefix is bounded (a gap by
+    its upper bound in hops), though fan-in and fan-out can still make the output quadratic; an
+    *unbounded* gap (which the dispatcher routes elsewhere for the common 2-step shape) makes
+    the walk itself quadratic.
     """
-    walk = _ForwardWalk(index[0], index[1], pattern.steps, [], set())
-    for sid in walk.steps:
-        _advance(walk, sid, 0, [], {})
-    walk.results.sort(key=lambda row: tuple((walk.steps[sid].seq, sid) for sid in row))
-    return walk.results
+    return sorted(_iter_forward(index, pattern), key=_row_key(index[0]))
 
 
-@dataclass
-class _ForwardWalk:
-    """State shared by one :func:`_find_matches_forward` call. A module-level recursion over it,
-    rather than a self-referencing closure, leaves no reference cycle holding the index and
-    results after the call returns."""
-
-    steps: dict[str, Step]
-    children: dict[str, list[str]]
-    preds: tuple[StepPredicate, ...]
-    results: list[list[str]]
-    seen: set[tuple[str, ...]]
+def _iter_forward(index: TraceIndex, pattern: PathPattern) -> Iterator[list[str]]:
+    steps, children = index
+    for sid in steps:
+        yield from _advance(steps, children, pattern.steps, sid, 0, [], {})
 
 
 # Recursion depth here == predicate index (len(preds), ~2-4), NOT trace depth — safe on the
 # deep-linear traces this project sees. The variable-length gap walk below is an explicit
 # deque (heap, not stack), so a 30-hop span over a 2000-step trace never grows the call stack.
 def _advance(
-    walk: _ForwardWalk, node_id: str, idx: int, acc: list[str], bound: dict[int, str | None]
-) -> None:
-    preds, children = walk.preds, walk.children
-    step = walk.steps[node_id]
+    steps: dict[str, Step],
+    children: dict[str, list[str]],
+    preds: tuple[StepPredicate, ...],
+    node_id: str,
+    idx: int,
+    acc: list[str],
+    bound: dict[int, str | None],
+) -> Iterator[list[str]]:
+    """Yield every match extending the prefix ``acc`` from ``node_id`` at predicate ``idx``.
+
+    Each call yields distinct paths: it extends one fixed prefix, and each level advances any
+    node at most once (a strict step dedups its children, since an unvalidated trace can repeat
+    an edge; a gap advances a node once however many in-range distances reach it). So, with no
+    set of every path, each match is produced once — ``RETURN DISTINCT``'s result.
+    """
+    step = steps[node_id]
     pred = preds[idx]
     if not pred.matches(step) or not _name_ok(pred, step, bound):
         return
     acc2 = acc + [node_id]
     if idx + 1 == len(preds):
-        key = tuple(acc2)
-        if key not in walk.seen:  # == RETURN DISTINCT: collapse multiple gap paths to one row
-            walk.seen.add(key)
-            walk.results.append(acc2)
+        yield acc2
         return
     bound2 = {**bound, idx: step.name}
     nxt = preds[idx + 1]
     if nxt.gap is None:
-        for child in children.get(node_id, []):
-            _advance(walk, child, idx + 1, acc2, bound2)
+        for child in dict.fromkeys(children.get(node_id, [])):
+            yield from _advance(steps, children, preds, child, idx + 1, acc2, bound2)
         return
     lo, hi = nxt.gap
     # BFS forward over CAUSED_BY (cause -> effect). De-dup on (node, distance) so a diamond
@@ -316,21 +363,23 @@ def _advance(
     # endpoint reachable only at a longer-than-min distance within [lo, hi] is not missed.
     frontier: deque[tuple[str, int]] = deque((c, 1) for c in children.get(node_id, []))
     visited_states: set[tuple[str, int]] = set()
+    advanced: set[str] = set()
     while frontier:
         cur, dist = frontier.popleft()
         if (cur, dist) in visited_states:
             continue
         visited_states.add((cur, dist))
-        if dist >= lo and (hi is None or dist <= hi):
-            _advance(walk, cur, idx + 1, acc2, bound2)
+        if dist >= lo and (hi is None or dist <= hi) and cur not in advanced:
+            advanced.add(cur)
+            yield from _advance(steps, children, preds, cur, idx + 1, acc2, bound2)
         if hi is None or dist < hi:
             for c in children.get(cur, []):
                 frontier.append((c, dist + 1))
 
 
-def _match_two_step_unbounded(
+def _iter_two_step_unbounded(
     index: TraceIndex, p0: StepPredicate, p1: StepPredicate
-) -> list[list[str]]:
+) -> Iterator[list[str]]:
     """Endpoint-anchored matcher for ``[p0, p1-with-unbounded-gap]`` (the marquee shape).
 
     A match is ``(a, e)`` where ``a`` satisfies ``p0``, ``e`` satisfies ``p1`` (incl. its
@@ -339,8 +388,9 @@ def _match_two_step_unbounded(
     exists" is exactly "the *longest* path ``a -> e`` is ``>= lo``", so we work backward from each
     ``p1`` endpoint, computing the longest causal distance to it for every ancestor in one
     reverse-topological pass. (A forward walk from every ``p0`` match would be ``O(n²)`` on a
-    deep-linear trace; this avoids re-traversing the shared downstream suffix.) Produces exactly
-    what :func:`_find_matches_forward` would.
+    deep-linear trace; this avoids re-traversing the shared downstream suffix.) Yields exactly
+    the paths :func:`_iter_forward` would, each once (``a`` ranges over a set per endpoint), in
+    endpoint order rather than match order.
 
     Each endpoint's backward walk is bounded by its *eligible* candidates: the ``p0`` matches
     that could pair with it at all (with ``same_name_as``, those sharing its non-null name). An
@@ -348,8 +398,8 @@ def _match_two_step_unbounded(
     strictly precedes its effect's, every path from a candidate to ``e`` stays inside the seq
     window ``[earliest eligible candidate, e]``, so the walk never leaves that window. Work is
     ``O(n + edges)``, plus for each endpoint with an earlier eligible candidate its ancestors
-    inside that window and their cause edges (times a log for the sort), plus sorting the
-    matches. With a back-reference that is linear when no names repeat, or when each such
+    inside that window and their cause edges (times a log for the sort); ordering the matches
+    is the caller's. With a back-reference that is linear when no names repeat, or when each such
     window holds a bounded number of ancestors and cause edges (a chain of distinct names with
     disjoint adjacent repeats, say). It is quadratic when many endpoints share large windows:
     many steps sharing one name (every window then starts at the first of them, and the output
@@ -378,7 +428,6 @@ def _match_two_step_unbounded(
         if key not in floor_by_name or st.seq < floor_by_name[key]:
             floor_by_name[key] = st.seq
 
-    results: list[list[str]] = []
     for e in (sid for sid, st in steps.items() if p1.matches(st)):
         ename = steps[e].name
         if by_name and ename is None:
@@ -412,9 +461,7 @@ def _match_two_step_unbounded(
             # _name_ok / the compiled `IS NOT NULL` guard.
             if by_name and not (steps[a].name is not None and ename == steps[a].name):
                 continue
-            results.append([a, e])
-    results.sort(key=lambda row: tuple((steps[sid].seq, sid) for sid in row))
-    return results
+            yield [a, e]
 
 
 def search(traces: list[NormalizedTrace], pattern: PathPattern) -> list[Match]:

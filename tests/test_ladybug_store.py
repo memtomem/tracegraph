@@ -810,3 +810,117 @@ def test_cli_ladybug_backend_rejects_out_of_range_seq_cleanly(tmp_path) -> None:
     assert res.exit_code == 2, res.output
     assert isinstance(res.exception, SystemExit)
     assert "INT64" in res.output
+
+
+def _dense_dag(seed: int, n: int = 9) -> NormalizedTrace:
+    import random
+
+    rng = random.Random(seed)
+    specs = [
+        (i, rng.choice(["x", "retry:x", None]), rng.choice([StepKind.TOOL, StepKind.CHAIN, StepKind.AGENT]),
+         StepStatus.ERROR if rng.random() < 0.5 else StepStatus.OK)
+        for i in range(n)
+    ]
+    edges = [(i, c) for i in range(1, n) for c in rng.sample(range(i), k=min(i, rng.randint(1, 3)))]
+    return _custom(f"DD{seed}", specs, edges)
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_first_matches_is_a_prefix_of_the_python_matches_on_both_paths(seed) -> None:
+    # Native Cypher and the unbounded-gap fallback both return exactly the pure-Python
+    # find_matches()[:n] and its full count, for every n including 0.
+    from tracegraph.analysis import UncompilablePattern, compile_to_cypher
+
+    nt = _dense_dag(seed)
+    extra = PathPattern((StepPredicate(), StepPredicate(gap=(1, 3)), StepPredicate(same_name_as=0)))
+    store = LadybugStore.from_trace(nt)
+    try:
+        for pattern in [*PRESETS.values(), extra]:
+            try:
+                compile_to_cypher(pattern)
+                native = True
+            except UncompilablePattern:
+                native = False
+            expected = find_matches(nt, pattern)
+            for n in sorted({0, 1, 2, max(len(expected) - 1, 0), len(expected), len(expected) + 1}):
+                assert store.first_matches(pattern, n) == (expected[:n], len(expected))
+                assert store.fell_back_to_python is not native
+            assert store.first_matches(pattern, None) == (expected, len(expected))
+            assert store.find_matches(pattern) == expected
+    finally:
+        store.close()
+
+
+def test_first_matches_orders_equal_seq_steps_by_step_id_in_cypher() -> None:
+    steps = [
+        Step(step_id=sid, trace_id="EQ", seq=seq, name="t", kind=StepKind.TOOL)
+        for sid, seq in [("r", 0), ("b", 1), ("a", 1), ("d", 2), ("c", 2)]
+    ]
+    edges = [
+        Edge(type=EdgeType.CAUSED_BY, src=src, dst=dst)
+        for src, dst in [("b", "r"), ("a", "r"), ("d", "b"), ("c", "b"), ("d", "a"), ("c", "a")]
+    ]
+    nt = normalize(RawTrace(trace=Trace(trace_id="EQ", source_kind="x"), steps=steps,
+                            causal_edges=edges))
+    pattern = PathPattern((StepPredicate(), StepPredicate(gap=(1, 2))))
+    expected = [["r", "a"], ["r", "b"], ["r", "c"], ["r", "d"], ["a", "c"], ["a", "d"],
+                ["b", "c"], ["b", "d"]]
+    with LadybugStore.from_trace(nt) as store:
+        assert store.first_matches(pattern, 3) == (expected[:3], 8)
+        assert store.fell_back_to_python is False
+
+
+@pytest.mark.parametrize("fail", [None, "before-iteration", "after-one-row", "in-sort-key"])
+def test_first_matches_closes_the_query_result_when_consumption_fails(monkeypatch, fail) -> None:
+    # The store owns the result, so a failure while its rows are consumed (before the first
+    # row, after it, or in the sort key) still closes it, as a completed read does.
+    import tracegraph.store.ladybug as ladybug_mod
+
+    store = LadybugStore.from_trace(_erroring_tool_trace("CL"))
+    closed: list[bool] = []
+
+    class _SpyResult:
+        def __init__(self, real):
+            self._real = real
+
+        def has_next(self):
+            return self._real.has_next()
+
+        def get_next(self):
+            return self._real.get_next()
+
+        def close(self):
+            closed.append(True)
+            self._real.close()
+
+    class _SpyConn:
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, query, *args, **kwargs):
+            return _SpyResult(self._real.execute(query, *args, **kwargs))
+
+        def close(self):
+            self._real.close()
+
+    real_first = ladybug_mod.first_matches
+
+    def failing(paths, steps, n):
+        if fail == "after-one-row":
+            next(iter(paths))
+        if fail == "in-sort-key":
+            return real_first(paths, {}, n)  # the key looks every step id up: KeyError
+        raise RuntimeError("consumer broke")
+
+    try:
+        store._load_all_steps()  # cached first, so the only query below is the match itself
+        store._conn = _SpyConn(store._conn)
+        if fail:
+            monkeypatch.setattr(ladybug_mod, "first_matches", failing)
+            with pytest.raises(KeyError if fail == "in-sort-key" else RuntimeError):
+                store.first_matches(PRESETS["error"], 1)
+        else:
+            assert store.first_matches(PRESETS["error"], 1) == ([["CL2"]], 1)
+        assert closed == [True]
+    finally:
+        store.close()

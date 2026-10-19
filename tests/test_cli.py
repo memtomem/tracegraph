@@ -2651,9 +2651,8 @@ def test_stdin_inputs_respect_the_byte_limit(tmp_path, monkeypatch, command):
 #
 # `query` loads, validates and matches one artifact at a time instead of loading every trace
 # first. These pin today's precedence: every load error, then "no valid artifacts", then the
-# first duplicate trace_id, then a matching failure. The injection seams (`patterns.find_matches`
-# and `LadybugStore` methods) exist in both the old and new code paths, so the same tests pass
-# against the pre-streaming implementation.
+# first duplicate trace_id, then a matching failure. The injection seams are the matcher entry
+# points `query` calls (`iter_matches` and `LadybugStore` methods).
 
 
 def _failing_traces(tmp_path, *tids):
@@ -2674,13 +2673,15 @@ class _Injected(RuntimeError):
 
 
 def _break_memory_matcher(monkeypatch, exc=None):
+    # The failure is raised while the matches are being consumed, not when the matcher is called.
     from tracegraph.analysis import patterns
 
     def boom(*args, **kwargs):
         raise exc or _Injected("matcher broke")
+        yield  # a generator: the call succeeds and the first next() raises
 
-    monkeypatch.setattr(patterns, "find_matches", boom)
-    monkeypatch.setattr(cli_mod, "find_matches", boom, raising=False)
+    monkeypatch.setattr(patterns, "iter_matches", boom)
+    monkeypatch.setattr(cli_mod, "iter_matches", boom)
 
 
 def test_query_matcher_failure_yields_to_a_later_explicit_load_error(tmp_path, monkeypatch):
@@ -2705,10 +2706,11 @@ def test_query_matcher_failure_yields_to_a_later_duplicate_trace_id(tmp_path, mo
     assert out.index("A.json") < out.index("again.json")  # first-seen path, then the repeat
 
 
-def test_query_matcher_failure_propagates_when_inputs_are_valid(tmp_path, monkeypatch):
+@pytest.mark.parametrize("limit", [[], ["--limit", "1"]])
+def test_query_matcher_failure_propagates_when_inputs_are_valid(tmp_path, monkeypatch, limit):
     paths = _failing_traces(tmp_path, "A", "B")
     _break_memory_matcher(monkeypatch)
-    res = runner.invoke(app, ["query", "error", *map(str, paths)])
+    res = runner.invoke(app, ["query", "error", *map(str, paths), *limit])
     assert isinstance(res.exception, _Injected)
     assert str(res.exception) == "matcher broke"
     assert "match(es)" not in res.output
@@ -2776,13 +2778,13 @@ def test_query_ladybug_close_failure_replaces_the_matching_failure(tmp_path, mon
     store_cls = _ladybug_store()
     paths = _failing_traces(tmp_path, "A")
 
-    def find(self, pattern):
+    def find(self, pattern, n):
         raise _Injected("search broke")
 
     def close(self):
         raise OSError("close broke")
 
-    monkeypatch.setattr(store_cls, "find_matches", find)
+    monkeypatch.setattr(store_cls, "first_matches", find)
     monkeypatch.setattr(store_cls, "close", close)
     res = runner.invoke(app, ["query", "error", *map(str, paths), "--backend", "ladybug"])
     assert isinstance(res.exception, OSError)
@@ -2798,19 +2800,39 @@ def test_query_ladybug_fallback_note_only_when_every_trace_succeeds(tmp_path, mo
     assert res.exit_code == 1  # no match, but every trace was searched
     assert "not Cypher-compilable" in res.output
 
-    real = store_cls.find_matches
+    real = store_cls.first_matches
     calls = []
 
-    def second_fails(self, pattern):
+    def second_fails(self, pattern, n):
         calls.append(pattern)
         if len(calls) == 2:
             raise _Injected("second trace broke")
-        return real(self, pattern)
+        return real(self, pattern, n)
 
-    monkeypatch.setattr(store_cls, "find_matches", second_fails)
+    monkeypatch.setattr(store_cls, "first_matches", second_fails)
     res = runner.invoke(app, ["query", preset, *map(str, paths), "--backend", "ladybug"])
     assert isinstance(res.exception, _Injected)
     assert "not Cypher-compilable" not in res.output
+
+
+@pytest.mark.parametrize("backend", ["memory", "ladybug"])
+def test_query_limit_counts_every_match_of_a_trace_it_has_no_room_for(tmp_path, backend):
+    # The first trace fills --limit, so the second is matched with no room left: none of its
+    # matches is kept, but all of them are counted in the footer total.
+    if backend == "ladybug":
+        _ladybug_store()
+    paths = []
+    for tid, n in [("A", 6), ("B", 5)]:
+        p = tmp_path / f"{tid}.json"
+        _write_linear_trace(p, tid, *[("x", StepKind.AGENT, StepStatus.ERROR)] * n)
+        paths.append(p)
+    res = runner.invoke(app, ["query", "repeated-agent-failure", *map(str, paths),
+                              "--limit", "1", "--backend", backend])
+    assert res.exit_code == 0, res.output
+    lines = res.output.splitlines()
+    assert [ln for ln in lines if ln.startswith(("A:", "B:"))] == ["A: x → x"]
+    # 6·5/2 pairs in A plus 5·4/2 in B.
+    assert lines[-1] == "1 match(es) across 1 trace(s) — truncated from 25"
 
 
 @pytest.mark.parametrize("limit", [None, 1, 2, 3, 4, 7])
@@ -2938,8 +2960,8 @@ def test_query_deferred_matching_failure_does_not_keep_its_trace(tmp_path, monke
     def boom(nt, pattern, *, index=None):
         raise _Injected(f"matcher broke on {nt.trace.trace_id}")
 
-    monkeypatch.setattr(patterns, "find_matches", boom)
-    monkeypatch.setattr(cli_mod, "find_matches", boom, raising=False)
+    monkeypatch.setattr(patterns, "iter_matches", boom)
+    monkeypatch.setattr(cli_mod, "iter_matches", boom)
     alive_at_load = _track_loads(monkeypatch)
     gc.disable()
     try:
