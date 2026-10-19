@@ -15,6 +15,7 @@ from typing import Annotated, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 import pytest
 from test_langgraph_adapter import _StubSaver, _ck
 from test_otlp_adapter import _loop_doc
@@ -353,9 +354,9 @@ def test_provenance_changed_after_validation_is_refused_before_writing(mutate, w
 def test_the_writer_refuses_flags_its_reader_would_reject(tmp_path):
     nt = _nt(unknown_fields=["kind"])
     nt.trace.capture = None
-    with pytest.raises(ValueError, match="no capture record"):
+    with pytest.raises(ValidationError, match="no capture record"):
         artifact.dumps(nt)
-    with pytest.raises(ValueError, match="no capture record"):
+    with pytest.raises(ValidationError, match="no capture record"):
         artifact.save(nt, tmp_path / "a.json")
     assert not (tmp_path / "a.json").exists()
 
