@@ -2,11 +2,26 @@
 
 import json
 from collections import UserDict, deque
+from enum import Enum
+import warnings
 
+from pydantic import computed_field
 import pytest
 
 from tracegraph import artifact
-from tracegraph.model import Edge, EdgeType, NormalizedTrace, RawTrace, Step, StepStatus, Trace
+from tracegraph.analysis import analyze, check, dump_analysis
+from tracegraph.analysis.memo import build_incident_memo
+from tracegraph.model import (
+    Edge,
+    EdgeOrigin,
+    EdgeType,
+    NormalizedTrace,
+    RawTrace,
+    Step,
+    StepStatus,
+    Trace,
+    _validated_copy,
+)
 from tracegraph.normalize import normalize, validate_normalized, validate_tree
 from tracegraph.store import InMemoryStore
 
@@ -238,6 +253,12 @@ def _changed_in_place(change: str) -> NormalizedTrace:
         nt.steps[0].seq = "zero"  # type: ignore[assignment]
     elif change == "status":
         nt.steps[0].status = "maybe"  # type: ignore[assignment]
+    elif change == "kind":
+        nt.steps[0].kind = "bogus"  # type: ignore[assignment]
+    elif change == "name":
+        nt.steps[0].name = 5  # type: ignore[assignment]
+    elif change == "error_msg":
+        nt.steps[0].error_msg = 5  # type: ignore[assignment]
     elif change == "dangling-edge":
         edge.dst = "ghost"
     elif change == "str-type-dangling-edge":
@@ -730,7 +751,7 @@ def test_writers_write_the_validated_value_of_a_coercible_assignment(tmp_path, w
 
 _BROKEN_CONTAINERS = [
     "steps=None", "steps[0]=None", "trace=None", "steps[0]=object", "edges=None",
-    "steps=failing-iterator", "steps=iterator-with-failing-str",
+    "steps=failing-iterator", "steps=iterator-with-failing-str", "name=enum-with-failing-str",
 ]
 
 
@@ -751,9 +772,12 @@ def _container_replaced(break_it: str) -> NormalizedTrace:
         nt.steps[0] = object()  # type: ignore[call-overload]
     elif break_it == "edges=None":
         nt.edges = None  # type: ignore[assignment]
+    elif break_it == "name=enum-with-failing-str":
+        # Validating a str field from an enum member runs ``str()`` on its value.
+        nt.steps[0].name = Enum("Unprintable", {"X": _UnprintableError("bad")}).X  # type: ignore[assignment]
     else:
-        # Serializing consumes the sequence before the model sees it, so whatever a lazy one
-        # raises would otherwise escape as itself.
+        # Validation consumes the sequence, so whatever a lazy one raises would otherwise
+        # escape as itself.
         error = RuntimeError if break_it == "steps=failing-iterator" else _UnprintableError
 
         def failing(steps):
@@ -821,3 +845,119 @@ def test_dumps_checks_fields_not_structure(change):
         assert [e["dst"] for e in trace["edges"] if e["type"] == "CAUSED_BY"] == ["ghost"]
     else:
         assert trace["trace"]["status"] == "error"
+
+
+# --- analysis entry points work on the model-validated copy -----------------------------------
+
+_ANALYSIS_ENTRY_POINTS = {
+    "analyze": lambda nt: dump_analysis(analyze(nt)),
+    "analyze-baseline": lambda nt: dump_analysis(analyze(_canonical_two_step(), baseline=nt)),
+    "check-current": lambda nt: check.dumps(check.evaluate(nt, _canonical_two_step(), _RULES)),
+    "check-baseline": lambda nt: check.dumps(check.evaluate(_canonical_two_step(), nt, _RULES)),
+    "memo": lambda nt: build_incident_memo(nt, "sha256:" + "0" * 64),
+}
+_RULES = check.parse_rules(["failures-not-increased", "topology-unchanged"])
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize("entry", _ANALYSIS_ENTRY_POINTS)
+@pytest.mark.parametrize(
+    "build",
+    [
+        *(f"change:{c}" for c in ("seq", "status", "kind", "name", "error_msg")),
+        *(f"container:{b}" for b in _BROKEN_CONTAINERS),
+    ],
+)
+def test_analysis_entry_points_refuse_what_the_model_refuses_with_a_value_error(entry, build):
+    kind, name = build.split(":")
+    nt = _changed_in_place(name) if kind == "change" else _container_replaced(name)
+    with pytest.raises(ValueError):
+        _ANALYSIS_ENTRY_POINTS[entry](nt)
+
+
+@pytest.mark.parametrize("entry", _ANALYSIS_ENTRY_POINTS)
+def test_analysis_entry_points_analyze_the_validated_value_of_a_coercible_assignment(entry):
+    nt = _canonical_two_step()
+    nt.steps[0].seq = "0"  # type: ignore[assignment]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # the copy must not depend on the warnings filter
+        report = _ANALYSIS_ENTRY_POINTS[entry](nt)
+    assert report == _ANALYSIS_ENTRY_POINTS[entry](_canonical_two_step())
+    assert nt.steps[0].seq == "0"  # the caller's trace is left as it was
+
+
+def _legacy_temporal() -> NormalizedTrace:
+    steps = _steps(("a", 0), ("b", 1), ("c", 2), ("d", 3))
+    edges = [
+        Edge(type=EdgeType.CAUSED_BY, src="b", dst="a", origin=EdgeOrigin.GRAPH_PARENT),
+        Edge(type=EdgeType.CAUSED_BY, src="c", dst="a", origin=EdgeOrigin.GRAPH_PARENT),
+        Edge(type=EdgeType.CAUSED_BY, src="d", dst="b", origin=EdgeOrigin.SPAN_LINK),
+        Edge(type=EdgeType.CAUSED_BY, src="d", dst="c", origin=EdgeOrigin.GRAPH_PARENT),
+    ]
+    return normalize(_raw(steps, edges), origin_priority=False)
+
+
+def _constructed() -> NormalizedTrace:
+    nt = _canonical_two_step()
+    return NormalizedTrace.model_construct(**dict(nt))
+
+
+def _non_canonical() -> NormalizedTrace:
+    nt = _changed_in_place("stale-status")
+    nt.edges = list(reversed(nt.edges))
+    return nt
+
+
+@pytest.mark.parametrize("build", [_canonical_two_step, _legacy_temporal, _constructed, _non_canonical])
+def test_the_validated_copy_of_a_model_valid_trace_is_the_same_trace(build):
+    nt = build()
+    assert _validated_copy(nt) == nt
+
+
+@pytest.mark.parametrize("entry", _ANALYSIS_ENTRY_POINTS)
+@pytest.mark.parametrize("build", [_legacy_temporal, _constructed, _non_canonical])
+def test_an_entry_point_reports_a_model_valid_trace_as_its_reader_would(entry, build):
+    # The copy is made in Python mode; the reader validates parsed JSON. Both must agree.
+    nt = build()
+    before = artifact.dumps(nt)
+    read = artifact.loads(before)
+    if build is _non_canonical and entry.startswith("check"):
+        for trace in (nt, read):  # check requires the canonical form
+            with pytest.raises(ValueError, match="disagrees with its steps"):
+                _ANALYSIS_ENTRY_POINTS[entry](trace)
+    else:
+        assert _ANALYSIS_ENTRY_POINTS[entry](nt) == _ANALYSIS_ENTRY_POINTS[entry](read)
+    assert artifact.dumps(nt) == before  # the caller's trace is left as it was
+
+
+def test_analyze_still_accepts_a_structurally_sound_non_canonical_trace():
+    report = analyze(_non_canonical())
+    assert report.status == "error"  # the stale header is reported, not refused
+
+
+@pytest.mark.parametrize("field", ["run_id", "links_preserved"])
+@pytest.mark.parametrize("write", ["dumps", "save", "save_atomic"])
+def test_a_nan_in_a_nullable_header_field_is_refused_not_erased(tmp_path, field, write):
+    # A JSON-mode dump writes NaN as null, which validates: the value would vanish silently.
+    nt = _canonical_two_step()
+    setattr(nt.trace, field, float("nan"))
+    target = tmp_path / "a.json"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError):
+            artifact.dumps(nt) if write == "dumps" else getattr(artifact, write)(nt, target)
+    assert not target.exists()
+
+
+class _RaisingComputedTrace(NormalizedTrace):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def boom(self) -> str:
+        raise RuntimeError("computed field failed")
+
+
+def test_caller_code_run_while_dumping_is_reported_as_a_value_error():
+    nt = _canonical_two_step()
+    custom = _RaisingComputedTrace.model_construct(**dict(nt))
+    with pytest.raises(ValueError, match="RuntimeError"):
+        _validated_copy(custom)

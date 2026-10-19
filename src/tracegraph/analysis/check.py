@@ -37,6 +37,7 @@ from tracegraph.model import (
     NormalizedTrace,
     Step,
     StepStatus,
+    _validated_copy,
 )
 from tracegraph.normalize import ProjectionRule, validate_normalized
 
@@ -540,6 +541,7 @@ def _topology_rule(
 
 def evaluate(current: NormalizedTrace, baseline: NormalizedTrace, rules: list[RuleSpec]) -> CheckReport:
     """Evaluate ``rules`` over the pair. Raises ``ValueError`` for a malformed trace."""
+    current, baseline = _validated_copy(current), _validated_copy(baseline)
     contexts = (_context(current), _context(baseline))
     common = _common_reasons(current, baseline)
     langgraph = "langgraph" in (current.trace.source_kind, baseline.trace.source_kind)

@@ -24,6 +24,7 @@ from tracegraph.model import (
     NormalizedTrace,
     Step,
     StepStatus,
+    _validated_copy,
 )
 from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
@@ -590,9 +591,12 @@ def _digest(nt: NormalizedTrace) -> str:
 def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> AnalysisReport:
     # Analyses index by step id and walk causes in seq order; on a malformed trace that
     # surfaces as a raw KeyError deep inside a helper. Reject it here as a ValueError so the
-    # library entry point has the same failure contract as artifact.loads().
+    # library entry point has the same failure contract as artifact.loads(). A trace changed
+    # after it was built fails the model first, so analyze the validated copy.
+    nt = _validated_copy(nt)
     validate_structure(nt)
     if baseline is not None:
+        baseline = _validated_copy(baseline)
         validate_structure(baseline)
     primary, propagated = _failures(nt)
     patterns = pattern_findings(nt)

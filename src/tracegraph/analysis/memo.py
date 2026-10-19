@@ -21,6 +21,7 @@ from tracegraph.model import (
     EdgeType,
     NormalizedTrace,
     StepStatus,
+    _validated_copy,
 )
 from tracegraph.normalize import ancestor_ids, incoming_edges_by_step, validate_structure
 
@@ -69,6 +70,7 @@ def build_incident_memo(
             f"Invalid artifact_digest: {artifact_digest!r}; must match 'sha256:<64 lowercase hex digits>'"
         )
 
+    nt = _validated_copy(nt)
     validate_structure(nt)
     patterns = pattern_findings(nt)
 

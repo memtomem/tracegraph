@@ -16,7 +16,7 @@ from pathlib import Path
 
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.input_validation import loads as json_loads
-from tracegraph.model import NormalizedTrace, StepSource
+from tracegraph.model import NormalizedTrace, StepSource, _validated_copy
 from tracegraph.normalize import validate_normalized
 
 #: Bump when the on-disk shape changes incompatibly.
@@ -86,26 +86,6 @@ def dumps(nt: NormalizedTrace) -> str:
     :func:`save_atomic` check structure too.
     """
     return _serialize(_validated_copy(nt))
-
-
-def _validated_copy(nt: NormalizedTrace) -> NormalizedTrace:
-    """Round-trip ``nt`` through the model; raises only ``ValueError``.
-
-    The copy, not ``nt``, is what callers check and write: a value the model coerces (``"0"``
-    for a seq, ``"CAUSED_BY"`` for an edge type) would otherwise reach the structural check
-    and the serializer still unconverted.
-    """
-    try:
-        payload = nt.model_dump(mode="json")
-    except ValueError:
-        raise
-    except Exception as exc:
-        # Dumping runs before validation and consumes whatever the attributes hold, so a
-        # caller-supplied lazy sequence can raise anything at all. Report it the way
-        # ``_migrate_v1`` reports a failing edge sequence at the load boundary. Only the type
-        # is formatted: ``str(exc)`` runs the caller's ``__str__``, which can raise as well.
-        raise ValueError(f"trace could not be serialized: {type(exc).__name__}") from exc
-    return NormalizedTrace.model_validate(payload)
 
 
 def _serialize(nt: NormalizedTrace) -> str:
