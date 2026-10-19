@@ -97,11 +97,14 @@ explicitly.
 
 - Resuming after a fork copy of a subgraph's input checkpoint
   (`update_state(..., as_node="__copy__")` on it) records an error again at the subgraph's next
-  start: one the parent graph held (#90) or one a `Send` payload carried (#96). Three ways of
-  recognizing such a copy were tried: an unread `__start__` value, a `__start__` version absent
-  from `versions_seen`, and pending writes from LangGraph's `__start__` task. Each also matched a
-  fork of a plain `Pregel` graph's loop checkpoint and hid a genuine failure there, so none
-  shipped.
+  start: one the parent graph held (#90) or one a `Send` payload carried (#96). Four ways of
+  recognizing such a copy were tried. Three classified the fork by its content: an unread
+  `__start__` value, a `__start__` version absent from `versions_seen`, and pending writes from
+  LangGraph's `__start__` task. The fourth matched it to an input checkpoint with identical
+  `channel_values`, `channel_versions` and `versions_seen`, and compared its run with the
+  original's. Each hid a genuine failure on a plain `Pregel` graph, so none shipped. A
+  `Pregel` input's first step can run a user node, and a no-op `update_state(...,
+  as_node="__input__")` can write an input identical to a loop checkpoint.
 
 ## 0.5.0 - 2026-10-18
 
