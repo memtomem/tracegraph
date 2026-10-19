@@ -1,6 +1,96 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-18, `361ad03` 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-19, `ebf09a2` 기준 (Asia/Seoul)
+
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `ebf09a2`(PR #99 병합)다. 시작 전에
+  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
+- **PyPI 최신은 여전히 0.5.0이다.** `## Unreleased`에 #85·#79·#82·#93·#60과 #90·#96 문서가 쌓였고, 아직
+  릴리스하지 않았다. 다음 릴리스에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## Unreleased`다:
+  - `artifact.dumps()`가 model로 검증한 복사본을 직렬화한다(PR #94). 생성 뒤의 변경 가운데 model이 거부하는
+    것(잘못된 타입, `None`이 된 container)은 `ValueError`로 거부되고, 변환 가능한 값(`seq="0"`)은 reader가 읽는
+    값으로 쓰인다. model이 받는 변경(dangling edge, stale trace status)은 structure를 검사하지 않으므로 그대로
+    직렬화된다. 6000 step에서 0.15 s → 0.20 s.
+  - `analyze()`·`check.evaluate()`·`build_incident_memo()`도 같은 복사본을 분석한다(PR #95). `analyze()`와 memo는
+    구조가 맞는 non-canonical trace를 여전히 받고, `check.evaluate()`는 여전히 canonical 형식을 요구한다. 그 복사본은
+    이제 Python-mode dump에서 만든다. JSON mode였을 때 `trace.run_id = nan`이 `null`로 바뀌어 `dumps()`와 writer가
+    값을 지웠는데, 지금은 거부한다. `-W error`에서 변환 가능한 값이 거부되던 것도 없어졌다. 6000 step 기준
+    비용: `analyze()` 0.25–0.27 s → 0.30–0.32 s, baseline 비교 0.57–0.58 → 0.69–0.70 s, `check.evaluate()`
+    0.65–0.67 → 0.78–0.79 s, memo 0.016 → 0.044 s.
+  - LangGraph: subgraph 주변에서 부모 그래프의 오류를 다시 기록하지 않는다(PR #91). 어떤 step이 error인지와
+    disclosure가 바뀌므로, 해당 shape의 artifact digest가 바뀐다.
+  - `query --limit`이 한 trace 안의 match를 모두 들고 있지 않는다(PR #92). 출력과 total은 그대로다.
+  - 새 명령 `tracegraph summarize`(PR #99)와 새 JSON 계약 `tracegraph.motif-summary` schema v1.
+- **열린 이슈 4개, 모두 이번 세션에 등록한 결함:** #100(`decimal.Overflow`), #101(`_safe`의 lone surrogate),
+  #102(CLI 출력의 emoji 치환), #103(`_migrate_v1`의 `{exc}`). 소유자 결정을 기다리는 이슈는 없다.
+
+### `361ad03` 이후 착지한 변경
+
+| PR | merge | 내용 |
+| --- | --- | --- |
+| #89 | `8be2da8` | 0.5.0 릴리스 기록(문서만) |
+| #91 | `aa769f6` | #85: subgraph의 `__start__`, persistent subgraph 재진입, subgraph 뒤의 부모 checkpoint가 이미 있던 오류를 다시 기록하지 않는다. fork copy는 오류를 기록하지 않는다. 남은 fork-of-input + resume 모양은 #90으로 등록 |
+| #92 | `9d79a9e` | #79: `query --limit`이 trace 안에서도 cap 아래의 match만 남긴다(matcher를 generator로, `heapq.nsmallest`). total은 exact. 3.1M match 체인 `--limit 1`: 976 → 70 MiB(memory backend). LadybugDB Cypher는 결과를 엔진이 buffer해서 높게 남는다 |
+| #94 | `2eaa403` | #82: `artifact.dumps()`가 model이 거부하는 입력에 `ValueError`만 낸다. model로 검증한 복사본을 직렬화하고 structure는 검사하지 않는다(`analyze()`가 non-canonical baseline을 digest하므로) |
+| #95 | `a161122` | #93: `analyze()`·`check.evaluate()`·`build_incident_memo()`가 검증된 복사본을 분석해, model이 거부하는 입력에 `ValueError`만 낸다. model 검증을 통과한 입력의 `decimal.Overflow`는 #100이다. 복사본은 `model._validated_copy`로 옮겨 Python-mode dump + `warnings=False`로 만들고, dump와 validate 모두에서 다른 예외를 `ValueError`(type 이름만)로 바꾼다 |
+| #97 | `f441388` | #90: 문서만. resume된 subgraph input의 fork copy가 오류를 다시 기록하는 것을 알려진 한계로 적었다 |
+| #98 | `9354644` | #96: 문서만. 같은 한계의 `Send` payload 변형과 네 번째 시도가 실패한 이유 |
+| #99 | `ebf09a2` | #60: `tracegraph summarize <preset> <artifacts...>`. preset match를 `motif-signature/v1`로 묶고 coverage를 항상 보인다. 인접 preset만 받는다 |
+
+### 이번 세션의 결정(2026-10-19, PR #94~#99)
+
+1. **#82:** 이슈의 옵션 1을 model 검사로만 좁혔다. `dumps()`에 `validate_normalized`까지 넣는 프로토타입은
+   테스트 5개를 깨뜨렸다. 둘은 `analyze()`의 baseline digest 경로이고, 셋은 손상 fixture를 쓰는 reader 테스트다.
+2. **#93:** 옵션 1에 memo를 더했다(소유자 승인). 실패 대부분이 structural gate 뒤의 분석 코드에서 나서 옵션 2로는 부족했다.
+   공유 helper가 #94와 #95에 걸쳐 지적 5건을 모았고(실패하는 iterator, `__str__`, JSON-mode NaN, `-W error`,
+   validate 단계 누출). 소유자가 대체안을 승인해(세션 기록) pydantic 호출 한 줄과 예외 정규화 지점 하나로 다시 썼다.
+3. **#90과 #96: 고치지 않고 문서로 남겼다.** "이 fork가 input의 복사본인가"를 가리는 네 가지 방법이 모두
+   공개 `Pregel` 그래프의 반례로 깨졌고, 매번 진짜 실패를 숨기는 방향이었다. content로 분류한 세 방법은
+   `__start__` 값, `versions_seen`, `__start__` task id를 봤다. 네 번째는 원래 input과 verbatim으로 매칭하는 방법이었다.
+   중복 기록이 실패를 숨기는 것보다 낫다는 판단이다. 더 좁은 경로(`schedule_graph`로 `StateGraph`를 받은 경우에만
+   켜기)는 측정하지 않았다. #98 본문에 있다.
+4. **#60:** 이슈가 "Later / validate demand first"를 권했지만 소유자가 지금 만들기로 했다. v1은 인접 preset만
+   받는다(gap 경로의 edge 증거가 기록되지 않음). signature에 safe-v1 이름을 넣는다(경로 모양 이름도 `analyze`처럼
+   통과). 리뷰에서 정한 규칙: `check`의 규칙으로 확정된 match만 묶는다. 모르는 필드는 `null`과 별도 `unknown`
+   목록으로 적는다. coverage는 `check._could_be_hidden`을 재사용한다. `heuristic_edges`는 gap code에서 직접 분류한
+   4-state disclosure다(`check._gap_hides`는 may-hide 규칙이라 맞지 않았다).
+5. **#54:** 2026-10-18에 PR #87 본문의 "whether to close #54"가 closing keyword로 읽혀 의도치 않게 닫혔다.
+   범위는 #80과 #92로 다 했으므로 닫힌 채로 두고, 경위를 코멘트로 남겼다.
+
+### 검증 증거
+
+환경: macOS/arm64. PR별 수치는 각 PR 본문의 그 PR head 결과다. 첫 행의 `ebf09a2` suite-run 결과만 이 문서를 위해 다시 돌렸다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 `pytest` | PR별 1578(#91) → 2451(#92) → 2472(#94) → 2572(#95) → 2596(#99 생성 시) passed, 11 skipped. `ebf09a2`에서 suite-run **2598 passed, 11 skipped, CLEAN** |
+| lint·타입 | 코드 PR마다 `uvx ruff@0.14.2 check src tests scripts examples`와 mypy를 CI 방식으로 돌려 통과 |
+| 골든 하네스 | #91·#92·#94·#95·#99에서 직전 merge와 비교해 커밋된 fixture 출력 265개 중 다른 파일 0개. #94·#95 본문은 두 실행이 서로 다른 소스를 import했는지도 따로 확인했다고 적고 있다 |
+| 회귀 테스트 판별력 | 코드 PR마다 변경을 하나씩 되돌리는 mutation으로 새 테스트가 빨개짐을 확인(각 PR 본문) |
+| CI | #91은 check 17개, 나머지는 15개 모두 통과 |
+| 리뷰 게이트 | #91 계획 2·commit 3(마지막 NEEDS-FIX는 #90으로 등록). #92 계획 2·diff 2(SHIP). #94 계획 2·구현 2·PR 1(SHIP). #95 계획 2·구현 2(SHIP), PR 리뷰 없이 소유자 merge. #97 계획 3(매번 기준이 깨짐)·문서 1·PR 1(SHIP). #98 계획 1(네 번째 접근을 깨뜨림), 문서만. #99 계획 3(NEEDS-FIX → DISCUSS → NEEDS-FIX)·구현 2(둘 다 NEEDS-FIX)·PR 3(셋 다 NEEDS-FIX, 마지막은 Minor 문서 1건). 마지막 지적을 고친 `6bf5c1d`는 다시 리뷰하지 않아 SHIP 판정이 없다 |
+
+기록 위치: 결정 근거와 측정은 PR #91·#92·#94·#95·#97·#98·#99와 이슈 #90·#93·#96의 본문, #54의 코멘트에 있다.
+리뷰 원문은 저장소에 보존하지 않았다. 이 세션의 임시 디렉터리(`/private/tmp/claude-501/` 아래 세션 `9275dc9c-…`의
+`scratchpad/i82`·`i93`·`i90`·`i96`·`i60/logs/`)와 저장소의 `.dev-trio/log/default/`(PR 범위 리뷰)에 나뉘어 있다.
+임시 경로이므로 오래 남는다고 가정하지 않는다.
+
+### 남은 결정과 후속 항목
+
+1. **등록만 한 결함 4개**(각 이슈 본문에 재현과 선택지가 있다):
+   - #100: 모델 검증을 통과한 `total_cost="1e1000000"`이 `analyze`를 `diagnose.py:436`의 `decimal.Overflow`로 죽인다.
+   - #101: `diagnose._safe`가 lone surrogate 이름에서 `UnicodeEncodeError`를 낸다(`analyze` exit 1).
+   - #102: `query`·`inspect`·`explain`·`analyze`가 `:ok:` 같은 이름을 emoji로 출력한다. `summarize`만 `emoji=False`다.
+   - #103: `artifact.from_obj()`의 v1 migration이 `{exc}`를 포맷하다 `ValueError`가 아닌 예외를 내보낼 수 있다.
+2. **알려진 한계(문서화, 고치지 않음):** #90·#96. README와 CHANGELOG의 Known limitations에 있다.
+3. **`summarize` 후속(등록 안 함):** gap preset 3개의 edge 증거를 구분하는 방법, `--backend ladybug`. 이슈의
+   제품 검증 가설(time-to-prioritize 측정)은 하지 않았다.
+4. **다음 릴리스:** `## Unreleased`가 쌓여 있다. 릴리스할지와 버전(새 명령과 새 JSON 계약이 있으므로 minor)은
+   소유자가 정한다. 절차는 [릴리스 런북](releasing.md)이다.
+5. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
+
+---
+
+## 이전 전달 상태 — 2026-10-18, `361ad03` 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `361ad03`(PR #86 병합)이고,
   그 위의 `c4d3b7d`(PR #88)는 버전·`uv.lock`·CHANGELOG·이 문서만 바꿨고 제품 소스는 그대로다. 시작 전에
