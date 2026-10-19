@@ -1,5 +1,6 @@
 """Automatic body-free failure diagnosis and behavior comparison."""
 
+from decimal import Decimal
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from jsonschema import Draft202012Validator
 
 from tracegraph.analysis.diagnose import analyze, dumps
 from tracegraph.model import (
+    MAX_COST_CHARS,
     CausalFidelity,
     DecisionEvidence,
     Edge,
@@ -20,6 +22,7 @@ from tracegraph.model import (
     StepKind,
     StepStatus,
     Trace,
+    cost_is_bounded,
 )
 from tracegraph.normalize import normalize
 
@@ -299,6 +302,55 @@ def test_unparseable_cost_withholds_the_total_instead_of_understating_it():
     report = analyze(nt)
     assert report.metrics.total_cost is None
     assert any("total_cost unavailable" in w for w in report.warnings), report.warnings
+
+
+@pytest.mark.parametrize("cost", ["1e1000000", "9e999999", "1e64", "1e-63", "0E-63"])
+def test_a_cost_too_long_to_write_out_withholds_the_total(cost):
+    """A few characters of exponent can stand for a million-digit number. Summing it overflowed
+    (1e1000000) or wrote it out in full into the report (9e999999), so such a cost is not summed."""
+    nt = _trace("long-cost", StepStatus.OK)
+    for step in nt.steps:
+        step.evidence = StepEvidence(total_cost="1.00", cost_currency="USD")
+    nt.steps[1].evidence = StepEvidence(total_cost=cost, cost_currency="USD")
+    report = analyze(nt)
+    assert report.metrics.total_cost is None
+    assert any(
+        "total_cost unavailable" in w and f"longer than {MAX_COST_CHARS} characters" in w
+        for w in report.warnings
+    ), report.warnings
+    assert not any("not a finite non-negative decimal" in w for w in report.warnings)
+    good = _trace("good-cost", StepStatus.OK)
+    for step in good.steps:
+        step.evidence = StepEvidence(total_cost="1.00", cost_currency="USD")
+    # Every other step reports a cost, so only the bound can withhold the delta.
+    assert analyze(good, baseline=good).comparison.metric_deltas["total_cost"] == "0.00"
+    for current, baseline, side in ((nt, good, ""), (good, nt, "baseline: ")):
+        compared = analyze(current, baseline=baseline)
+        assert compared.comparison.metric_deltas["total_cost"] is None
+        assert any(
+            w.startswith(side + "total_cost unavailable") and "longer than" in w
+            for w in compared.warnings
+        ), compared.warnings
+
+
+@pytest.mark.parametrize("cost", ["9" * MAX_COST_CHARS, "1e31", "0." + "0" * 61 + "1", "0E+1000000"])
+def test_a_cost_at_the_length_bound_is_summed(cost):
+    nt = _trace("bound-cost", StepStatus.OK)
+    nt.steps[0].evidence = StepEvidence(total_cost=cost, cost_currency="USD")
+    nt.steps[1].evidence = StepEvidence(total_cost=cost, cost_currency="USD")
+    report = analyze(nt)
+    # Two bounded costs can sum past the bound; the bound is on what is read, not the total.
+    assert report.metrics.total_cost == format(sum([Decimal(cost)] * 2), "f")
+
+
+@pytest.mark.parametrize(
+    "cost",
+    ["0", "-0", "0.0042", "12.34", "1.0", "0E-5", "0E+1000000", "1E+2", "1.5E+3", "123E-1",
+     "9" * 64, "9" * 65, "1e63", "1e64", "1e-62", "1e-63", "0E-62", "0E-63", "1e1000000"],
+)
+def test_the_cost_bound_matches_the_written_out_length(cost):
+    value = Decimal(cost)
+    assert cost_is_bounded(value) == (len(format(value, "f")) <= MAX_COST_CHARS)
 
 
 def test_redaction_is_disclosed_only_when_an_alias_reaches_the_report():
