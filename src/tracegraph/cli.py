@@ -7,7 +7,6 @@ Every source is normalized into the same raw causal DAG plus derived structural 
 from __future__ import annotations
 
 import errno
-import functools
 import hashlib
 import json
 import os
@@ -84,8 +83,11 @@ def _root(
     """Causal-graph analysis of LangGraph, Phoenix, and OpenInference traces."""
 
 
-console = Console()
-err_console = Console(stderr=True)  # diagnostics (warnings) — keep them off result stdout
+# Producer strings (names, errors, ids) are printed throughout; escape() keeps Rich markup out
+# of them and emoji=False keeps a literal ":ok:" from printing as an emoji the artifact and the
+# JSON reports do not hold. No text the CLI itself prints relies on emoji codes.
+console = Console(emoji=False)
+err_console = Console(stderr=True, emoji=False)  # diagnostics (warnings) — keep them off result stdout
 
 #: Per-file ceiling for artifact loads. An artifact is a body-free trace (hundreds of
 #: steps, a few MB at most); anything this large is not one, and parsing it would pin
@@ -1873,9 +1875,8 @@ def _summarize_file(
 
 
 def _render_summary(pattern, summary: motifs.MotifSummary) -> None:
-    # Names, source kinds and step ids are producer strings: escape() keeps Rich markup out, and
-    # emoji=False keeps a literal ":ok:" from printing as an emoji the JSON report does not hold.
-    show = functools.partial(console.print, emoji=False)
+    # Names, source kinds and step ids are producer strings: escape() keeps Rich markup out.
+    show = console.print
     cov = summary.coverage
     show(
         f"[bold]{pattern.pattern_id}@v{pattern.pattern_version}[/]: {escape(str(pattern))}  "

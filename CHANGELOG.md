@@ -53,12 +53,18 @@ explicitly.
 
 ### Fixed
 
+- **CLI output prints an emoji code in a producer string as written** (#102). The CLI's Rich
+  consoles kept emoji substitution on, and escaping markup does not turn it off, so a step named
+  `:ok:` printed as 🆗 in `query`, `inspect`, `explain` and `analyze` while the artifact and the
+  JSON reports held `:ok:`. Both consoles now have it off, as `summarize` already did for its own
+  output. No text the CLI prints itself used an emoji code.
+
 - **`artifact.from_obj()` on a schema-v1 payload raises only `ValueError`** (#103). When reading
   a caller-supplied lazy edge sequence failed, the migration formatted the exception into its
   message, so an exception whose `__str__` raises escaped as that error instead. The message no
   longer formats the exception at all (its type's name can run caller code too, through a
-  metaclass); the original stays on the chain as `__cause__`. `loads()` and the CLI parse JSON into lists, so neither could
-  reach this.
+  metaclass); the original stays on the chain as `__cause__`. `loads()` and the CLI parse JSON
+  into lists, so neither could reach this.
 
 - **`analyze()`, `check.evaluate()` and `build_incident_memo()` raise only `ValueError` on a
   trace the model refuses** (#93). On a trace changed in place after it was built they raised a

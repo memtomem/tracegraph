@@ -1715,6 +1715,28 @@ def test_query_does_not_crash_on_markup_in_labels(tmp_path):
     assert MARKUP_NAME in res.output, res.output
 
 
+@pytest.mark.parametrize(
+    "command", [["inspect"], ["explain", "{path}", "e1"], ["query", "tool-failure"], ["analyze"]]
+)
+def test_cli_prints_an_emoji_code_in_producer_strings_literally(tmp_path, command):
+    """Escaping markup does not stop Rich's emoji substitution: ":ok:" would print as an emoji
+    the artifact and the JSON reports do not hold."""
+    steps = [
+        Step(step_id="e0", trace_id="E", seq=0, name=":ok:", kind=StepKind.CHAIN),
+        Step(step_id="e1", trace_id="E", seq=1, name=":ok:", kind=StepKind.TOOL,
+             status=StepStatus.ERROR, error_msg="boom :fire:"),
+    ]
+    nt = normalize(RawTrace(trace=Trace(trace_id="E", source_kind="x"), steps=steps,
+                            causal_edges=[Edge(type=EdgeType.CAUSED_BY, src="e1", dst="e0")]))
+    path = tmp_path / "E.json"
+    artifact.save(nt, path)
+    args = [a.format(path=path) for a in command] if "{path}" in command else [*command, str(path)]
+    res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    assert ":ok:" in res.output, res.output
+    assert "\N{SQUARED OK}" not in res.output and "\N{FIRE}" not in res.output, res.output
+
+
 def test_analyze_reports_an_unwritable_json_out_as_a_usage_error(tmp_path):
     """The analysis has already run and rendered by then; a traceback would discard it."""
     path = _markup_trace(tmp_path / "M.json")
