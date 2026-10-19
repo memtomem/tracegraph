@@ -401,3 +401,27 @@ class NormalizedTrace(BaseModel):
 
     def edges_of(self, edge_type: EdgeType) -> list[Edge]:
         return [e for e in self.edges if e.type is edge_type]
+
+
+def _validated_copy(nt: NormalizedTrace) -> NormalizedTrace:
+    """Round-trip ``nt`` through the model; raises only ``ValueError``.
+
+    Pydantic does not revalidate on attribute assignment, so a trace changed in place after it
+    was built, or assembled with ``model_construct``, can hold anything. Entry points that
+    promise ``ValueError`` work on this copy, not ``nt``: a value the model coerces (``"0"`` for
+    a seq, ``"CAUSED_BY"`` for an edge type) would otherwise reach their checks unconverted.
+
+    The dump is Python mode, not JSON: JSON mode turns a NaN in a nullable field into ``null``
+    before validation sees it, erasing ``trace.run_id = nan`` instead of refusing it. Its type
+    warnings are off because validation then converts or refuses each mistyped value, and a
+    warnings filter set to ``error`` would otherwise raise them as ``UserWarning``.
+    """
+    try:
+        return NormalizedTrace.model_validate(nt.model_dump(warnings=False))
+    except ValueError:
+        raise
+    except Exception as exc:
+        # Both steps can run caller code: a subclass's computed field while dumping, the
+        # ``__str__`` of an enum value while validating. Only the type is formatted, since
+        # ``str(exc)`` runs the caller's ``__str__`` as well.
+        raise ValueError(f"trace could not be validated: {type(exc).__name__}") from exc

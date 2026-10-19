@@ -34,6 +34,22 @@ explicitly.
 
 ### Fixed
 
+- **`analyze()`, `check.evaluate()` and `build_incident_memo()` raise only `ValueError` on a
+  trace the model refuses** (#93). On a trace changed in place after it was built they raised a
+  raw `TypeError` or `AttributeError` (`seq = "zero"`, `steps = None`, `trace = None`, a step
+  `kind = "bogus"`, an integer `error_msg`), mostly from analysis code past their structural
+  check, and the memo rendered a step `status = "maybe"` without complaint. Each now analyzes the
+  copy the model validates, the same one `artifact.dumps()` and the writers use, so a value the
+  model coerces (`"0"` for a `seq`) is analyzed as it would be read and the caller's trace is
+  left unchanged. `analyze()` and the memo still accept structurally sound but non-canonical
+  traces; `check.evaluate()` still requires the canonical form. Reports for
+  valid traces are unchanged. That copy is now made from a Python-mode dump: the JSON-mode dump
+  turned a NaN in `trace.run_id` or `trace.links_preserved` into `null`, which validated, so
+  `dumps()` and both writers erased the value instead of refusing it. It no longer depends on
+  the warnings filter either: under `-W error` a coercible value used to be refused through
+  pydantic's serializer warning. Cost on a 6000-step chain, best of 7: `analyze()` 0.25–0.27 s
+  → 0.30–0.32 s, with a baseline 0.57–0.58 s → 0.69–0.70 s, `check.evaluate()` 0.65–0.67 s →
+  0.78–0.79 s, `build_incident_memo()` 0.016 s → 0.044 s.
 - **`artifact.dumps()` raises only `ValueError`** (#82). A trace changed in place after it was
   built (pydantic does not revalidate on attribute assignment) could make it raise a raw
   `TypeError` (`seq = "zero"`, `steps = None`, `edges = None`) or write a field the readers
