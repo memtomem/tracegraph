@@ -260,6 +260,7 @@ class LangGraphCheckpointAdapter:
         original_seq: dict[str, int] = {}
         steps: dict[str, Step] = {}
         writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]] = {}
+        launch_keys: dict[str, list[_CheckpointKey]] = {}
         malformed_writes = 0
         for t in tuples:
             cfg, cp, md, parent_cfg = _checked(t)
@@ -278,6 +279,7 @@ class LangGraphCheckpointAdapter:
             checkpoints[step_id] = cp
             original_seq[step_id] = md.get("step", 0)
             parent_keys[step_id] = self._declared_parent_keys(parent_cfg, md, ns)
+            launch_keys[step_id] = self._launch_parent_keys(md, ns)
             writes_by_step[step_id], malformed = self._writes_by_task(
                 getattr(t, "pending_writes", None)
             )
@@ -356,9 +358,23 @@ class LangGraphCheckpointAdapter:
                 # both stay display labels and are recorded as unknown, named or not. Task,
                 # interrupt and scheduled steps are named by LangGraph's own task ids instead.
                 step.unknown_fields = ["kind", "name"]
-            causal_parent_ids = parents_by_step.get(step_id, [])
-            error_parent_cps = [checkpoints[parent_id] for parent_id in causal_parent_ids]
-            err = self._error_introduced(checkpoints[step_id], error_parent_cps)
+            # An error is new here only if none of the states this checkpoint was built from held
+            # one, and the causal parents alone can miss them: exit-edge expansion replaces a
+            # same-namespace predecessor with a subgraph's exit, and the input checkpoint a
+            # ``__start__`` applies holds its values as pending writes, so that input's own
+            # parents (the namespace's previous invocation, and the checkpoint that launched the
+            # subgraph) stand in. A fork (``update_state(..., as_node="__copy__")``) copies an
+            # existing checkpoint and runs no node, so whatever error it holds is not new; it is
+            # linked to the copied checkpoint's parent, which need not hold that error.
+            upstream_keys = list(parent_keys.get(step_id, []))
+            if no_producer and step.source is StepSource.LOOP and display_parent_id is not None:
+                upstream_keys += [*parent_keys.get(display_parent_id, []),
+                                  *launch_keys.get(display_parent_id, [])]
+            upstream_ids = [*parents_by_step.get(step_id, []),
+                            *(pid for key in upstream_keys if (pid := step_id_by_key.get(key)))]
+            error_parent_cps = [checkpoints[pid] for pid in dict.fromkeys(upstream_ids)]
+            err = (None if step.source is StepSource.FORK
+                   else self._error_introduced(checkpoints[step_id], error_parent_cps))
             # Only a checkpoint a node wrote can disclose a rewrite: an input, an update and a
             # fork (``update_state(..., as_node="__copy__")`` copies state, linked to the copied
             # checkpoint's parent) carry what the caller supplied. The channel's own history is
@@ -943,6 +959,13 @@ class LangGraphCheckpointAdapter:
             parent_ns = parent_cfg.get("checkpoint_ns", ns) or _ROOT_NS
             return [(parent_ns, parent_id)]
 
+        return LangGraphCheckpointAdapter._launch_parent_keys(md, ns)
+
+    @staticmethod
+    def _launch_parent_keys(md: dict, ns: str) -> list[_CheckpointKey]:
+        """The closest enclosing-graph checkpoint named in ``metadata.parents``: for a subgraph,
+        the checkpoint it was launched from, recorded even when ``parent_config`` points at
+        the namespace's previous invocation instead."""
         # `_checked` has already established `parents` as a str -> str mapping.
         parents = md.get("parents") or {}
         closest = LangGraphCheckpointAdapter._closest_parent_ns(ns, parents)

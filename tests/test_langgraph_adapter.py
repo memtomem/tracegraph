@@ -803,3 +803,264 @@ def test_a_rewrite_alongside_a_subgraph_is_still_disclosed(saver_kind, second):
     errors, gaps, _ = _ingest_run(g, saver_kind, ({"error": None, "log": []},))
     assert [m for _, m in errors if m == "B"] == []  # never recorded
     assert gaps["langgraph.rewritten_error_channel"] == 1  # 0 before: the exit hid the history
+
+
+# --- an error already upstream of a subgraph is not recorded again (#85) ---
+
+from langgraph.types import Send, interrupt  # noqa: E402
+
+
+class _NoErrorState(TypedDict):
+    log: Annotated[list, add]
+
+
+def _subgraph(node, *, state=_OuterState, checkpointer=None):
+    g = StateGraph(state, output_schema=_InnerOut)
+    g.add_node("inner", node)
+    g.add_edge(START, "inner")
+    g.add_edge("inner", END)
+    return g.compile(checkpointer=checkpointer)
+
+
+def _into(sub, first=lambda s: {"error": "outer"}):
+    """`first`, then the subgraph `sub`."""
+    g = StateGraph(_OuterState)
+    g.add_node("first", first)
+    g.add_node("sub", sub)
+    g.add_edge(START, "first")
+    g.add_edge("first", "sub")
+    g.add_edge("sub", END)
+    return g
+
+
+def _nested():
+    mid = StateGraph(_OuterState, output_schema=_InnerOut)
+    mid.add_node("nested", _subgraph(lambda s: {"log": ["in"]}))
+    mid.add_edge(START, "nested")
+    mid.add_edge("nested", END)
+    return _into(mid.compile())
+
+
+def _fan_out(outer):
+    g = StateGraph(_OuterState)
+    g.add_node("first", lambda s: {"error": outer})
+    for name in ("a", "b"):
+        g.add_node(name, _subgraph(lambda s: {"log": ["in"]}))
+        g.add_edge(name, END)
+    g.add_edge(START, "first")
+    g.add_conditional_edges(
+        "first", lambda s: [Send(n, {"error": "payload", "log": []}) for n in ("a", "b")]
+    )
+    return g
+
+
+def _errors_by_namespace(raw):
+    return [(s.step_id.split(":")[0] if ":" in s.step_id else "", s.name, s.error_msg)
+            for s in raw.steps if s.status is StepStatus.ERROR]
+
+
+_CLEAN = ({"error": None, "log": []},)
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+@pytest.mark.parametrize("graph, inputs, expected, rewritten", [
+    pytest.param(lambda: _into(_subgraph(lambda s: {"log": ["in"]})), _CLEAN,
+                 [("", "first", "outer")], None, id="propagated into a subgraph"),
+    pytest.param(lambda: _into(_subgraph(lambda s: {"log": ["in"]}), lambda s: {"log": ["first"]}),
+                 ({"error": "caller", "log": []},), [("", None, "caller")], None,
+                 id="caller input carried into a subgraph"),
+    pytest.param(lambda: _into(_subgraph(lambda s: {"error": "inner"}), lambda s: {"log": ["first"]}),
+                 _CLEAN, [("sub", "inner", "inner")], None, id="a failure inside the subgraph"),
+    pytest.param(lambda: _into(_subgraph(lambda s: {"error": "again"})), _CLEAN,
+                 [("", "first", "outer")], 1, id="the subgraph writes over the propagated error"),
+    pytest.param(_nested, _CLEAN, [("", "first", "outer")], None, id="nested subgraphs"),
+    pytest.param(lambda: _into(_subgraph(lambda s: {"log": ["in"]}, state=_NoErrorState)), _CLEAN,
+                 [("", "first", "outer")], None, id="subgraph state without the error channel"),
+    pytest.param(lambda: _into(_subgraph(lambda s: {"error": None, "log": ["in"]})), _CLEAN,
+                 [("", "first", "outer")], None, id="the subgraph clears its own copy"),
+    pytest.param(lambda: _into(_subgraph(lambda s: {"log": ["in"]})), _CLEAN * 2,
+                 [("", "first", "outer")] * 2, None, id="run twice on one thread"),
+    pytest.param(lambda: _fan_out("outer"), _CLEAN, [("", "first", "outer")], None,
+                 id="Send into subgraphs below an error"),
+    pytest.param(lambda: _fan_out(None), _CLEAN, [("a", None, "payload"), ("b", None, "payload")],
+                 None, id="Send payload errors into subgraphs below a clean state"),
+])
+def test_an_error_upstream_of_a_subgraph_is_recorded_once(saver_kind, graph, inputs, expected,
+                                                          rewritten):
+    _, gaps, raw = _ingest_run(graph(), saver_kind, inputs)
+    assert sorted(_errors_by_namespace(raw), key=str) == sorted(expected, key=str)
+    assert gaps.get("langgraph.rewritten_error_channel") == rewritten
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_persistent_subgraph_re_entered_below_an_error_records_it_once(saver_kind):
+    # checkpointer=True keeps one namespace across invocations: the second entry's input
+    # checkpoint names the first invocation's clean last checkpoint as its parent, and the
+    # outer checkpoint that launched it only in metadata.parents.
+    sub = _subgraph(lambda s: {"log": ["in"]}, checkpointer=True)
+    graph = _into(sub, lambda s: {"error": "outer" if "fail" in s["log"] else None})
+    _, gaps, raw = _ingest_run(graph, saver_kind, ({"error": None, "log": []},
+                                                   {"error": None, "log": ["fail"]}))
+    assert _errors_by_namespace(raw) == [("", "first", "outer")]
+    assert gaps == {}
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_new_input_after_an_interrupted_subgraph_failure_is_still_recorded(saver_kind):
+    # The interrupted subgraph's exit holds its own error; the new root input is compared with
+    # its declared parent, the clean root state, not with that exit.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("fail_inner", lambda s: {"error": "old-inner"})
+    inner.add_node("pause", lambda s: {"log": [interrupt("pause")]})
+    inner.add_edge(START, "fail_inner")
+    inner.add_edge("fail_inner", "pause")
+    inner.add_edge("pause", END)
+    g = StateGraph(_OuterState)
+    g.add_node("sub", inner.compile())
+    g.add_node("done", lambda s: {"log": ["done"]})
+    g.add_conditional_edges(START, lambda s: "done" if "skip" in s["log"] else "sub")
+    g.add_edge("sub", END)
+    g.add_edge("done", END)
+    _, _, raw = _ingest_run(g, saver_kind, ({"error": None, "log": []},
+                                            {"error": "new-caller", "log": ["skip"]}))
+    assert sorted(_errors_by_namespace(raw), key=str) == sorted(
+        [("sub", "fail_inner", "old-inner"), ("", None, "new-caller")], key=str)
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_rewrite_beside_a_subgraph_without_the_error_channel_is_disclosed(saver_kind):
+    # Recorded twice before: the checkpoint after `rewrite` and the subgraph had the subgraph's
+    # exit, which has no error channel, as its only error parent. It is not a new failure, and
+    # `rewrite` wrote the channel while it was set, so the #47 rule now discloses it.
+    g = StateGraph(_OuterState)
+    g.add_node("first", lambda s: {"error": "outer"})
+    g.add_node("rewrite", lambda s: dict(s))
+    g.add_node("sub", _subgraph(lambda s: {"log": ["in"]}, state=_NoErrorState))
+    g.add_edge(START, "first")
+    g.add_edge("first", "rewrite")
+    g.add_edge("first", "sub")
+    g.add_edge(["rewrite", "sub"], END)
+    _, gaps, raw = _ingest_run(g, saver_kind, _CLEAN)
+    assert _errors_by_namespace(raw) == [("", "first", "outer")]
+    assert gaps == {"langgraph.rewritten_error_channel": 1}
+    assert any("wrote the error channel while it already held an error" in w
+               for w in raw.ingest_warnings)
+    from tracegraph import artifact
+
+    # How `check` reads this gap is pinned in test_check.py; here it must survive the artifact.
+    reread = artifact.loads(artifact.dumps(normalize(raw)))
+    assert {x.code: x.count for x in reread.trace.capture.gaps} == gaps
+
+
+def _input(cid, ns, parent_id=None, *, parent_ns=None, parents=None):
+    t = _ck(cid, ns, -1, parent_id, parent_ns=parent_ns, parents=parents)
+    t.metadata["source"] = "input"
+    return t
+
+
+@pytest.mark.parametrize("launched_with, expected", [("boom", []), (None, ["sub:003-start"])])
+def test_a_subgraph_start_is_compared_with_the_state_it_was_launched_from(launched_with, expected):
+    root = _ck("001-root", "", 1, None, channel_values={"error": launched_with} if launched_with else {})
+    sub_input = _input("002-input", "sub", parents={"": "001-root"})
+    start = _ck("003-start", "sub", 0, "002-input", parents={"": "001-root"},
+                channel_values={"error": "boom"})
+    raw = LangGraphCheckpointAdapter(_StubSaver([start, sub_input, root])).ingest("A")
+    assert [s.step_id for s in raw.steps if s.status is StepStatus.ERROR] == (
+        ["001-root"] if launched_with else []) + expected
+
+
+def test_a_re_entered_subgraph_start_also_reads_its_launch_parent():
+    # parent_config names the namespace's previous invocation; metadata.parents the launcher.
+    earlier = _ck("001-sub-done", "sub", 1, None)
+    root = _ck("002-root", "", 1, None, channel_values={"error": "boom"})
+    sub_input = _input("003-input", "sub", "001-sub-done", parents={"": "002-root"})
+    start = _ck("004-start", "sub", 0, "003-input", parents={"": "002-root"},
+                channel_values={"error": "boom"})
+    raw = LangGraphCheckpointAdapter(_StubSaver([start, sub_input, root, earlier])).ingest("A")
+    assert [s.step_id for s in raw.steps if s.status is StepStatus.ERROR] == ["002-root"]
+
+
+def test_a_legacy_subgraph_input_with_a_cross_namespace_parent_config_is_read_through():
+    root = _ck("001-root", "", 1, None, channel_values={"error": "boom"})
+    sub_input = _input("002-input", "sub", "001-root", parent_ns="")
+    start = _ck("003-start", "sub", 0, "002-input", channel_values={"error": "boom"})
+    raw = LangGraphCheckpointAdapter(_StubSaver([start, sub_input, root])).ingest("A")
+    assert [s.step_id for s in raw.steps if s.status is StepStatus.ERROR] == ["001-root"]
+
+
+def test_after_a_subgraph_the_namespace_history_still_holds_the_error():
+    # The continuation's causal parent is the subgraph's exit, which lacks the error; its
+    # declared parent, the checkpoint before the subgraph, has it.
+    root_before = _ck("001-root-before", "", 1, None, channel_values={"error": "boom"})
+    sub_input = _input("002-sub-input", "sub", parents={"": "001-root-before"})
+    sub_done = _ck("003-sub-done", "sub", 0, "002-sub-input", parents={"": "001-root-before"})
+    root_after = _ck("004-root-after", "", 2, "001-root-before", channel_values={"error": "boom"})
+    raw = LangGraphCheckpointAdapter(
+        _StubSaver([root_after, sub_done, sub_input, root_before])).ingest("A")
+    assert ("004-root-after", "sub:003-sub-done") in {(e.src, e.dst) for e in raw.causal_edges}
+    assert [s.step_id for s in raw.steps if s.status is StepStatus.ERROR] == ["001-root-before"]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_fork_copy_of_a_subgraph_start_does_not_record_the_error_again(saver_kind):
+    # update_state(..., as_node="__copy__") links the copy to the copied checkpoint's parent,
+    # here the subgraph's empty input checkpoint; a copy runs no node, so it is never new.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("pause", lambda s: {"log": [interrupt("pause")]})
+    inner.add_edge(START, "pause")
+    inner.add_edge("pause", END)
+    saver = _new_saver(saver_kind)
+    app = _into(inner.compile()).compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "log": []}, cfg)
+    start = next(t for t in saver.list(cfg)
+                 if t.config["configurable"]["checkpoint_ns"].startswith("sub")
+                 and t.metadata["step"] == 0)
+    app.update_state(start.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    assert any(s.source.value == "fork" for s in raw.steps)
+    assert _errors_by_namespace(raw) == [("", "first", "outer")]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_a_fork_copy_of_the_checkpoint_that_first_held_an_error_is_not_a_second_failure(saver_kind):
+    g = StateGraph(_OuterState)
+    g.add_node("first", lambda s: {"error": "boom"})
+    g.add_edge(START, "first")
+    g.add_edge("first", END)
+    saver = _new_saver(saver_kind)
+    app = g.compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "log": []}, cfg)
+    app.update_state(app.get_state(cfg).config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    assert [(s.source.value, s.name, s.error_msg) for s in raw.steps
+            if s.status is StepStatus.ERROR] == [("loop", "first", "boom")]
+
+
+@pytest.mark.parametrize("saver_kind", ["memory", "sqlite"])
+def test_an_update_introducing_an_error_into_a_clean_subgraph_is_recorded(saver_kind):
+    # The Send payload starts the subgraph clean although the launcher holds an error, so a
+    # caller update writing one there is new; only the checkpoint applying an input reads
+    # through it.
+    inner = StateGraph(_OuterState, output_schema=_InnerOut)
+    inner.add_node("pause", lambda s: {"log": [interrupt("pause")]})
+    inner.add_edge(START, "pause")
+    inner.add_edge("pause", END)
+    g = StateGraph(_OuterState)
+    g.add_node("first", lambda s: {"error": "outer"})
+    g.add_node("sub", inner.compile())
+    g.add_edge(START, "first")
+    g.add_conditional_edges("first", lambda s: [Send("sub", {"error": None, "log": []})])
+    g.add_edge("sub", END)
+    saver = _new_saver(saver_kind)
+    app = g.compile(checkpointer=saver)
+    cfg = {"configurable": {"thread_id": "t"}}
+    app.invoke({"error": None, "log": []}, cfg)
+    sub_input = next(t for t in saver.list(cfg)
+                     if t.config["configurable"]["checkpoint_ns"].startswith("sub")
+                     and t.metadata["source"] == "input")
+    app.update_state(sub_input.config, {"error": "new"}, as_node="pause")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    assert sorted((s.source.value, s.error_msg) for s in raw.steps
+                  if s.status is StepStatus.ERROR) == [("loop", "outer"), ("update", "new")]
