@@ -1737,6 +1737,59 @@ def test_cli_prints_an_emoji_code_in_producer_strings_literally(tmp_path, comman
     assert "\N{SQUARED OK}" not in res.output and "\N{FIRE}" not in res.output, res.output
 
 
+def _run_main(*args, cwd):
+    """Run the real entry point: CliRunner(app) bypasses ``main()`` and its stream setup."""
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}  # strict errors, as on a UTF-8 terminal
+    return subprocess.run(
+        [sys.executable, "-c", "from tracegraph.cli import main; main()", *map(str, args)],
+        cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120,
+    )
+
+
+def _surrogate_trace(path):
+    """JSON can carry a lone surrogate ("\\ud800"); the artifact loads and validates."""
+    steps = [
+        Step(step_id="s0", trace_id="S", seq=0, kind=StepKind.CHAIN),
+        Step(step_id="s1", trace_id="S", seq=1, name="\ud800", kind=StepKind.TOOL,
+             status=StepStatus.ERROR, error_msg="boom \ud800"),
+    ]
+    nt = normalize(RawTrace(trace=Trace(trace_id="S", source_kind="x", run_id="run-\ud800"),
+                            steps=steps,
+                            causal_edges=[Edge(type=EdgeType.CAUSED_BY, src="s1", dst="s0")]))
+    artifact.save(nt, path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["analyze"], ["inspect"], ["explain", "{path}", "s1"], ["query", "tool-failure"],
+     ["summarize", "tool-failure"], ["export-incident-memo", "{path}", "--out", "memo.md"]],
+)
+def test_cli_survives_a_lone_surrogate_in_producer_strings(tmp_path, command):
+    path = _surrogate_trace(tmp_path / "S.json")
+    args = [a.format(path=path) for a in command] if "{path}" in command else [*command, path]
+    res = _run_main(*args, cwd=tmp_path)
+    assert res.returncode == 0, res.stderr
+    assert "Traceback" not in res.stderr, res.stderr
+
+
+def test_main_runs_with_an_unused_output_stream_closed(tmp_path):
+    code = "import sys; sys.stderr.close(); from tracegraph.cli import main; main()"
+    res = subprocess.run([sys.executable, "-c", code, "--version"], cwd=tmp_path,
+                         capture_output=True, text=True, timeout=120)
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.strip(), res.stdout
+
+
+def test_ingest_otlp_default_path_survives_a_lone_surrogate_trace_id(tmp_path):
+    (tmp_path / "otlp.json").write_text(json.dumps(_otlp_export("\ud800")), encoding="utf-8")
+    res = _run_main("ingest-otlp", "--file", "otlp.json", cwd=tmp_path)
+    assert res.returncode == 0, res.stderr
+    [written] = tmp_path.glob("trace-*.json")
+    assert artifact.load(written).trace.trace_id == "\ud800"
+
+
 def test_analyze_reports_an_unwritable_json_out_as_a_usage_error(tmp_path):
     """The analysis has already run and rendered by then; a traceback would discard it."""
     path = _markup_trace(tmp_path / "M.json")

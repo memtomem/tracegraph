@@ -561,6 +561,23 @@ def test_unserialized_exception_is_labelled_not_blank():
     assert "error_msg" in errors[0].unknown_fields
 
 
+def test_a_trigger_name_that_cannot_be_encoded_leaves_the_failed_task_unnamed():
+    """JSON can carry a lone surrogate ("\\ud800"), which has no UTF-8 encoding. LangGraph could
+    not have hashed such a trigger into a task id, so the candidate is skipped, not fatal."""
+    tuples = [
+        _ck(
+            CID,
+            "",
+            1,
+            None,
+            channel_values={"branch:to:\ud800": True},
+            pending_writes=[("task-x", "__error__", f"RuntimeError('{SENTINEL}')")],
+        )
+    ]
+    raw = LangGraphCheckpointAdapter(_StubSaver(tuples)).ingest("A")
+    assert [e.name for e in _errors(raw.steps)] == [None]
+
+
 def test_undecodable_send_packets_are_disclosed():
     """Without ``langgraph`` installed, Send packets revive as ``None`` and cannot be named."""
     tuples = [

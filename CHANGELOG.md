@@ -53,6 +53,17 @@ explicitly.
 
 ### Fixed
 
+- **A lone surrogate in a producer string no longer ends a command in a traceback** (#101). JSON
+  can carry one (`"\ud800"`), and the artifact loads and validates, but strict UTF-8 refused it
+  in several places: `analyze` and `summarize` (and `check`, which shares the helper) hashing a
+  name into its `redacted:` alias; `ingest-otlp` without `--out` hashing the trace id into the default file
+  name; `export-incident-memo` hashing the run id; `inspect`, `explain` and `query` writing the
+  name to the terminal; and LangGraph ingest hashing a routing channel into a candidate task id.
+  The three hashes now encode with `surrogatepass`, so every other string hashes to the same
+  alias, file name and digest as before. The LangGraph candidate is skipped, because LangGraph
+  could not have produced a task id from it. The CLI escapes what its output streams cannot
+  encode instead of failing.
+
 - **CLI output prints an emoji code in a producer string as written** (#102). The CLI's Rich
   consoles kept emoji substitution on, and escaping markup does not turn it off, so a step named
   `:ok:` printed as 🆗 in `query`, `inspect`, `explain` and `analyze` while the artifact and the

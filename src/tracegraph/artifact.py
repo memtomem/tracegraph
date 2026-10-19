@@ -250,4 +250,6 @@ def default_path(identifier: str) -> Path:
             and identifier.split(".")[0].upper() not in reserved
             and not identifier.endswith(".")):
         return Path(identifier + ".json")
-    return Path("trace-" + hashlib.sha256(identifier.encode()).hexdigest() + ".json")
+    # surrogatepass: a trace id from JSON can hold a lone surrogate; other ids hash as before.
+    digest = hashlib.sha256(identifier.encode("utf-8", "surrogatepass")).hexdigest()
+    return Path("trace-" + digest + ".json")

@@ -162,7 +162,9 @@ def _safe(value: str | None) -> str | None: ...
 def _safe(value: str | None) -> str | None:
     if value is None or re.fullmatch(r"[A-Za-z0-9_.:/#@-]{1,200}", value):
         return value
-    return "redacted:" + hashlib.sha256(value.encode()).hexdigest()
+    # surrogatepass: JSON can carry a lone surrogate, which strict UTF-8 cannot encode. Every
+    # other string encodes to the same bytes, so existing aliases are unchanged.
+    return "redacted:" + hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _display_name(step: Step) -> str:
