@@ -338,7 +338,7 @@ def test_ignored_first_predicate_gap_still_uses_unbounded_fast_path(monkeypatch)
     def fail_forward(*args, **kwargs):
         raise AssertionError("ignored first-predicate gap disabled the unbounded fast path")
 
-    monkeypatch.setattr("tracegraph.analysis.patterns._find_matches_forward", fail_forward)
+    monkeypatch.setattr("tracegraph.analysis.patterns._iter_forward", fail_forward)
     assert find_matches(nt, pattern) == [["R2", "R4"]]
 
 
@@ -479,3 +479,209 @@ def test_str_renders_gap_and_back_reference_readably():
     assert "→[gap 2..]→" in heuristic
     near = str(PRESETS["tool-retry-failure-near"])
     assert f"→[gap 2..{MAX_GAP}]→" in near
+
+
+def _oracle_matches(nt, pattern):
+    """Brute-force reference: every tuple of steps, kept when each consecutive pair is joined by
+    a causal path of an allowed length. Shares no traversal or dedup code with the matchers."""
+    import itertools
+
+    steps = nt.steps_by_id()
+    ids = list(steps)
+    effects: dict[str, set[str]] = {sid: set() for sid in ids}
+    for e in nt.edges_of(EdgeType.CAUSED_BY):
+        effects[e.dst].add(e.src)
+    # lengths[u][v]: every length of a causal path u -> ... -> v (a DAG, so finite).
+    lengths: dict[str, dict[str, set[int]]] = {}
+    for u in sorted(ids, key=lambda sid: steps[sid].seq, reverse=True):
+        out: dict[str, set[int]] = {}
+        for v in effects[u]:
+            out.setdefault(v, set()).add(1)
+            for w, ls in lengths[v].items():
+                out.setdefault(w, set()).update(n + 1 for n in ls)
+        lengths[u] = out
+
+    def joined(u, v, pred):
+        ls = lengths[u].get(v, set())
+        if pred.gap is None:
+            return 1 in ls
+        lo, hi = pred.gap
+        return any(n >= lo and (hi is None or n <= hi) for n in ls)
+
+    def names_ok(row):
+        for i, pred in enumerate(pattern.steps):
+            if pred.same_name_as is not None:
+                ref, own = steps[row[pred.same_name_as]].name, steps[row[i]].name
+                if ref is None or own is None or ref != own:
+                    return False
+        return True
+
+    rows = [
+        list(row)
+        for row in itertools.product(ids, repeat=len(pattern.steps))
+        if all(p.matches(steps[s]) for p, s in zip(pattern.steps, row, strict=True))
+        and all(joined(row[i - 1], row[i], pattern.steps[i]) for i in range(1, len(row)))
+        and names_ok(row)
+    ]
+    return sorted(rows, key=lambda row: tuple((steps[sid].seq, sid) for sid in row))
+
+
+def _random_pattern(rng):
+    preds = []
+    for i in range(rng.randint(1, 4)):
+        gap = None
+        if i and rng.random() < 0.6:
+            lo = rng.randint(1, 3)
+            gap = (lo, rng.choice([None, lo, lo + 1, lo + 3]))
+        preds.append(StepPredicate(
+            kind=rng.choice([None, None, StepKind.TOOL, StepKind.CHAIN]),
+            status=rng.choice([None, None, None, ERR]),
+            same_name_as=rng.choice([None, *range(i)]) if i and rng.random() < 0.4 else None,
+            gap=gap,
+        ))
+    return PathPattern(tuple(preds))
+
+
+def _random_dag(rng, tid, n):
+    specs = [
+        (i, rng.choice(["x", "y", None]), rng.choice([StepKind.TOOL, StepKind.CHAIN]),
+         ERR if rng.random() < 0.4 else OK)
+        for i in range(n)
+    ]
+    # Each step caused by 1..3 strictly-earlier steps: diamonds, parallel branches, and
+    # endpoints reachable at several distances.
+    edges = [
+        (i, cand) for i in range(1, n) for cand in rng.sample(range(i), k=min(i, rng.randint(1, 3)))
+    ]
+    return _custom(tid, specs, edges)
+
+
+@pytest.mark.parametrize("seed", range(600))
+def test_find_matches_equals_brute_force_oracle(seed):
+    # Arbitrary 1-4 predicate patterns (strict steps, bounded and unbounded gaps, consecutive
+    # gaps, gaps before strict steps, back-references to any earlier column) on random DAGs.
+    import random
+
+    rng = random.Random(seed)
+    nt = _random_dag(rng, f"OR{seed}", rng.randint(2, 11))
+    pattern = _random_pattern(rng)
+    assert find_matches(nt, pattern) == _oracle_matches(nt, pattern), str(pattern)
+
+
+def test_find_matches_dedups_a_duplicated_edge_on_an_unvalidated_trace():
+    # find_matches does not validate its input, so a caller can hand it a doubled CAUSED_BY
+    # edge (InMemoryStore.upsert_edges accepts one). The match is still reported once.
+    nt = _custom("DUP", [(0, "a", StepKind.TOOL, OK), (1, "b", StepKind.TOOL, ERR)], [(1, 0)])
+    doubled = nt.model_copy(update={"edges": [*nt.edges, *nt.edges_of(EdgeType.CAUSED_BY)]})
+    strict = PathPattern((StepPredicate(), StepPredicate()))
+    gap = PathPattern((StepPredicate(), StepPredicate(gap=(1, 2))))
+    assert find_matches(doubled, strict) == [["DUP0", "DUP1"]]
+    assert find_matches(doubled, gap) == [["DUP0", "DUP1"]]
+
+
+_P = StepPredicate
+_RECURSION_SHAPES = {
+    "gap-then-strict": PathPattern((_P(), _P(gap=(2, 3)), _P(same_name_as=0))),
+    "two-unbounded-gaps": PathPattern((_P(), _P(gap=(1, None)), _P(gap=(2, None), same_name_as=0))),
+    "bounded-then-unbounded": PathPattern((_P(), _P(gap=(1, 2), same_name_as=0), _P(gap=(1, None)))),
+    "strict-then-gap-backref-1": PathPattern((_P(), _P(), _P(gap=(1, 4), same_name_as=1))),
+    "exact-distance": PathPattern((_P(kind=StepKind.TOOL), _P(gap=(3, 3)))),
+    "four-mixed": PathPattern((_P(), _P(gap=(1, 2)), _P(), _P(gap=(1, None), same_name_as=1))),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_RECURSION_SHAPES))
+@pytest.mark.parametrize("seed", range(15))
+def test_recursion_shapes_equal_brute_force_oracle_on_dense_dags(shape, seed):
+    # Shapes no preset has, on DAGs dense enough that endpoints are reachable at distances
+    # below, inside and above each gap's bounds.
+    import random
+
+    nt = _random_dag(random.Random(seed), f"SH{seed}", 9)
+    pattern = _RECURSION_SHAPES[shape]
+    expected = _oracle_matches(nt, pattern)
+    assert find_matches(nt, pattern) == expected
+
+
+def _prefix_sizes(total):
+    return sorted({0, 1, 2, max(total - 1, 0), total, total + 1}) + [None]
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_first_matches_is_a_prefix_of_find_matches_with_the_exact_total(seed):
+    # first_matches keeps at most n paths but must return exactly find_matches()[:n] and the
+    # full count, for every n including 0 (where nothing is kept but everything is counted).
+    import random
+
+    from tracegraph.analysis.patterns import build_index, first_matches, iter_matches
+
+    rng = random.Random(seed)
+    nt = _random_dag(rng, f"PF{seed}", rng.randint(2, 11))
+    for pattern in [_random_pattern(rng), *PRESETS.values()]:
+        expected = find_matches(nt, pattern)
+        index = build_index(nt)
+        for n in _prefix_sizes(len(expected)):
+            got = first_matches(iter_matches(nt, pattern, index=index), index[0], n)
+            assert got == (expected[:n], len(expected)), (str(pattern), n)
+
+
+def test_first_matches_orders_equal_seq_steps_by_step_id():
+    # Steps sharing a seq are ordered by step_id in every column, as find_matches sorts them.
+    from tracegraph.analysis.patterns import build_index, first_matches, iter_matches
+
+    steps = [
+        Step(step_id=sid, trace_id="EQ", seq=seq, name="t", kind=StepKind.TOOL, status=ERR)
+        for sid, seq in [("r", 0), ("b", 1), ("a", 1), ("d", 2), ("c", 2)]
+    ]
+    edges = [
+        Edge(type=EdgeType.CAUSED_BY, src=src, dst=dst)
+        for src, dst in [("b", "r"), ("a", "r"), ("d", "b"), ("c", "b"), ("d", "a"), ("c", "a")]
+    ]
+    nt = normalize(RawTrace(trace=Trace(trace_id="EQ", source_kind="x"), steps=steps,
+                            causal_edges=edges))
+    pattern = PathPattern((StepPredicate(), StepPredicate(gap=(1, None))))
+    expected = [["r", "a"], ["r", "b"], ["r", "c"], ["r", "d"], ["a", "c"], ["a", "d"],
+                ["b", "c"], ["b", "d"]]
+    assert find_matches(nt, pattern) == expected
+    index = build_index(nt)
+    assert first_matches(iter_matches(nt, pattern, index=index), index[0], 3) == (expected[:3], 8)
+
+
+def _all_failing_chain(n):
+    return _custom("MEM", [(i, "x", StepKind.AGENT, ERR) for i in range(n)],
+                   [(i, i - 1) for i in range(1, n)])
+
+
+def _retry_fan(w):
+    """w tools -> one retry:x step -> w failing tools: w² matches from 2w+1 steps."""
+    return _custom(
+        "FAN",
+        [*[(f"a{i:04d}", "x", StepKind.TOOL, OK) for i in range(w)],
+         ("r", "retry:x", StepKind.CHAIN, OK),
+         *[(f"b{i:04d}", "x", StepKind.TOOL, ERR) for i in range(w)]],
+        [*[("r", f"a{i:04d}") for i in range(w)], *[(f"b{i:04d}", "r") for i in range(w)]],
+    )
+
+
+@pytest.mark.perf
+@pytest.mark.parametrize("nt, preset, first, total", [
+    (_all_failing_chain(1000), "repeated-agent-failure", ["MEM0", "MEM1"], 1000 * 999 // 2),
+    (_retry_fan(500), "tool-retry-failure", ["FANa0000", "FANr", "FANb0000"], 500 * 500),
+    (_retry_fan(500), "tool-retry-failure-near", ["FANa0000", "FANb0000"], 500 * 500),
+], ids=["two-step-unbounded", "forward-strict", "forward-bounded-gap"])
+def test_first_matches_retains_only_the_kept_paths(nt, preset, first, total):
+    # Every shape here has a quadratic number of matches. Keeping one must not hold the rest:
+    # the list-then-slice path this replaced peaked at 61-125 MiB on these traces.
+    import tracemalloc
+
+    from tracegraph.analysis.patterns import build_index, first_matches, iter_matches
+
+    index = build_index(nt)
+    tracemalloc.start()
+    try:
+        kept, count = first_matches(iter_matches(nt, PRESETS[preset], index=index), index[0], 1)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert kept == [first] and count == total
+    assert peak < 20 * 2**20, f"peak {peak / 2**20:.0f} MiB while keeping one match"

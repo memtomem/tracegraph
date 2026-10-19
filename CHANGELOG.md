@@ -8,6 +8,30 @@ explicitly.
 
 ## Unreleased
 
+### Changed
+
+- **`query --limit` no longer holds every match of the trace it is reading** (#79). Each
+  trace's matches were collected and sorted in full before the cap was applied, so one trace
+  with millions of matches took about 1 GiB at `--limit 1`. The matchers now produce matches
+  one at a time and `query` keeps only those still under the cap. The footer's total stays
+  exact, so every match is still counted. Measured on macOS/arm64 at `--limit 1` with
+  synthetic traces: a 2500-step chain of failing `x` agents (`repeated-agent-failure`, 3.1M
+  matches), and 1500 tools feeding one `retry:x` step that feeds 1500 failing tools
+  (`tool-retry-failure` and `tool-retry-failure-near`, 2.25M matches each):
+
+  | trace, preset | memory backend | `--backend ladybug` |
+  | --- | --- | --- |
+  | chain, `repeated-agent-failure` | 976 → 70 MiB, 5.5 → 2.8 s | 1226 → 308 MiB (Python fallback) |
+  | fan, `tool-retry-failure` | 1097 → 74 MiB, 2.8 → 1.6 s | 1753 → 757 MiB (Cypher) |
+  | fan, `tool-retry-failure-near` | 927 → 74 MiB, 3.2 → 2.1 s | 1470 → 613 MiB (Cypher) |
+
+  The Cypher rows stay high because LadybugDB buffers the full result set; an empty store
+  already takes about 300 MiB. Output, exit codes and error precedence are unchanged, and
+  `find_matches` returns the same list for every caller. Time still grows with the match
+  count. A mode that stops early and reports no total was considered and not built.
+  `LadybugStore` gains `first_matches(pattern, n)`; `tracegraph.analysis.patterns` gains
+  `iter_matches` and `first_matches`.
+
 ### Fixed
 
 - **An error already in the parent graph is no longer recorded again around a subgraph** (#85).

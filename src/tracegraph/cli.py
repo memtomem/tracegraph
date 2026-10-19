@@ -36,7 +36,7 @@ from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
 from tracegraph.analysis import Match
-from tracegraph.analysis.patterns import build_index, find_matches, match_for
+from tracegraph.analysis.patterns import build_index, first_matches, iter_matches, match_for
 from tracegraph.analysis import diff as tree_diff
 from tracegraph.analysis import explain as explain_chain
 from tracegraph import __version__
@@ -1066,14 +1066,14 @@ def _match_trace(
     tid = nt.trace.trace_id
     if backend is QueryBackend.MEMORY:
         index = build_index(nt)
-        paths = find_matches(nt, pattern, index=index)
-        return [match_for(tid, index[0], path) for path in paths[:room]], len(paths), False
+        paths, total = first_matches(iter_matches(nt, pattern, index=index), index[0], room)
+        return [match_for(tid, index[0], path) for path in paths], total, False
     store = _store_from_trace(nt, backend)
     try:
         steps = nt.steps_by_id()
-        paths = store.find_matches(pattern)
-        found = [match_for(tid, steps, path) for path in paths[:room]]
-        return found, len(paths), getattr(store, "fell_back_to_python", False)
+        paths, total = store.first_matches(pattern, room)
+        found = [match_for(tid, steps, path) for path in paths]
+        return found, total, getattr(store, "fell_back_to_python", False)
     finally:
         _close_store(store)
 
