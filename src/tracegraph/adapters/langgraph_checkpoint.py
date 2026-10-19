@@ -96,6 +96,7 @@ from typing import Any, Iterable, Iterator, get_type_hints
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from pydantic import TypeAdapter, ValidationError
 
+from tracegraph._errors import describe, type_name
 from tracegraph.adapters.base import Disclosures
 from tracegraph.input_validation import object_field
 from tracegraph.model import (
@@ -685,9 +686,9 @@ class LangGraphCheckpointAdapter:
         except KeyboardInterrupt:
             raise
         except BaseException as exc:
-            text = str(exc)
-            reason = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
-            raise ValueError(f"the supplied graph could not read checkpoint {cid}: {reason}") from exc
+            raise ValueError(
+                f"the supplied graph could not read checkpoint {cid}: {describe(exc)}"
+            ) from exc
         read = (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
         if read != cid:
             raise ValueError(
@@ -1250,7 +1251,7 @@ def _decoded(listing: Iterable[Any]) -> Iterator[Any]:
             return
         except Exception as exc:
             raise ValueError(
-                f"checkpoint history cannot be decoded ({type(exc).__name__})"
+                f"checkpoint history cannot be decoded ({type_name(exc)})"
             ) from exc
         yield item
 

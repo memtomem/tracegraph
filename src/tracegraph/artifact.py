@@ -126,15 +126,15 @@ def _migrate_v1(trace_payload: dict) -> dict:
         header.setdefault("links_preserved", None)
         migrated["trace"] = header
     edges = migrated.get("edges")
-    # Match the *shape*, not a list of concrete types. The model accepts any iterable for its
-    # edge sequence (list, tuple, deque, a one-shot iterator), and enumerating types here
-    # meant every shape not on the list silently skipped migration, so its CAUSED_BY edges
-    # lost the legacy origin default. Strings, bytes and mappings are iterable but are never
-    # an edge sequence; anything else non-iterable falls through untouched for the model to
-    # reject as a clean ValueError. Materializing once also leaves a one-shot iterator usable,
-    # which iterating in place did not.
-    if isinstance(edges, Iterable) and not isinstance(edges, (str, bytes, bytearray, Mapping)):
-        try:
+    try:
+        # Match the *shape*, not a list of concrete types. The model accepts any iterable for
+        # its edge sequence (list, tuple, deque, a one-shot iterator), and enumerating types
+        # here meant every shape not on the list silently skipped migration, so its CAUSED_BY
+        # edges lost the legacy origin default. Strings, bytes and mappings are iterable but are
+        # never an edge sequence; anything else non-iterable falls through untouched for the
+        # model to reject as a clean ValueError. Materializing once also leaves a one-shot
+        # iterator usable, which iterating in place did not.
+        if isinstance(edges, Iterable) and not isinstance(edges, (str, bytes, bytearray, Mapping)):
             # Mapping, not dict: the model accepts any mapping as an edge record, and matching
             # dict alone left mapping-shaped records without the legacy origin default.
             migrated["edges"] = [
@@ -143,13 +143,16 @@ def _migrate_v1(trace_payload: dict) -> dict:
                 else edge
                 for edge in edges
             ]
-        except Exception as exc:
-            # Consuming a caller-supplied lazy sequence can raise anything at all. This is a
-            # load boundary that promises ValueError, and the v2 path already reports a
-            # failing iterator that way (as a ValidationError), so v1 must not differ. Nothing of
-            # the exception is formatted: ``str(exc)``, and even its type's ``__name__`` through a
-            # metaclass, run caller code that can raise in its own right. It stays the cause.
-            raise ValueError("artifact edges could not be read") from exc
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        # The shape check and consuming a caller-supplied lazy sequence can both raise anything
+        # at all (``SystemExit`` too). This is a load boundary that promises ValueError, and the
+        # current-schema path already reports such a failure that way, so v1 must not differ.
+        # Nothing of the exception is formatted: ``str(exc)``, and even its type's ``__name__``
+        # through a metaclass, run caller code that can raise in its own right. It stays the
+        # cause.
+        raise ValueError("artifact edges could not be read") from exc
     return migrated
 
 

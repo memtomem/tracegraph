@@ -25,10 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
-def _describe(exc: BaseException) -> str:
-    text = str(exc)
-    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+from tracegraph._errors import describe
 
 
 def _module_name(resolved: Path) -> str:
@@ -99,7 +96,7 @@ def load_graph(ref: str) -> Any:
     except KeyboardInterrupt:
         raise
     except BaseException as exc:
-        raise ValueError(f"cannot load graph {ref!r}: {_describe(exc)}") from exc
+        raise ValueError(f"cannot load graph {ref!r}: {describe(exc)}") from exc
     finally:
         sys.path[:] = saved_path
 

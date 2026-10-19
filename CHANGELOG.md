@@ -53,6 +53,18 @@ explicitly.
 
 ### Fixed
 
+- **Boundaries that promise `ValueError` no longer leak an error from describing the one they
+  caught** (#109). Naming a caught exception runs caller code: `str(exc)` calls its `__str__`,
+  and a metaclass can make the type's `__name__` a property. When that raised, its error
+  escaped instead: from `artifact.dumps()` and `analyze()` on a trace whose dump fails, from
+  LangGraph ingest when the saver's listing or a supplied `schedule_graph` fails, and from
+  `--graph` when the module fails to import. These now describe the exception through one guard
+  that falls back to fixed text, and uses only a name or message that is a plain `str`.
+  Ordinary exceptions are described exactly as before. `artifact.from_obj()` on a schema-v1
+  payload also refuses, as `ValueError`, an edge sequence that raises `SystemExit` or another
+  `BaseException` (the current schema already did for `SystemExit`), or whose type check
+  raises; `KeyboardInterrupt` still propagates.
+
 - **`--graph` loads a module file whose path is not valid UTF-8** (#110). On POSIX such a path
   arrives surrogate-escaped, and naming the module from its strict UTF-8 encoding refused it:
   `ingest --graph` exited 2 with a `UnicodeEncodeError` for a file it could import. Such a path
