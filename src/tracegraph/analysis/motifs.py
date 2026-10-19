@@ -52,8 +52,9 @@ class MotifSignature(_Strict):
     links_preserved: bool | None
     #: Whether the trace discloses causal edges chosen heuristically at ingest (an OTLP parent
     #: picked by timing, or a fallback). The disclosure is per trace, not per edge, so it does not
-    #: say which edge. ``unknown`` when the trace has no capture record or a gap code this build
-    #: does not know; ``not_applicable`` for a single-step preset, whose shape has no edge.
+    #: say which edge. A recognized heuristic-edge gap means ``disclosed`` whatever else is
+    #: present; ``unknown`` when the trace has no capture record, or a gap code this build does
+    #: not know and no recognized one; ``not_applicable`` for a single-step preset.
     heuristic_edges: HeuristicEdges
     steps: list[StepShape]
     #: The CAUSED_BY origin between consecutive matched steps (``null`` when unrecorded).

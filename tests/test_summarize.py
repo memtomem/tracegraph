@@ -392,16 +392,20 @@ def test_heuristically_chosen_edges_are_a_separate_group(tmp_path):
     unrecorded = plan("N", None)
     # A code a newer writer may add is of unknown effect, not a disclosure of heuristic edges.
     unknown_code = plan("U", Capture(gaps=[CaptureGap(code="otlp.future_telemetry_gap", count=1)]))
-    paths = [_save(tmp_path, nt) for nt in (declared, by_timing, unrecorded, unknown_code)]
+    # A recognized disclosure stands whatever else the trace reports.
+    mixed = plan("M", Capture(gaps=[CaptureGap(code="otlp.future_telemetry_gap", count=1),
+                                    CaptureGap(code="otlp.graph_parent_by_timing", count=1)]))
+    traces = (declared, by_timing, unrecorded, unknown_code, mixed)
+    paths = [_save(tmp_path, nt) for nt in traces]
     _, report = _summary(tmp_path, "plan-then-tool-failure", *paths)
     by_answer = {g["signature"]["heuristic_edges"]: g["trace_count"] for g in report["groups"]}
-    assert by_answer == {"disclosed": 1, "not_disclosed": 1, "unknown": 2}
+    assert by_answer == {"disclosed": 2, "not_disclosed": 1, "unknown": 2}
 
     # A single-step shape has no edge, so the disclosure does not split it.
     _, single = _summary(tmp_path, "tool-failure", *paths, name="single")
     [group] = single["groups"]
     assert group["signature"]["heuristic_edges"] == "not_applicable"
-    assert group["trace_count"] == 4
+    assert group["trace_count"] == 5
 
 
 def test_groups_that_differ_only_in_kind_render_differently(tmp_path, monkeypatch):
