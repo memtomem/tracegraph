@@ -1897,7 +1897,7 @@ def _render_summary(pattern, summary: motifs.MotifSummary) -> None:
             f"[bold]{n}.[/] {group.trace_count} trace(s), {group.match_count} match(es): {shape}"
         )
         unknown = sorted({f for step in sig.steps for f in step.unknown})
-        heuristic = {True: "yes", False: "no", None: "not recorded"}[sig.heuristic_edges]
+        heuristic = sig.heuristic_edges.replace("_", " ")
         detail = (f"source {sig.source_kind}, fidelity {sig.causal_fidelity}, links "
                   f"{sig.links_preserved}, heuristic edges {heuristic}")
         if unknown:

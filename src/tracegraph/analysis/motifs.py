@@ -17,16 +17,10 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from tracegraph._atomic_write import write_text_atomic
-from tracegraph.analysis.check import (
-    _HEURISTIC_EDGES,
-    _constrained,
-    _could_be_hidden,
-    _gap_hides,
-    _known,
-)
+from tracegraph.analysis.check import _HEURISTIC_EDGES, _constrained, _could_be_hidden, _known
 from tracegraph.analysis.diagnose import _safe
 from tracegraph.analysis.patterns import PathPattern, build_index, iter_matches
-from tracegraph.model import EdgeType, NormalizedTrace, Step
+from tracegraph.model import CAPTURE_GAP_CODES, EdgeType, NormalizedTrace, Step
 
 MOTIF_SUMMARY_SCHEMA_VERSION: Final = 1
 MOTIF_SUMMARY_KIND: Final = "tracegraph.motif-summary"
@@ -34,6 +28,7 @@ SIGNATURE_VERSION: Final = "motif-signature/v1"
 MAX_REPRESENTATIVES: Final = 3
 
 _SIGNED_FIELDS = ("kind", "name", "status")
+HeuristicEdges = Literal["disclosed", "not_disclosed", "unknown", "not_applicable"]
 
 
 class _Strict(BaseModel):
@@ -56,10 +51,10 @@ class MotifSignature(_Strict):
     causal_fidelity: str
     links_preserved: bool | None
     #: Whether the trace discloses causal edges chosen heuristically at ingest (an OTLP parent
-    #: picked by timing, or a fallback). The disclosure is per trace, not per edge, so this does
-    #: not say which edge. ``null`` when the trace has no capture record; always ``false`` for a
-    #: single-step preset, whose shape has no edge.
-    heuristic_edges: bool | None
+    #: picked by timing, or a fallback). The disclosure is per trace, not per edge, so it does not
+    #: say which edge. ``unknown`` when the trace has no capture record or a gap code this build
+    #: does not know; ``not_applicable`` for a single-step preset, whose shape has no edge.
+    heuristic_edges: HeuristicEdges
     steps: list[StepShape]
     #: The CAUSED_BY origin between consecutive matched steps (``null`` when unrecorded).
     edge_origins: list[str | None]
@@ -113,6 +108,16 @@ def is_summarizable(pattern: PathPattern) -> bool:
     of a v1 signature.
     """
     return all(p.gap in (None, (1, 1)) for p in pattern.steps[1:])
+
+
+def _heuristic_edges(nt: NormalizedTrace) -> HeuristicEdges:
+    """A disclosure, not ``check``'s may-hide rule: an unrecognized code is unknown, not "yes"."""
+    if nt.trace.capture is None:
+        return "unknown"
+    codes = {gap.code for gap in nt.trace.capture.gaps}
+    if codes & _HEURISTIC_EDGES:
+        return "disclosed"
+    return "unknown" if codes - CAPTURE_GAP_CODES else "not_disclosed"
 
 
 def _shape(step: Step) -> StepShape:
@@ -183,12 +188,9 @@ class MotifAggregator:
             (e.src, e.dst): (e.origin.value if e.origin is not None else None)
             for e in nt.edges_of(EdgeType.CAUSED_BY)
         }
-        if len(pattern.steps) < 2:
-            heuristic: bool | None = False
-        elif capture is None:
-            heuristic = None
-        else:
-            heuristic = _gap_hides(nt, _HEURISTIC_EDGES)
+        heuristic: HeuristicEdges = (
+            _heuristic_edges(nt) if len(pattern.steps) > 1 else "not_applicable"
+        )
         header = (_safe(nt.trace.source_kind), nt.trace.causal_fidelity.value,
                   nt.trace.links_preserved, heuristic)
         hit: set[str] = set()

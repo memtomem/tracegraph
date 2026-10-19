@@ -15,6 +15,7 @@ from tracegraph.analysis.patterns import PRESETS
 from tracegraph.cli import app
 from tracegraph.model import (
     Capture,
+    CaptureGap,
     CausalFidelity,
     Edge,
     EdgeOrigin,
@@ -299,7 +300,7 @@ def test_the_rendered_summary(tmp_path, monkeypatch):
         "",
         "1. 1 trace(s), 1 match(es): search [TOOL, loop] (ok) →[graph_parent]→ retry:search "
         "[CHAIN, loop] (ok) →[graph_parent]→ search [TOOL, loop] (error)",
-        "   source x, fidelity legacy_unknown, links None, heuristic edges not recorded",
+        "   source x, fidelity legacy_unknown, links None, heuristic edges unknown",
         f"   e.g. {digest} steps A-0, A-1, A-2",
         "",
         "1 valid of 1 discovered (0 skipped); 1 trace(s) matched. May hide matches: 0 trace(s); "
@@ -389,15 +390,18 @@ def test_heuristically_chosen_edges_are_a_separate_group(tmp_path):
     declared = plan("D", Capture(gaps=[]))
     by_timing = plan("T", Capture.from_counts({"otlp.graph_parent_by_timing": 1}))
     unrecorded = plan("N", None)
-    paths = [_save(tmp_path, nt) for nt in (declared, by_timing, unrecorded)]
+    # A code a newer writer may add is of unknown effect, not a disclosure of heuristic edges.
+    unknown_code = plan("U", Capture(gaps=[CaptureGap(code="otlp.future_telemetry_gap", count=1)]))
+    paths = [_save(tmp_path, nt) for nt in (declared, by_timing, unrecorded, unknown_code)]
     _, report = _summary(tmp_path, "plan-then-tool-failure", *paths)
-    assert sorted(repr(g["signature"]["heuristic_edges"]) for g in report["groups"]) == [
-        "False", "None", "True"]
+    by_answer = {g["signature"]["heuristic_edges"]: g["trace_count"] for g in report["groups"]}
+    assert by_answer == {"disclosed": 1, "not_disclosed": 1, "unknown": 2}
 
     # A single-step shape has no edge, so the disclosure does not split it.
     _, single = _summary(tmp_path, "tool-failure", *paths, name="single")
     [group] = single["groups"]
-    assert group["signature"]["heuristic_edges"] is False and group["trace_count"] == 3
+    assert group["signature"]["heuristic_edges"] == "not_applicable"
+    assert group["trace_count"] == 4
 
 
 def test_groups_that_differ_only_in_kind_render_differently(tmp_path, monkeypatch):
