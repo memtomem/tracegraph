@@ -37,6 +37,8 @@ from pydantic import (
     model_validator,
 )
 
+from tracegraph._errors import type_name
+
 
 class StepKind(str, Enum):
     """What a causal-event step represents.
@@ -445,6 +447,6 @@ def _validated_copy(nt: NormalizedTrace) -> NormalizedTrace:
         raise
     except Exception as exc:
         # Both steps can run caller code: a subclass's computed field while dumping, the
-        # ``__str__`` of an enum value while validating. Only the type is formatted, since
-        # ``str(exc)`` runs the caller's ``__str__`` as well.
-        raise ValueError(f"trace could not be validated: {type(exc).__name__}") from exc
+        # ``__str__`` of an enum value while validating. Only the type is named, and read
+        # safely: ``str(exc)`` and even the type's ``__name__`` can run caller code too.
+        raise ValueError(f"trace could not be validated: {type_name(exc)}") from exc
