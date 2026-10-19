@@ -29,7 +29,8 @@ def compute_run_digest(run_id: str | None) -> str | None:
     """Deterministic, one-way hash alias for run_id; raw string is never exported."""
     if not run_id:
         return None
-    return f"sha256:{hashlib.sha256(run_id.encode('utf-8')).hexdigest()[:16]}"
+    # surrogatepass: a run_id from JSON can hold a lone surrogate; other ids hash as before.
+    return f"sha256:{hashlib.sha256(run_id.encode('utf-8', 'surrogatepass')).hexdigest()[:16]}"
 
 
 def _format_origin(origin: EdgeOrigin | None) -> str:

@@ -810,7 +810,12 @@ class LangGraphCheckpointAdapter:
             seed = unhexlify(cid.replace("-", ""))
         except (BinasciiError, AttributeError, ValueError):
             return None
-        joined = b"".join(part.encode() for part in parts)
+        try:
+            joined = b"".join(part.encode() for part in parts)
+        except UnicodeEncodeError:
+            # A lone surrogate has no UTF-8 encoding, so LangGraph could not have hashed this
+            # candidate into any recorded task id. It names nothing; it must not end the ingest.
+            return None
         if legacy:
             digest = sha1(seed, usedforsecurity=False)
             digest.update(joined)

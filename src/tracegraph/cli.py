@@ -13,6 +13,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -1987,6 +1988,13 @@ def export_incident_memo(
 
 
 def main() -> None:
+    # Producer strings can hold a lone surrogate (JSON "\ud800" loads as one), which a strict
+    # stream refuses to encode: printing it would end the command in a traceback. Escape what
+    # the stream's encoding cannot carry instead.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None and not stream.closed:  # reconfiguring a closed one raises
+            reconfigure(errors="backslashreplace")
     app()
 
 
