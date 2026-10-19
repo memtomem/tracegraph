@@ -53,6 +53,13 @@ explicitly.
 
 ### Fixed
 
+- **`artifact.from_obj()` on a schema-v1 payload raises only `ValueError`** (#103). When reading
+  a caller-supplied lazy edge sequence failed, the migration formatted the exception into its
+  message, so an exception whose `__str__` raises escaped as that error instead. The message no
+  longer formats the exception at all (its type's name can run caller code too, through a
+  metaclass); the original stays on the chain as `__cause__`. `loads()` and the CLI parse JSON into lists, so neither could
+  reach this.
+
 - **`analyze()`, `check.evaluate()` and `build_incident_memo()` raise only `ValueError` on a
   trace the model refuses** (#93). On a trace changed in place after it was built they raised a
   raw `TypeError` or `AttributeError` (`seq = "zero"`, `steps = None`, `trace = None`, a step

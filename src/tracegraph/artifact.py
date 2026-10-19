@@ -146,8 +146,10 @@ def _migrate_v1(trace_payload: dict) -> dict:
         except Exception as exc:
             # Consuming a caller-supplied lazy sequence can raise anything at all. This is a
             # load boundary that promises ValueError, and the v2 path already reports a
-            # failing iterator that way (as a ValidationError), so v1 must not differ.
-            raise ValueError(f"artifact edges could not be read: {exc}") from exc
+            # failing iterator that way (as a ValidationError), so v1 must not differ. Nothing of
+            # the exception is formatted: ``str(exc)``, and even its type's ``__name__`` through a
+            # metaclass, run caller code that can raise in its own right. It stays the cause.
+            raise ValueError("artifact edges could not be read") from exc
     return migrated
 
 

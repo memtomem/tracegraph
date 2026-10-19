@@ -474,17 +474,37 @@ def test_v1_migration_leaves_a_non_sequence_edges_field_to_the_model():
         )
 
 
-def test_v1_migration_reports_a_failing_edge_iterator_as_value_error():
+class _UnnamedMeta(type):
+    @property
+    def __name__(cls):  # type: ignore[override]
+        raise RuntimeError("type name")
+
+
+class _UnnamedError(RuntimeError, metaclass=_UnnamedMeta):
+    pass
+
+
+@pytest.mark.parametrize("hostile", ["none", "str", "type-name"])
+def test_v1_migration_reports_a_failing_edge_iterator_as_value_error(hostile):
     """Consuming a caller-supplied lazy sequence must not leak its exception type.
 
     The v2 path already surfaces a failing iterator as a ValidationError, which is a
     ValueError; v1 must not differ, or the failure escapes every load-boundary handler.
+    That includes an exception whose ``__str__``, or whose type's ``__name__``, raises while
+    the message is built.
     """
+    error = {"none": RuntimeError, "str": _UnprintableError, "type-name": _UnnamedError}[hostile](
+        "upstream went away"
+    )
+
     def edges():
         yield {"type": "CAUSED_BY", "src": "b", "dst": "a"}
-        raise RuntimeError("upstream went away")
+        raise error
 
-    with pytest.raises(ValueError):
+    # Not pytest.raises: on a regression pytest would format the hostile exception itself and
+    # stop with an internal error instead of reporting a failure.
+    caught: BaseException | None = None
+    try:
         artifact.from_obj(
             {
                 "schema_version": 1,
@@ -498,6 +518,12 @@ def test_v1_migration_reports_a_failing_edge_iterator_as_value_error():
                 },
             }
         )
+    except BaseException as exc:  # noqa: BLE001 - the type is what is asserted
+        caught = exc
+    leaked = None if isinstance(caught, ValueError) else repr(type(caught))
+    caught = caught if leaked is None else None  # drop the chain before any assertion runs
+    assert leaked is None, leaked
+    assert caught.__cause__ is error
 
 
 @pytest.mark.parametrize(
