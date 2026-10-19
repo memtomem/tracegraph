@@ -278,7 +278,11 @@ review-export eligibility changes; wording-only description edits keep the curre
 deciding which recurring failure shape to look at first, without tallying `query` output by hand.
 A group is one observed shape. Two matches share a group when, for every matched step, the kind,
 status, source and safe-v1 name agree, and for every edge between them the `CAUSED_BY` origin
-agrees, under the same source kind, causal fidelity and link setting (`motif-signature/v1`).
+agrees, under the same source kind, causal fidelity and link setting, and the same answer to
+whether the trace discloses causal edges chosen heuristically at ingest (`motif-signature/v1`).
+That last answer is per trace: an OTLP export records a parent picked by timing with the same
+origin as an unambiguous one, and says only that some edge was picked that way, not which. A trace
+with no capture record gets `null`. A single-step preset has no edge, so the answer is always `false`.
 Trace and step ids, error text and artifact file paths are never part of it. Names pass the same
 safe-v1 rule as `analyze` reports. An identifier-shaped name is kept even when it looks like a path or an
 address, and anything else becomes `redacted:<sha256>`. An operation whose name changes from run

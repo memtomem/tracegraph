@@ -17,7 +17,13 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from tracegraph._atomic_write import write_text_atomic
-from tracegraph.analysis.check import _constrained, _could_be_hidden, _known
+from tracegraph.analysis.check import (
+    _HEURISTIC_EDGES,
+    _constrained,
+    _could_be_hidden,
+    _gap_hides,
+    _known,
+)
 from tracegraph.analysis.diagnose import _safe
 from tracegraph.analysis.patterns import PathPattern, build_index, iter_matches
 from tracegraph.model import EdgeType, NormalizedTrace, Step
@@ -49,6 +55,11 @@ class MotifSignature(_Strict):
     source_kind: str
     causal_fidelity: str
     links_preserved: bool | None
+    #: Whether the trace discloses causal edges chosen heuristically at ingest (an OTLP parent
+    #: picked by timing, or a fallback). The disclosure is per trace, not per edge, so this does
+    #: not say which edge. ``null`` when the trace has no capture record; always ``false`` for a
+    #: single-step preset, whose shape has no edge.
+    heuristic_edges: bool | None
     steps: list[StepShape]
     #: The CAUSED_BY origin between consecutive matched steps (``null`` when unrecorded).
     edge_origins: list[str | None]
@@ -172,8 +183,14 @@ class MotifAggregator:
             (e.src, e.dst): (e.origin.value if e.origin is not None else None)
             for e in nt.edges_of(EdgeType.CAUSED_BY)
         }
+        if len(pattern.steps) < 2:
+            heuristic: bool | None = False
+        elif capture is None:
+            heuristic = None
+        else:
+            heuristic = _gap_hides(nt, _HEURISTIC_EDGES)
         header = (_safe(nt.trace.source_kind), nt.trace.causal_fidelity.value,
-                  nt.trace.links_preserved)
+                  nt.trace.links_preserved, heuristic)
         hit: set[str] = set()
         unconfirmed = 0
         for path in iter_matches(nt, pattern, index=index):
@@ -191,6 +208,7 @@ class MotifAggregator:
                 source_kind=header[0],
                 causal_fidelity=header[1],
                 links_preserved=header[2],
+                heuristic_edges=header[3],
                 steps=[_shape(step) for step in bound],
                 # Pattern order runs cause -> effect; a CAUSED_BY edge points effect -> cause.
                 edge_origins=[origins[(effect, cause)] for cause, effect in zip(path, path[1:], strict=False)],

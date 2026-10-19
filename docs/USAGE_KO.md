@@ -238,6 +238,8 @@ uv run tracegraph query tool-failure --explain A.json B.json
 match가 많을 때 어떤 실패 모양이 반복되는지부터 보고 싶으면 `summarize`로 묶어 봅니다. 같은
 preset으로 걸린 match들을 관찰된 모양별로 group으로 모읍니다. 모양은 각 step의 kind·status·source·이름과
 step 사이 edge의 origin, 그리고 trace의 source와 causal fidelity로 정해집니다(`motif-signature/v1`).
+ingest 때 timing 등으로 추정해서 고른 edge가 있다고 공개한 trace도 따로 묶습니다. 이 정보는 trace
+단위라서 어느 edge인지는 알 수 없습니다.
 
 ```bash
 uv run tracegraph summarize tool-retry-failure traces/ -o motifs.json

@@ -297,9 +297,9 @@ def test_the_rendered_summary(tmp_path, monkeypatch):
         "tool-retry-failure@v2: {kind=TOOL} → {name^=retry:, kind=CHAIN} → {kind=TOOL, "
         "status=error, name=#0}  (over 1 trace(s))",
         "",
-        "1. 1 trace(s), 1 match(es): search (ok) →[graph_parent]→ retry:search (ok) "
-        "→[graph_parent]→ search (error)",
-        "   source x, fidelity legacy_unknown",
+        "1. 1 trace(s), 1 match(es): search [TOOL, loop] (ok) →[graph_parent]→ retry:search "
+        "[CHAIN, loop] (ok) →[graph_parent]→ search [TOOL, loop] (error)",
+        "   source x, fidelity legacy_unknown, links None, heuristic edges not recorded",
         f"   e.g. {digest} steps A-0, A-1, A-2",
         "",
         "1 valid of 1 discovered (0 skipped); 1 trace(s) matched. May hide matches: 0 trace(s); "
@@ -315,7 +315,7 @@ def test_producer_strings_print_literally(tmp_path, monkeypatch):
     res = runner.invoke(app, ["summarize", "tool-failure", str(_save(tmp_path, nt, "e"))],
                         terminal_width=200)
     assert "🆗" not in res.output
-    assert ":ok: (error)" in res.output and "source :ok:" in res.output
+    assert ":ok: [TOOL, loop] (error)" in res.output and "source :ok:" in res.output
     assert "steps :ok:-0" in res.output
 
 
@@ -376,3 +376,35 @@ def test_each_trace_is_released_before_the_next_loads(tmp_path, monkeypatch, sha
         gc.enable()
     assert res.exit_code == {"plain": 0, "duplicate": 2, "failing": 1}[shape], res.output
     assert alive_at_load == [[], [], []]
+
+
+def test_heuristically_chosen_edges_are_a_separate_group(tmp_path):
+    # OTLP records a parent picked by timing with the same origin and fidelity as an unambiguous
+    # one; only the trace's capture gap tells them apart.
+    def plan(trace_id, capture):
+        return _trace(trace_id, [("plan", CHAIN, OK), ("search", TOOL, ERROR)],
+                      origins=[EdgeOrigin.GRAPH_PARENT], source_kind="otlp",
+                      fidelity=CausalFidelity.DECLARED_DAG, capture=capture)
+
+    declared = plan("D", Capture(gaps=[]))
+    by_timing = plan("T", Capture.from_counts({"otlp.graph_parent_by_timing": 1}))
+    unrecorded = plan("N", None)
+    paths = [_save(tmp_path, nt) for nt in (declared, by_timing, unrecorded)]
+    _, report = _summary(tmp_path, "plan-then-tool-failure", *paths)
+    assert sorted(repr(g["signature"]["heuristic_edges"]) for g in report["groups"]) == [
+        "False", "None", "True"]
+
+    # A single-step shape has no edge, so the disclosure does not split it.
+    _, single = _summary(tmp_path, "tool-failure", *paths, name="single")
+    [group] = single["groups"]
+    assert group["signature"]["heuristic_edges"] is False and group["trace_count"] == 3
+
+
+def test_groups_that_differ_only_in_kind_render_differently(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli.console, "width", 200)
+    agent = _save(tmp_path, _trace("G", [("worker", AGENT, ERROR)]))
+    tool = _save(tmp_path, _trace("W", [("worker", TOOL, ERROR)]))
+    res = runner.invoke(app, ["summarize", "error", str(agent), str(tool)])
+    assert res.exit_code == 0, res.output
+    assert "worker [AGENT, loop] (error)" in res.output
+    assert "worker [TOOL, loop] (error)" in res.output

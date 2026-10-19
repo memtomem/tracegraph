@@ -1889,17 +1889,20 @@ def _render_summary(pattern, summary: motifs.MotifSummary) -> None:
         for i, step in enumerate(sig.steps):
             if i:
                 shape += " →" + escape(f"[{sig.edge_origins[i - 1] or 'no origin'}]") + "→ "
-            label = step.name if step.name is not None else (step.kind or "unknown kind")
+            name = step.name if step.name is not None else "unknown name"
+            kind = step.kind or "unknown kind"
             status = step.status or "unknown status"
-            shape += f"{escape(label)} ({escape(status)})"
+            shape += escape(f"{name} [{kind}, {step.source}] ({status})")
         show(
             f"[bold]{n}.[/] {group.trace_count} trace(s), {group.match_count} match(es): {shape}"
         )
         unknown = sorted({f for step in sig.steps for f in step.unknown})
-        detail = f"source {escape(sig.source_kind)}, fidelity {escape(sig.causal_fidelity)}"
+        heuristic = {True: "yes", False: "no", None: "not recorded"}[sig.heuristic_edges]
+        detail = (f"source {sig.source_kind}, fidelity {sig.causal_fidelity}, links "
+                  f"{sig.links_preserved}, heuristic edges {heuristic}")
         if unknown:
             detail += f", unknown {', '.join(unknown)}"
-        show(f"   [dim]{detail}[/]")
+        show(f"   [dim]{escape(detail)}[/]")
         for rep in group.representatives:
             show(
                 f"   [dim]e.g. {rep.artifact_digest} steps {escape(', '.join(rep.step_ids))}[/]"

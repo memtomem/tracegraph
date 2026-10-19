@@ -13,8 +13,8 @@ explicitly.
 - **`tracegraph summarize <preset> <artifacts...>`** (#60) groups a preset's matches across an
   artifact batch by observed shape, so an operator can pick the recurring failure shape to look at
   first. A group's signature (`motif-signature/v1`) is the matched steps' kind, status, source and
-  safe-v1 name, the `CAUSED_BY` origins between them, and the trace's source kind, causal fidelity
-  and link setting. It has no ids, error text or artifact file paths; an identifier-shaped name
+  safe-v1 name, the `CAUSED_BY` origins between them, and the trace's source kind, causal fidelity,
+  link setting and whether it discloses heuristically chosen edges (per trace, not per edge). It has no ids, error text or artifact file paths; an identifier-shaped name
   that looks like a path is kept, as in `analyze` reports. Each group reports its match count and
   trace count separately, plus up to three representatives (artifact digest and step ids). Only
   matches confirmed by `check`'s rule are grouped; the rest are counted as unconfirmed. Fields that
