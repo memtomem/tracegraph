@@ -34,7 +34,8 @@ explicitly.
   (with their `error_msg`) and the disclosure above. An error first written inside a subgraph, a
   `Send` payload error below a clean state, and an error a caller's `update_state` writes are
   recorded as before. Artifacts change only for histories that held such a duplicate. The
-  schema stays v7, and the committed fixtures are byte-identical.
+  schema stays v7, and the committed fixtures are byte-identical. One shape still records the
+  error twice: a fork copy of a subgraph's *input* checkpoint, then resumed (#90).
 
 ## 0.5.0 - 2026-10-18
 

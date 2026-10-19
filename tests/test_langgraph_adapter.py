@@ -946,13 +946,10 @@ def test_a_rewrite_beside_a_subgraph_without_the_error_channel_is_disclosed(save
     assert any("wrote the error channel while it already held an error" in w
                for w in raw.ingest_warnings)
     from tracegraph import artifact
-    from tracegraph.analysis import check
 
-    current = artifact.loads(artifact.dumps(normalize(raw)))
-    assert {x.code: x.count for x in current.trace.capture.gaps} == gaps
-    _, _, base = _ingest_run(_into(_subgraph(lambda s: {"log": ["in"]})), saver_kind, _CLEAN)
-    report = check.evaluate(current, normalize(base), check.parse_rules(["failures-not-increased"]))
-    assert report.rules[0].outcome == "INSUFFICIENT_EVIDENCE"  # the gap blocks PASS on its side
+    # How `check` reads this gap is pinned in test_check.py; here it must survive the artifact.
+    reread = artifact.loads(artifact.dumps(normalize(raw)))
+    assert {x.code: x.count for x in reread.trace.capture.gaps} == gaps
 
 
 def _input(cid, ns, parent_id=None, *, parent_ns=None, parents=None):
