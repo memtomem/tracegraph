@@ -233,6 +233,26 @@ uv run tracegraph query tool-failure --limit 10 traces/
 uv run tracegraph query tool-failure --explain A.json B.json
 ```
 
+### 반복되는 실패 모양 묶어 보기: summarize
+
+match가 많을 때 어떤 실패 모양이 반복되는지부터 보고 싶으면 `summarize`로 묶어 봅니다. 같은
+preset으로 걸린 match들을 관찰된 모양별로 group으로 모읍니다. 모양은 각 step의 kind·status·source·이름과
+step 사이 edge의 origin, 그리고 trace의 source와 causal fidelity로 정해집니다(`motif-signature/v1`).
+ingest 때 timing 등으로 추정해서 고른 edge가 있다고 공개한 trace도 따로 묶습니다. 이 정보는 trace
+단위라서 어느 edge인지는 알 수 없습니다. capture 기록이 없거나, 추정 edge gap 없이 이 버전이 모르는
+gap code만 있으면 `unknown`으로 따로 묶습니다. 추정 edge gap이 하나라도 있으면 `disclosed`입니다.
+
+```bash
+uv run tracegraph summarize tool-retry-failure traces/ -o motifs.json
+```
+
+각 group은 match 수와 trace 수를 따로 보여 주고, 직접 열어 볼 수 있는 대표 예시(artifact digest와
+step id)를 최대 3개 붙입니다. 끝에 나오는 coverage는 항상 함께 보세요. 건너뛴 파일 수, match를
+가렸을 수 있는 trace 수, capture 기록이 없는 trace 수, 대체된 값에 기대서 group에서 뺀 match 수가
+나옵니다. 이 숫자들은 비율이 아니고, group이 없다고 해서 문제가 없다는 뜻도 아닙니다. 같은
+group이라고 원인이 같다는 뜻도 아닙니다. 현재 버전은 gap이 없는 preset만 받습니다. gap 구간의
+경로는 match에 기록되지 않기 때문입니다.
+
 ## Phoenix trace를 한 명령으로 진단하기
 
 Phoenix는 trace 화면과 평가를 담당하고, tracegraph는 그 trace에서 실패 인과관계와

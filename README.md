@@ -79,6 +79,7 @@ tracegraph presets                   # list cross-trace query patterns
 tracegraph query tool-failure A.json B.json   # find a causal pattern across many traces
 tracegraph query tool-retry-failure *.json    # explicit retry marker, then same tool failing
 tracegraph query tool-failure --backend ladybug A.json B.json   # use the optional Cypher accelerator
+tracegraph summarize tool-retry-failure traces/ -o motifs.json  # group matches by observed shape
 
 # export versioned, body-free governance evidence (an empty match set is a valid report)
 tracegraph export-review-candidates tool-retry-failure *.json -o candidates.json
@@ -99,7 +100,7 @@ Frequently-used options, beyond `--out` / `--json-out`:
 | `--explain` | `query` | Print each match's raw causal chain back to its root cause. |
 | `--structure` | `diff` | Compare topology only, ignoring labels. |
 | `--backend` | `query` | Use the optional LadybugDB Cypher accelerator instead of the pure-Python matcher. |
-| `--strict` | `query`, `export-review-candidates` | Fail with exit 2 when a directory holds a `*.json` file that is not a valid artifact, instead of skipping it with a warning. Use it in CI gates, where a skipped corrupt run would otherwise read as "no match". |
+| `--strict` | `query`, `summarize`, `export-review-candidates` | Fail with exit 2 when a directory holds a `*.json` file that is not a valid artifact, instead of skipping it with a warning. Use it in CI gates, where a skipped corrupt run would otherwise read as "no match". |
 | `--rule` | `check` | Rule to evaluate, repeatable; there is no default rule set. |
 
 ### Regression check
@@ -273,6 +274,37 @@ Every shipped preset has a stable `pattern_id` and positive integer `pattern_ver
 as `pattern-id@vN` by `presets` and `query`. Increment the version when match semantics or
 review-export eligibility changes; wording-only description edits keep the current version.
 
+`summarize` groups one preset's matches across the same file/directory batches. It is meant for
+deciding which recurring failure shape to look at first, without tallying `query` output by hand.
+A group is one observed shape. Two matches share a group when, for every matched step, the kind,
+status, source and safe-v1 name agree, and for every edge between them the `CAUSED_BY` origin
+agrees, under the same source kind, causal fidelity and link setting, and the same answer to
+whether the trace discloses causal edges chosen heuristically at ingest (`motif-signature/v1`).
+That last answer is per trace: an OTLP export records a parent picked by timing with the same
+origin as an unambiguous one, and says only that some edge was picked that way, not which. The
+answer is `disclosed` whenever a recognized heuristic-edge gap is present, else `not_disclosed`.
+It is `unknown` for a trace with no capture record, or with a gap code this build does not know
+and no recognized heuristic-edge gap. It is `not_applicable` for a single-step preset, which has
+no edge.
+Trace and step ids, error text and artifact file paths are never part of it. Names pass the same
+safe-v1 rule as `analyze` reports. An identifier-shaped name is kept even when it looks like a path or an
+address, and anything else becomes `redacted:<sha256>`. An operation whose name changes from run
+to run gets one group per name. Each group counts its matches and, separately, the traces they
+come from, and lists up to three representatives, each an artifact digest plus the matched step
+ids. Only *confirmed* matches are grouped, by the same rule as `check`. A match that relies on a
+substituted value (a defaulted kind, an unrecorded status) is counted as unconfirmed instead. A
+field that is not known is written as `null` and listed under the step's `unknown`, never by the
+value that stands in for it. The coverage section is always printed. It shows how many artifacts
+were discovered, valid and skipped; how many traces may hide a match (`check`'s per-preset rule);
+how many disclose any capture gap; how many carry no capture record; and the unconfirmed matches.
+None of it is a rate, and an empty result is not an all-clear. A group does not show a shared root
+cause. Version 1 accepts only strictly adjacent presets: between gap endpoints the matched path
+is not recorded, so `repeated-agent-failure`, `tool-repeat-failure-heuristic` and
+`tool-retry-failure-near` exit 2. `--out` writes the `tracegraph.motif-summary` schema-v1 JSON.
+It must not name an input, is excluded from directory discovery, and is left untouched when the
+run is refused. Exit 0 with at least one group, 1 with none (the report is still written), 2 on
+an input error.
+
 `export-review-candidates` accepts the same artifact-file/directory batches as `query` and
 writes a deterministic schema-v1 envelope. Only presets ending in a failing `TOOL` predicate
 are eligible. The matched endpoint name must already be a qualified `server::tool` key —
@@ -312,7 +344,7 @@ and any change to them is called out in the [changelog](CHANGELOG.md).
 | Area | What exists |
 |---|---|
 | Sources | LangGraph checkpoint savers (including subgraph namespaces and native task failures), OTLP/OpenInference span exports, Phoenix CLI exports |
-| Commands | `ingest`, `ingest-otlp`, `ingest-phoenix`, `inspect`, `validate`, `explain`, `diff`, `analyze`, `presets`, `query`, `export-review-candidates`, `export-incident-memo`, `phoenix doctor`, `phoenix diagnose` |
+| Commands | `ingest`, `ingest-otlp`, `ingest-phoenix`, `inspect`, `validate`, `explain`, `diff`, `analyze`, `presets`, `query`, `summarize`, `export-review-candidates`, `export-incident-memo`, `phoenix doctor`, `phoenix diagnose` |
 | Patterns | Versioned presets matched over the raw causal graph; the governance-eligible `tool-retry-failure@v2` requires an explicit producer retry marker, and repetition-only heuristics are query-only |
 | Backends | Pure-Python in-memory store (default); optional LadybugDB/Cypher accelerator (`[cypher]`), whose results must equal the pure-Python matcher's |
 | Ecosystem | SyncMill run correlation (`syncmill.run_id`), Toolgraph preflight evidence as non-causal metadata, a weekly Phoenix + SyncMill end-to-end workflow (Phoenix CLI and server pinned; SyncMill tracks its default branch) |

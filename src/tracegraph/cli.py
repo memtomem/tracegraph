@@ -7,6 +7,7 @@ Every source is normalized into the same raw causal DAG plus derived structural 
 from __future__ import annotations
 
 import errno
+import functools
 import hashlib
 import json
 import os
@@ -35,6 +36,7 @@ from tracegraph.analysis import check as regression_check
 from tracegraph.analysis.diagnose import AnalysisReport
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
+from tracegraph.analysis import motifs
 from tracegraph.analysis import Match
 from tracegraph.analysis.patterns import build_index, first_matches, iter_matches, match_for
 from tracegraph.analysis import diff as tree_diff
@@ -1783,6 +1785,140 @@ def query(
         )
     finally:
         _close_stores(stores)
+
+
+@app.command()
+def summarize(
+    preset: str = typer.Argument(..., help="Strictly adjacent preset (see `tracegraph presets`)."),
+    artifacts: list[Path] = typer.Argument(..., help="Artifact JSON files and/or directories."),
+    out: Path | None = typer.Option(
+        None, "--out", "-o", help="Also write the versioned motif-summary JSON report here."
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Fail (exit 2) if a directory holds a *.json file that is not a valid artifact, "
+             "instead of skipping it with a warning.",
+    ),
+) -> None:
+    """Group a preset's matches across artifacts by observed shape. Exits 1 if none match."""
+    pattern = PRESETS.get(preset)
+    if pattern is None:
+        raise typer.BadParameter(
+            f"unknown preset {preset!r}; available: {', '.join(PRESETS)}"
+        )
+    try:
+        aggregator = motifs.MotifAggregator(pattern)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    discovered = _discover_artifacts(artifacts, exclude=out)
+    # The same precedence as `query`: every input is loaded and validated first, so a load,
+    # --strict, "no valid artifacts" or duplicate error wins over a failure while grouping.
+    scan = _QueryPass()
+    try:
+        for f, explicit in discovered:
+            failed = scan.failure is not None
+            _summarize_file(scan, aggregator, f, explicit)
+            if not failed and scan.failure is not None:
+                _release_frames(scan.failure)  # only once its frames have finished
+    finally:
+        _warn_skipped(scan.skipped)
+    if strict and scan.skipped:
+        raise _strict_refused(scan.skipped)
+    if not scan.seen:
+        raise _no_valid_artifacts(scan.skipped)
+    if scan.duplicate is not None:
+        raise _duplicate_trace_id(*scan.duplicate)
+    if scan.failure is not None:
+        raise scan.failure
+
+    summary = aggregator.summary(
+        discovered=len(discovered), valid=len(scan.seen), skipped=len(scan.skipped)
+    )
+    if out is not None:
+        try:
+            motifs.save_atomic(summary, out)
+        except OSError as exc:
+            raise typer.BadParameter(f"cannot write report: {_load_reason(exc)}") from exc
+    _render_summary(pattern, summary)
+    if not summary.groups:
+        raise typer.Exit(1)
+
+
+def _summarize_file(
+    scan: _QueryPass, aggregator: motifs.MotifAggregator, f: Path, explicit: bool
+) -> None:
+    """Load, validate and fold one artifact; its trace is released when this returns."""
+    try:
+        loaded = _load_artifact_evidence(f)
+    except _LOAD_ERRORS as exc:
+        if not explicit:
+            scan.skipped.append((f, _load_reason(exc)))
+            return
+        raise _load_error(f, exc) from exc
+    tid = loaded.trace.trace.trace_id
+    if tid in scan.seen:
+        scan.duplicate = scan.duplicate or (tid, scan.seen[tid], f)
+        return
+    scan.seen[tid] = f
+    if scan.duplicate is not None or scan.failure is not None:
+        return  # an error is already certain; keep validating the rest
+    try:
+        aggregator.add(loaded.trace, loaded.digest)
+    except MemoryError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - re-raised by summarize, after the input errors
+        scan.failure = exc
+
+
+def _render_summary(pattern, summary: motifs.MotifSummary) -> None:
+    # Names, source kinds and step ids are producer strings: escape() keeps Rich markup out, and
+    # emoji=False keeps a literal ":ok:" from printing as an emoji the JSON report does not hold.
+    show = functools.partial(console.print, emoji=False)
+    cov = summary.coverage
+    show(
+        f"[bold]{pattern.pattern_id}@v{pattern.pattern_version}[/]: {escape(str(pattern))}  "
+        f"[dim](over {cov.artifacts_valid} trace(s))[/]\n"
+    )
+    if not summary.groups:
+        show(f"[dim]no matches in {cov.artifacts_valid} valid artifact(s)[/]")
+    for n, group in enumerate(summary.groups, 1):
+        sig = group.signature
+        shape = ""
+        for i, step in enumerate(sig.steps):
+            if i:
+                shape += " →" + escape(f"[{sig.edge_origins[i - 1] or 'no origin'}]") + "→ "
+            name = step.name if step.name is not None else "unknown name"
+            kind = step.kind or "unknown kind"
+            status = step.status or "unknown status"
+            shape += escape(f"{name} [{kind}, {step.source}] ({status})")
+        show(
+            f"[bold]{n}.[/] {group.trace_count} trace(s), {group.match_count} match(es): {shape}"
+        )
+        unknown = sorted({f for step in sig.steps for f in step.unknown})
+        heuristic = sig.heuristic_edges.replace("_", " ")
+        detail = (f"source {sig.source_kind}, fidelity {sig.causal_fidelity}, links "
+                  f"{sig.links_preserved}, heuristic edges {heuristic}")
+        if unknown:
+            detail += f", unknown {', '.join(unknown)}"
+        show(f"   [dim]{escape(detail)}[/]")
+        for rep in group.representatives:
+            show(
+                f"   [dim]e.g. {rep.artifact_digest} steps {escape(', '.join(rep.step_ids))}[/]"
+            )
+    show(
+        f"\n[dim]{cov.artifacts_valid} valid of {cov.artifacts_discovered} discovered "
+        f"({cov.artifacts_skipped} skipped); {cov.traces_matched} trace(s) matched. "
+        f"May hide matches: {cov.traces_may_hide_matches} trace(s); disclosed capture gaps: "
+        f"{cov.traces_with_disclosed_gaps}; no capture record: {cov.traces_without_provenance}; "
+        f"unconfirmed matches (not grouped): {cov.unconfirmed_matches} in "
+        f"{cov.traces_with_unconfirmed_matches} trace(s).[/]"
+    )
+    if summary.groups:
+        show(
+            "[dim]A group is an observed preset shape; it does not show a shared root cause.[/]"
+        )
 
 
 @app.command(name="export-review-candidates")

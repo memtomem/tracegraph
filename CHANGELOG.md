@@ -8,6 +8,25 @@ explicitly.
 
 ## Unreleased
 
+### Added
+
+- **`tracegraph summarize <preset> <artifacts...>`** (#60) groups a preset's matches across an
+  artifact batch by observed shape, so an operator can pick the recurring failure shape to look at
+  first. A group's signature (`motif-signature/v1`) is the matched steps' kind, status, source and
+  safe-v1 name, the `CAUSED_BY` origins between them, and the trace's source kind, causal
+  fidelity, link setting and whether it discloses heuristically chosen edges (per trace, not per
+  edge). It has no ids, error text or artifact file paths; an identifier-shaped name that looks
+  like a path is kept, as in `analyze` reports. Each group reports its match count and trace count
+  separately, plus up to three representatives (artifact digest and step ids). Only matches
+  confirmed by `check`'s rule are grouped; the rest are counted as unconfirmed. Fields that are
+  not known are kept as unknown. A coverage section always reports skipped artifacts, traces that
+  may hide a match, disclosed capture gaps, traces with no capture record and unconfirmed matches.
+  `--out` writes the `tracegraph.motif-summary` schema-v1 JSON with the same input protection as
+  `export-review-candidates`. Only strictly adjacent presets are accepted; the three gap presets
+  exit 2. Memory holds one trace and one entry per group, never the matches. A 160-wide retry fan
+  (25,600 matches) adds about 27 KiB over a 40-wide one, where collecting the matches adds about
+  2 MiB. The issue suggested validating demand first; this is the minimal version.
+
 ### Changed
 
 - **`query --limit` no longer holds every match of the trace it is reading** (#79). Each
