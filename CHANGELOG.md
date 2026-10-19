@@ -93,6 +93,16 @@ explicitly.
   schema stays v7, and the committed fixtures are byte-identical. One shape still records the
   error twice: a fork copy of a subgraph's *input* checkpoint, then resumed (#90).
 
+### Known limitations
+
+- Resuming after a fork copy of a subgraph's input checkpoint
+  (`update_state(..., as_node="__copy__")` on it) records an error again at the subgraph's next
+  start: one the parent graph held (#90) or one a `Send` payload carried (#96). Three ways of
+  recognizing such a copy were tried: an unread `__start__` value, a `__start__` version absent
+  from `versions_seen`, and pending writes from LangGraph's `__start__` task. Each also matched a
+  fork of a plain `Pregel` graph's loop checkpoint and hid a genuine failure there, so none
+  shipped.
+
 ## 0.5.0 - 2026-10-18
 
 ### Added
