@@ -6,6 +6,18 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Dependencies
+
+- `langgraph-checkpoint-sqlite` now requires `>=3.1.1` (was `>=2`), the first release with the
+  fix for GHSA-47pj-3jcm-6whg, where store namespace prefixes could match across segment
+  boundaries. Tracegraph reads checkpoints through `SqliteSaver` and never uses the store, so
+  its own behaviour is unchanged; the floor keeps an install from resolving a flagged version.
+  The lockfile also moves anyio, urllib3, langsmith and langgraph-sdk past their open
+  advisories, and the dev dependency langgraph to 1.2.14, because 1.2.2 kept langgraph-sdk
+  below 0.4. The full test suite and every fixture's output are unchanged on the new lock.
+
 ## 0.6.0 - 2026-10-20
 
 ### Added

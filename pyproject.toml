@@ -30,7 +30,10 @@ classifiers = [
 
 dependencies = [
     "pydantic>=2,<3",
-    "langgraph-checkpoint-sqlite>=2",
+    # 3.1.1 fixes GHSA-47pj-3jcm-6whg (store namespace prefixes crossing segment boundaries).
+    # Tracegraph reads only SqliteSaver, never the store; the floor keeps installs off the
+    # flagged versions.
+    "langgraph-checkpoint-sqlite>=3.1.1",
     # Declared directly, not left transitive, because `ingest` now calls its serializer API:
     # `JsonPlusSerializer(allowed_msgpack_modules=...)` is what stops a checkpoint payload
     # invoking arbitrary callables, and it does not exist before 4.1 (4.0.0 raises TypeError,
