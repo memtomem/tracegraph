@@ -103,6 +103,9 @@ class EdgeOrigin(str, Enum):
 
     CHECKPOINT_PARENT = "checkpoint_parent"
     GRAPH_PARENT = "graph_parent"
+    #: A graph parent the adapter chose among several candidate spans by start order. Not a
+    #: declared cause: the producer named a node, not which run of it.
+    GRAPH_PARENT_HEURISTIC = "graph_parent_heuristic"
     SPAN_LINK = "span_link"
     SPAN_PARENT_FALLBACK = "span_parent_fallback"
     LEGACY_UNKNOWN = "legacy_unknown"

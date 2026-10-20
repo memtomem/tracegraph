@@ -415,4 +415,4 @@ def test_untimed_candidate_cannot_become_the_nearest_preceding_parent(p1_start):
 def test_timed_loop_still_resolves_to_the_nearest_preceding_execution():
     raw = OTLPSpanAdapter(_loop_doc(1_000_000_000)).ingest("t")
     causes = {(e.src, e.dst): e.origin for e in raw.causal_edges if e.src == "child"}
-    assert causes == {("child", "p1"): EdgeOrigin.GRAPH_PARENT}
+    assert causes == {("child", "p1"): EdgeOrigin.GRAPH_PARENT_HEURISTIC}

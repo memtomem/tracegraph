@@ -46,8 +46,11 @@ def _format_origin(origin: EdgeOrigin | None) -> str:
 
 
 def _relation_phrase(origin: EdgeOrigin | None, *, timed_graph_parents: bool) -> str:
-    # The capture record says a graph parent was chosen by start order somewhere in the trace,
-    # not which one, so no graph-parent edge there is presented as a declared cause.
+    if origin is EdgeOrigin.GRAPH_PARENT_HEURISTIC:
+        return "preceded by (graph parent, chosen heuristically)"
+    # An artifact written before the choice was recorded per edge has only the capture record,
+    # which says a graph parent was chosen by start order somewhere in the trace, not which one,
+    # so no graph-parent edge there is presented as a declared cause.
     if origin is EdgeOrigin.GRAPH_PARENT and timed_graph_parents:
         return "preceded by (graph parent, possibly chosen heuristically)"
     if origin in EXPLICIT_ORIGINS:
@@ -168,8 +171,10 @@ def build_incident_memo(
         ]
 
         capture = nt.trace.capture
-        timed_graph_parents = capture is not None and any(
-            gap.code == "otlp.graph_parent_by_timing" for gap in capture.gaps
+        timed_graph_parents = (
+            capture is not None
+            and any(gap.code == "otlp.graph_parent_by_timing" for gap in capture.gaps)
+            and not any(e.origin is EdgeOrigin.GRAPH_PARENT_HEURISTIC for e in caused_by_edges)
         )
         if ancestry_edges:
             lines.append("### Causal Ancestry Graph")

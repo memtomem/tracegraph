@@ -167,6 +167,8 @@ def validate_normalized(nt: NormalizedTrace) -> ProjectionRule:
 _ORIGIN_PRIORITY: dict[EdgeOrigin | None, int] = {
     EdgeOrigin.CHECKPOINT_PARENT: 0,
     EdgeOrigin.GRAPH_PARENT: 0,
+    # Same rank as GRAPH_PARENT, so recording the choice per edge leaves the tree as it was.
+    EdgeOrigin.GRAPH_PARENT_HEURISTIC: 0,
     EdgeOrigin.SPAN_PARENT_FALLBACK: 1,
     EdgeOrigin.SPAN_LINK: 2,
     EdgeOrigin.LEGACY_UNKNOWN: 3,
