@@ -6,6 +6,27 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Changed
+
+- **A Phoenix loop parent is chosen by start numbers whose unit is unknown again** (#136). Since
+  0.7.0 a Phoenix time given as a number below 10^17 is reported as unavailable, and with it the
+  only evidence for choosing among several spans that carry the `graph.node.id` a span names as
+  its `graph.node.parent_id`. The span then fell back to its `parent_id`, or the export was
+  refused without one. Now, when that span and every candidate start at such a number, the
+  nearest preceding candidate by those numbers is taken. 0.6.1 also chose by them, read as
+  nanoseconds, but it dropped a float's fraction first, so with fractional seconds (`a` at
+  1783987200.25, `b` at 1783987200.75, the span at 1783987200.5) it took `b` where this release
+  takes `a`. The times themselves stay unavailable. The choice is counted under the existing
+  `otlp.graph_parent_by_timing` gap with its own warning line, which says it assumes the export
+  gives every time in one unit; `check` treats it as a heuristic edge, as it does a choice by
+  readable time. Exports with ISO or nanosecond times are read as before, and so is a set of
+  candidates where any one has a readable time, no start, or no number below the floor. The
+  0.7.0 example (spans `a` and `b` at 1783987200 and 1783987201, `c` at 1783987202 with no
+  `parent_id`) is accepted again with `b` as `c`'s parent. Step order still breaks ties with
+  these spans at time 0, so it can differ from 0.6.1.
+
 ## 0.7.0 - 2026-10-20
 
 ### Added

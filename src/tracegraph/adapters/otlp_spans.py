@@ -376,11 +376,16 @@ class OTLPSpanAdapter:
         causal_fidelity: CausalFidelity | None = None,
         links_preserved: bool | None = None,
         evaluation_channel: str | None = None,
+        start_order_channel: str | None = None,
     ) -> None:
         self._doc = document
         #: Span key carrying pre-sanitized evaluation summaries. Only an adapter that builds
         #: the span dicts itself (Phoenix) sets it; raw OTLP input never supplies evaluations.
         self._evaluation_channel = evaluation_channel
+        #: Span key carrying a start time whose unit is unknown, as a plain number that orders
+        #: spans within one export. Only Phoenix sets it, for a number below the epoch-nanosecond
+        #: floor; the time itself stays unavailable.
+        self._start_order_channel = start_order_channel
         self._source_kind = source_kind
         #: Prefer ``graph.node.parent_id`` (logical agent graph) over ``parentSpanId``.
         self._prefer_graph_parent = prefer_graph_parent
@@ -462,8 +467,18 @@ class OTLPSpanAdapter:
             for sid, span in by_id.items()
             if _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano")) is None
         }
+        # A unit-unknown start number orders spans that all carry one, with prerank's
+        # tiebreaks; it says nothing about how they relate to a span with a readable time.
+        channel = self._start_order_channel
+        order_key = {
+            sid: (value, depth[sid], sid)
+            for sid, span in by_id.items()
+            if channel is not None and (value := span.get(channel)) is not None
+        }
         disclosures = Disclosures()
-        causes, origins = self._causes(by_id, attrs, prerank, parent_span, untimed, disclosures)
+        causes, origins = self._causes(
+            by_id, attrs, prerank, parent_span, untimed, order_key, disclosures
+        )
         seq = self._topo_seq(by_id, causes, prerank)
 
         steps: list[Step] = []
@@ -725,6 +740,7 @@ class OTLPSpanAdapter:
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
         untimed: set[str],
+        order_key: dict[str, tuple[Any, int, str]],
         disclosures: Disclosures,
     ) -> tuple[dict[str, list[str]], dict[tuple[str, str], EdgeOrigin]]:
         """Reconstruct ``effect -> [causes]`` from declared signals: one parent + links.
@@ -752,12 +768,13 @@ class OTLPSpanAdapter:
             causes[effect].append(cause)
             origins[(effect, cause)] = origin
 
-        by_timing = fallback = 0
+        by_timing = by_order = fallback = 0
         for sid in by_id:
             parent, parent_origin, resolution = self._resolve_parent(
-                sid, attrs, node_index, prerank, parent_span, untimed
+                sid, attrs, node_index, prerank, parent_span, untimed, order_key
             )
             by_timing += resolution == "by_timing"
+            by_order += resolution == "by_order"
             fallback += resolution == "fallback"
             if parent is not None:
                 add(sid, parent, parent_origin)
@@ -788,6 +805,16 @@ class OTLPSpanAdapter:
                 f"{by_timing} span(s) declare a graph.node.parent_id that several spans carry; "
                 "the nearest preceding one by start time was taken as the parent.",
                 by_timing,
+            )
+        if by_order:
+            # Same code as by_timing: a heuristic choice among candidates, which readers since
+            # 0.6 already treat as one.
+            disclosures.add(
+                "otlp.graph_parent_by_timing",
+                f"{by_order} span(s) declare a graph.node.parent_id that several spans carry; "
+                "the nearest preceding one was taken by start-time numbers whose unit is "
+                "unknown, assuming the export gives every time in one unit.",
+                by_order,
             )
         if fallback:
             disclosures.add(
@@ -826,6 +853,7 @@ class OTLPSpanAdapter:
         prerank: dict[str, int],
         parent_span: dict[str, str | None],
         untimed: set[str],
+        order_key: dict[str, tuple[Any, int, str]],
     ) -> tuple[str | None, EdgeOrigin, str | None]:
         """The single chosen parent cause: the logical graph parent if resolvable, else the
         declared span parent.
@@ -835,7 +863,8 @@ class OTLPSpanAdapter:
 
         * a single span carries that ``graph.node.id`` → trust it outright (unambiguous);
         * several do (a loop) → pick the nearest *preceding* execution, but only when this
-          span and every candidate have a readable start time; otherwise there is no
+          span and every candidate have a readable start time, or else all carry a
+          unit-unknown start number (``order_key``) to compare; otherwise there is no
           evidence of order and the parent is ambiguous.
 
         If ``graph.node.parent_id`` is declared but resolves to no in-trace span, or is
@@ -846,7 +875,7 @@ class OTLPSpanAdapter:
         ``None`` only when the span truly has no declared parent of either kind.
 
         The third value says how a declared logical parent was resolved when that was not
-        unambiguous: ``"by_timing"`` or ``"fallback"``; otherwise ``None``.
+        unambiguous: ``"by_timing"``, ``"by_order"`` or ``"fallback"``; otherwise ``None``.
         """
         pid = parent_span.get(sid)
         if self._prefer_graph_parent:
@@ -859,6 +888,10 @@ class OTLPSpanAdapter:
                 preceding = [c for c in candidates if timed and prerank[c] < prerank[sid]]
                 if preceding:
                     return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT, "by_timing"
+                ordered = not timed and all(s in order_key for s in (sid, *candidates))
+                preceding = [c for c in candidates if ordered and order_key[c] < order_key[sid]]
+                if preceding:
+                    return max(preceding, key=lambda c: order_key[c]), EdgeOrigin.GRAPH_PARENT, "by_order"
                 if pid is None:
                     detail = "no in-trace span" if not candidates else "multiple ambiguous spans"
                     raise ValueError(
