@@ -6,7 +6,7 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.7.0 - 2026-10-20
 
 ### Added
 
@@ -15,10 +15,12 @@ explicitly.
   (`status.message` and exception events; the error channel's value and a raised exception's
   `repr`), and `inspect` and `explain` print it; until now only Phoenix ingestion could drop it.
   With the flag a failed step keeps its `error` status and lists `error_msg` in
-  `unknown_fields`, and nothing else in the artifact changes, so a rule that reads the message
-  (`timeout`) reports `INSUFFICIENT_EVIDENCE` for that side instead of matching nothing. Names are
-  still recorded as given. The default is unchanged. In Python, `LangGraphCheckpointAdapter` and
-  `ingest_snapshot` take `include_error_messages=False`, as `OTLPSpanAdapter` already did.
+  `unknown_fields`, and nothing else in the artifact changes. A rule that reads the message
+  therefore treats it as unknown, not absent: `check --rule pattern-not-increased:timeout` reports
+  `INSUFFICIENT_EVIDENCE` for a redacted current run, and against a redacted baseline it can still
+  pass but not fail. Names are still recorded as given. The default is unchanged. In Python,
+  `LangGraphCheckpointAdapter` and `ingest_snapshot` take `include_error_messages=False`, as
+  `OTLPSpanAdapter` already did.
 
 ### Changed
 
@@ -32,6 +34,7 @@ explicitly.
   tell "called wrong" from "Phoenix is not reachable". 2 still means invalid arguments or output
   paths, such as `--limit 0`, two outputs naming the same file, or a destination that cannot be
   written. `doctor` is unchanged.
+
 ### Fixed
 
 - **A Phoenix time given as a number too small to be epoch nanoseconds is no longer read as one**
