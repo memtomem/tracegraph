@@ -237,9 +237,9 @@
    - 준비 PR #145의 로컬 게이트: `pytest` 2769 passed / 12 skipped, `twine@7.0.0 check` 통과, sdist 40 members
      모두 허용 목록 안. 게시된 0.7.0의 `validate`가 0.8.0이 쓴 artifact 4개(OTLP 두 휴리스틱 코드 각각과 둘 다
      없는 것, 0.7.0이 거부하는 Phoenix 숫자 시각 예)를 모두 받아들인다(schema v7).
-   - CHANGELOG claims 리뷰는 커밋 전 2라운드(major 1, 2)와 머지 뒤 #136 집중 1라운드(major 1)였다. 찾은 것:
+   - CHANGELOG claims 리뷰는 커밋 전 2라운드(major 1·minor 1, major 2·minor 2)와 머지 뒤 #136 집중 1라운드(major 1·minor 1)였다. 찾은 것:
      0.7.0이 받던 export의 순환 거부, 실패 분류 변화, step 번호 변화, 그리고 예시가 한 export처럼 읽히는 문제
-     (PR #146). 2라운드 4건 중 1건은 1라운드 수정이 쓴 전칭 규칙이었다. 모두 게시된 0.7.0과 main을 나란히
+     (PR #146). 커밋 전 2라운드의 4건 중 1건은 1라운드 수정이 쓴 전칭 규칙이었다. 모두 게시된 0.7.0과 main을 나란히
      돌려 재현했고, `diagnose`는 가짜 `px`로 쟀다.
    - TestPyPI 예행: [run 39435637600](https://github.com/memtomem/tracegraph/actions/runs/39435637600).
      첫 publish는 attestation 생성 중 GitHub OIDC 토큰 요청이 503으로 실패했다(업로드 전, 두 index 모두 404
