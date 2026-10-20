@@ -31,11 +31,10 @@ explicitly.
   with no traces. The command now
   prints `FAIL <reason>` on stderr, as `phoenix doctor` does, instead of the usage banner.
   `diagnose` used 2 for these, the same code as an invalid invocation, so a wrapper could not
-  tell "called wrong" from "Phoenix is not reachable". One kind of export 0.6.1 accepted is now
-  refused as unreadable, so `diagnose` goes from 0 to 1 on it: a loop parent that only numeric
-  times could order, described under the Phoenix time fix below. 2 still means invalid arguments
-  or output paths, such as `--limit 0`, two outputs naming the same file, or a destination that
-  cannot be written. `doctor` is unchanged.
+  tell "called wrong" from "Phoenix is not reachable". Some exports 0.6.1 accepted are now refused
+  as unreadable, so `diagnose` goes from 0 to 1 on them; see the Phoenix time fix below. 2 still
+  means invalid arguments or output paths, such as `--limit 0`, two outputs naming the same file,
+  or a destination that cannot be written. `doctor` is unchanged.
 
 ### Fixed
 
@@ -52,12 +51,13 @@ explicitly.
   forms such as `20260714_123456`, and so are nanosecond values. Phoenix's own `trace get` export
   uses ISO strings, so artifacts change only for exports that carried such numbers.
 
-  An unavailable time also no longer orders spans. When several spans carry the `graph.node.id`
-  that a span names as its `graph.node.parent_id`, the nearest preceding one is taken only if the
-  span's own start time and every candidate's are readable. 0.6.1 read such numbers as
-  nanoseconds and picked by them; with this release the span falls back to its `parent_id` with a
-  warning, so its causal parent can change, and when it has no `parent_id` the export is refused:
-  `ingest-phoenix` and `analyze` exit 2 where 0.6.1 exited 0, and `phoenix diagnose` exits 1.
+  For an export that carries such numbers, the step sequence, the parent chosen among several
+  spans sharing a `graph.node.id`, and whether the export is accepted at all can also differ from
+  0.6.1, which read the numbers as nanoseconds and ordered spans by them. For example, take spans
+  `a` and `b` with `graph.node.id` `loop`, starting at 1783987200 and 1783987201, and a span `c`
+  starting at 1783987202 with `graph.node.parent_id` `loop` and no `parent_id`. 0.6.1 took `b` as
+  `c`'s parent and exited 0; now `ingest-phoenix` and `analyze` exit 2 and `phoenix diagnose`
+  exits 1.
 
 ## 0.6.1 - 2026-10-20
 

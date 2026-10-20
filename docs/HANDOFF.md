@@ -14,11 +14,13 @@
   - **`--redact-errors`(#125, PR #133).** `ingest-otlp`와 `ingest`에서 오류 메시지를 artifact에 남기지 않는다. 실패한
     step은 `error` 상태를 유지하고 `unknown_fields`에 `error_msg`를 넣는다. 기본값은 그대로다.
   - **Phoenix 숫자 시각(#124, PR #132).** `10**17`보다 작은 숫자는 나노초로 읽지 않고, 읽을 수 없는 시각으로
-    `otlp.unreadable_timestamp`에 공개한다. Phoenix `trace get`의 ISO 문자열은 그대로다. 읽을 수 없는 시각은
-    순서 근거도 되지 못한다. 같은 `graph.node.id`를 가진 span이 여럿인 loop 부모는 시작 시각을 모두 읽을 수
-    있을 때만 시각으로 고르므로, 그런 숫자 시각이면 span의 `parent_id`로 돌아가 부모가 바뀔 수 있다.
-    `parent_id`가 없으면 export를 거부한다(`ingest-phoenix`·`analyze` 0 → 2, `phoenix diagnose` 0 → 1).
-    0.7.0 claims 리뷰가 찾았고, 게시된 0.6.1과 main을 나란히 돌려 재현했다.
+    `otlp.unreadable_timestamp`에 공개한다. Phoenix `trace get`의 ISO 문자열은 그대로다. 그런 숫자가 든
+    export는 step 순서, 같은 `graph.node.id`를 가진 여러 span 중 고른 부모, 수용 여부 자체가 0.6.1과 다를 수
+    있다. 예: `graph.node.id` `loop`인 a·b(시작 1783987200·1783987201)와, 1783987202에 시작하고
+    `graph.node.parent_id` `loop`에 `parent_id`가 없는 c. 0.6.1은 b를 c의 부모로 골라 exit 0이었고, 지금은
+    `ingest-phoenix`·`analyze`가 2, `phoenix diagnose`가 1로 끝난다.
+    0.7.0 claims 리뷰 두 라운드가 찾았고(거부, 부모 변경, 순환 fallback 거부, 독립 span 순서 변경), 모두
+    게시된 0.6.1과 main을 나란히 돌려 재현했다. 상대 순서를 부모 선택에 쓰는 개선은 #136이다.
   artifact schema는 v7 그대로이고, 새 capture gap 코드도 없다.
 - **0.6.1 공개 완료(2026-10-20).** `agent-tracegraph` 0.6.1이 PyPI 최신이다. `test-v0.6.1`과 `v0.6.1`이 모두
   `b6b3a7b`(PR #120)를 가리킨다. 업그레이드 주의는
