@@ -6,10 +6,11 @@
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PR #118(`a0d157e`)이 `uv.lock`을 바꿨으므로 그 뒤
   `uv sync --locked --extra cypher`로 venv도 맞춘다. 2026-10-19~20 세션처럼 worktree가 main venv를 공유하면 그
   venv도 맞춰야 한다. 이 Mac에서 sync 전 main venv의 langgraph는 1.2.2였다.
-- **0.6.0 이후 `## Unreleased`에 사용자에게 보이는 변경이 하나 있다(PR #118).** `langgraph-checkpoint-sqlite`
-  하한이 `>=2`에서 `>=3.1.1`로 올랐다(GHSA-47pj-3jcm-6whg). 이 advisory는 store 경로에 관한 것이고 tracegraph는
-  `SqliteSaver`를 쓴다. PR #118에는 새 lock에서 전체 테스트 통과와 fixture 출력 일치가 기록돼 있다. lock은 Dependabot 경고 8건을 모두 넘겼다(전부 `fixed`, 열린 경고 0개). 0.6.1로 낼지는
-  소유자가 정한다.
+- **0.6.1을 준비 중이다(PR #118 하나).** release-prep PR이 `## Unreleased`를 `## 0.6.1 - 2026-10-20`으로
+  옮겼다. 사용자에게 보이는 변경은 하나다: `langgraph-checkpoint-sqlite` 하한이 `>=2`에서 `>=3.1.1`로
+  올랐다(GHSA-47pj-3jcm-6whg). 이 advisory는 store 경로에 관한 것이고 tracegraph는 `SqliteSaver`를 쓴다. PR #118에는
+  새 lock에서 전체 테스트 통과와 fixture 출력 일치가 기록돼 있다. lock은 Dependabot 경고 8건을 모두 넘겼다(전부
+  `fixed`, 열린 경고 0개). 버전은 소유자가 0.6.1로 정했다.
 - **0.6.0 공개 완료(2026-10-20).** `agent-tracegraph` 0.6.0이 PyPI 최신이다. `test-v0.6.0`과 `v0.6.0`이
   모두 `218abe6`(PR #116)을 가리킨다. 업그레이드 주의는
   [GitHub Release v0.6.0](https://github.com/memtomem/tracegraph/releases/tag/v0.6.0)의 "Before you upgrade"에
@@ -127,9 +128,9 @@
 3. **알려진 한계(문서화, 고치지 않음):** #90·#96. README와 CHANGELOG의 Known limitations에 있다.
 4. **`summarize` 후속(등록 안 함):** 아래 2026-10-19 절 3번 그대로다.
 5. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
-6. **다음 릴리스 여부(소유자 결정):** `## Unreleased`에는 PR #118의 sqlite 하한 상향과, 관련 lock 갱신 및 검증
-   결과가 있다. 보안 의존성 수정이라 0.6.1이 후보지만, 설치 가능 범위가 좁아진 영향과 최종 버전은 소유자가 정한다.
-   내기로 하면 런북 1단계부터 한다.
+6. **0.6.1 릴리스:** 소유자가 0.6.1로 정했다. release-prep PR 다음 단계는 [릴리스 런북](releasing.md)의
+   3~5단계다: merge 뒤 `tests` 통과 확인, `test-v0.6.1` rehearsal(TestPyPI, 환경 승인 필요), 게시된 파일 검증,
+   같은 커밋에 `v0.6.1`, PyPI 확인, GitHub Release(prerelease).
 
 ---
 
