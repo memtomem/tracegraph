@@ -12,13 +12,17 @@
   - **Phoenix loop 부모(#136, PR #139).** 0.7.0부터 읽을 수 없게 된 `10**17` 미만 숫자 시각이라도, span과 모든
     후보가 그런 숫자로 시작하면 그 숫자로 가장 가까운 앞 후보를 부모로 고른다. 0.7.0이 거부하던 예(a·b가
     1783987200·1783987201, c가 1783987202에 `parent_id` 없음)는 다시 b를 부모로 받아들인다. 0.7.0이 c의
-    `parent_id`로 대신하던 export에서는 고르는 부모가 달라질 수 있고, 그에 따라 세 가지가 달라질 수 있다.
-    새 선택이 인과 순환을 만들면 거부된다: 위 예에서 b의 `parent_id`가 c이고 c의 `parent_id`가 r이면 0.7.0은
-    r을 부모로 두고 exit 0이었고, 지금은 b를 골라 `ingest-phoenix`·`analyze`가 2, `phoenix diagnose`가 1로
-    끝난다(0.6.1도 거부했다). edge가 `graph_parent`가 되므로 `analyze`가 명시된 조상으로 읽어 실패 분류가 바뀔
-    수 있다(#142): b·c가 실패하고 c의 `parent_id`가 b이면 0.7.0은 둘 다 primary, 지금은 b가 primary이고 c가
-    propagated다. step 번호도 바뀔 수 있다: 잰 export 하나에서 c가 step 3에서 5로 옮겼다. 시각 자체는 계속
-    읽을 수 없는 것으로 공개하고, 고른 것은 기존 `otlp.graph_parent_by_timing`으로 센다.
+    `parent_id`로 대신하던 export에서는 고르는 부모가 달라질 수 있고, 그에 따라 세 가지가 달라질 수 있다. 아래
+    예는 각각 위 예에 적은 것만 더한 별개의 export다.
+    - 새 선택이 인과 순환을 만들면 거부된다: root span r(1783987199)을 더하고 c의 `parent_id`를 r, b의
+      `parent_id`를 c로 하면 0.7.0은 r을 부모로 두고 exit 0이었고, 지금은 b를 골라 `ingest-phoenix`·`analyze`가
+      2, `phoenix diagnose`가 1로 끝난다(0.6.1도 거부했다).
+    - edge가 `graph_parent`가 되므로 `analyze`가 명시된 조상으로 읽어 실패 분류가 바뀔 수 있다(#142): c의
+      `parent_id`를 b로 하고 b·c를 실패시키면 0.7.0은 둘 다 primary, 지금은 b가 primary이고 c가 propagated다.
+    - step 번호가 바뀔 수 있다: 시작 시각 없는 x, y(`parent_id` x), z를 더하고 b의 `parent_id`를 y, c의
+      `parent_id`를 z로 하면 0.7.0은 c를 3, b를 5로, 지금은 b를 4, c를 5로 번호 붙인다.
+
+    시각 자체는 계속 읽을 수 없는 것으로 공개하고, 고른 것은 기존 `otlp.graph_parent_by_timing`으로 센다.
   - **`analyze`와 incident memo(#138, PR #141).** 두 휴리스틱 부모 코드가 있으면 `analyze`가 그 쪽에 경고를
     붙이고, memo가 fidelity disclosure를 붙인다. `otlp.graph_parent_by_timing`이 있는 trace의 memo는 causal
     ancestry graph에 적는 모든 `graph_parent` edge를 "caused by" 대신 "preceded by (graph parent, possibly chosen heuristically)"로 쓴다.
