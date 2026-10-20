@@ -1802,7 +1802,7 @@ def query(
                     # Same fallback label as `tracegraph explain` and the tree renderers.
                     console.print(f"    ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
                 # Causal-honesty signal: when the matched effect (or anything in the chain)
-                # has more than one real cause, the single-parent tree projection dropped
+                # has more than one recorded cause, the single-parent tree projection dropped
                 # at least one. `tracegraph explain` surfaces this same warning — `query
                 # --explain` must too, or a fan-in effect's lossiness becomes invisible
                 # (target lossiness doesn't show up in the per-step ⚠ flags above, since
