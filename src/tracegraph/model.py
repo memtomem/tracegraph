@@ -284,6 +284,10 @@ CAPTURE_GAP_CODES = frozenset(
         "phoenix.unreadable_evaluation_score",
     }
 )
+#: The gaps that say a causal parent was chosen heuristically at ingest: among several spans by
+#: start order, or by falling back to the span parent. ``check``, ``summarize``, ``analyze`` and the
+#: incident memo read this set.
+HEURISTIC_EDGE_GAP_CODES = frozenset({"otlp.graph_parent_by_timing", "otlp.graph_parent_fallback"})
 
 
 class CaptureGap(BaseModel):

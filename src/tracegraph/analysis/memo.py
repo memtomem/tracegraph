@@ -7,10 +7,12 @@ from pathlib import Path
 
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.analysis.diagnose import (
+    HEURISTIC_PARENT_FIDELITY_WARNING,
     INCIDENT_FIDELITY_WARNING,
     LANGGRAPH_FIDELITY_WARNING,
     LINKS_PRESERVED_FIDELITY_WARNING,
     PARENT_ONLY_FIDELITY_WARNING,
+    has_heuristic_edges,
     pattern_findings,
 )
 from tracegraph.model import (
@@ -43,7 +45,11 @@ def _format_origin(origin: EdgeOrigin | None) -> str:
     return f"origin: {origin.value}"
 
 
-def _relation_phrase(origin: EdgeOrigin | None) -> str:
+def _relation_phrase(origin: EdgeOrigin | None, *, timed_graph_parents: bool) -> str:
+    # The capture record says a graph parent was chosen by start order somewhere in the trace,
+    # not which one, so no graph-parent edge there is presented as a declared cause.
+    if origin is EdgeOrigin.GRAPH_PARENT and timed_graph_parents:
+        return "preceded by (graph parent, possibly chosen heuristically)"
     if origin in EXPLICIT_ORIGINS:
         return "caused by"
     if origin is EdgeOrigin.SPAN_PARENT_FALLBACK:
@@ -161,12 +167,16 @@ def build_incident_memo(
             if edge.src in reachable_step_ids
         ]
 
+        capture = nt.trace.capture
+        timed_graph_parents = capture is not None and any(
+            gap.code == "otlp.graph_parent_by_timing" for gap in capture.gaps
+        )
         if ancestry_edges:
             lines.append("### Causal Ancestry Graph")
             for edge in ancestry_edges:
                 eff_alias = alias_by_id[edge.src]
                 cause_alias = alias_by_id[edge.dst]
-                rel = _relation_phrase(edge.origin)
+                rel = _relation_phrase(edge.origin, timed_graph_parents=timed_graph_parents)
                 origin_str = f" [{_format_origin(edge.origin)}]"
                 lines.append(f"- `{eff_alias}` {rel} `{cause_alias}`{origin_str}")
             lines.append("")
@@ -182,6 +192,8 @@ def build_incident_memo(
         disclosures.append(LANGGRAPH_FIDELITY_WARNING)
     if nt.trace.links_preserved:
         disclosures.append(LINKS_PRESERVED_FIDELITY_WARNING)
+    if has_heuristic_edges(nt):
+        disclosures.append(HEURISTIC_PARENT_FIDELITY_WARNING)
 
     lines.append("## Fidelity Disclosures")
     for d in disclosures:

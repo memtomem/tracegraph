@@ -10,6 +10,19 @@ explicitly.
 
 ### Changed
 
+- **`analyze` and the incident memo say when a causal parent was chosen heuristically** (#138).
+  Ingest records `otlp.graph_parent_by_timing` (a loop parent taken by start time or, since #136,
+  by start number) or `otlp.graph_parent_fallback` (a declared graph parent not honored, so the
+  span parent is used) in the artifact, and `check` and `summarize` read those codes, but
+  `analyze` and `export-incident-memo` did not, so a report or memo built from the artifact
+  presented such a parent like a declared one. `analyze` now adds a warning for each side that
+  carries either code, and the memo adds a fidelity disclosure. The record does not say which
+  edge was chosen that way, so in a trace with `otlp.graph_parent_by_timing` the memo writes every
+  `graph_parent` edge as "preceded by (graph parent, possibly chosen heuristically)" instead of
+  "caused by"; checkpoint parents and span links keep "caused by". Reports and memos of traces
+  without these codes are unchanged. `explain`, `query --explain` and `inspect` still show no
+  caveat (#140).
+
 - **A Phoenix loop parent is chosen by start numbers whose unit is unknown again** (#136). Since
   0.7.0 a Phoenix time given as a number below 10^17 is reported as unavailable, and with it the
   only evidence for choosing among several spans that carry the `graph.node.id` a span names as

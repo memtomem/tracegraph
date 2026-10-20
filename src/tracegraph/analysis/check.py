@@ -34,6 +34,7 @@ from tracegraph.analysis.diagnose import _ALIAS, _digest, _display_name, _safe
 from tracegraph.analysis.patterns import PRESETS, PathPattern, StepPredicate, build_index, find_matches
 from tracegraph.model import (
     CAPTURE_GAP_CODES,
+    HEURISTIC_EDGE_GAP_CODES,
     NormalizedTrace,
     Step,
     StepStatus,
@@ -66,7 +67,7 @@ _MAY_OMIT_STEPS = frozenset({
 #: is unaffected, so only the count rules read this set.
 _REWRITTEN_ERRORS = frozenset({"langgraph.rewritten_error_channel"})
 _MAY_HIDE_FAILURES = _MAY_OMIT_STEPS | _REWRITTEN_ERRORS
-_HEURISTIC_EDGES = frozenset({"otlp.graph_parent_by_timing", "otlp.graph_parent_fallback"})
+_HEURISTIC_EDGES = HEURISTIC_EDGE_GAP_CODES
 
 LANGGRAPH_LIMITATION = (
     "LangGraph checkpoint layouts this adapter does not recognize record no failure, so a "
