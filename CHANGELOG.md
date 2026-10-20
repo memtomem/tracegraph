@@ -26,7 +26,8 @@ explicitly.
   before.
 - **Artifact schema 8.** An artifact with a `graph_parent_heuristic` edge declares
   `schema_version` 8, so 0.8.0 and earlier refuse it by version instead of failing on the new
-  origin value; every other artifact keeps the version and bytes it had. Artifacts written by
+  origin value. Every other artifact keeps the version it had, and its bytes too, except a fresh
+  ingest whose timed choices are all linked, which drops that gap as above. Artifacts written by
   earlier releases are read as before: their timed edges say `graph_parent`, so `analyze`
   classifies them as it did, and the memo keeps qualifying every graph parent in a trace with
   `otlp.graph_parent_by_timing`.

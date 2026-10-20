@@ -487,7 +487,7 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
 ### 수집 provenance (capture)
 
 새로 ingest한 artifact는 adapter가 관측하지 못한 것을 함께 기록하고 `schema_version` 7을
-선언합니다. 그 이전 릴리스가 만든 artifact는 읽고 다시 저장해도 이전 릴리스가 쓰던 그대로입니다
+선언합니다(origin이 `graph_parent_heuristic`인 edge가 있으면 8, 아래 참조). 그 이전 릴리스가 만든 artifact는 읽고 다시 저장해도 이전 릴리스가 쓰던 그대로입니다
 (v2–v6은 바이트까지 같고, v1은 지금처럼 v2로 migration됩니다). provenance가 새로 붙지는 않습니다.
 
 - `trace.capture.gaps`: ingest 경고 하나마다 고정 코드와 개수가 남습니다. 읽을 때는 형식에 맞는
