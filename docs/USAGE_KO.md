@@ -349,8 +349,12 @@ uv run tracegraph inspect otlp.json
 `ingest-otlp`/`ingest-phoenix`를 안내하고, 리스트·JSONL·Phoenix envelope라면 한 형식의
 레코드만 별도 파일로 추출하라고 안내합니다. 레코드가 유효한지는 adapter가 판정하므로 직접
 진단과 명시적 ingest 명령이 받아들이는 입력은 같습니다. 직접 진단은 `ingest-otlp`와 같은 adapter 설정을 쓰므로 보고서가 artifact를 거친
-결과와 바이트 단위로 같고, `--json-out`을 요청하지 않으면 파일을 쓰지 않습니다. OTLP artifact가
-오류 문자열을 그대로 보존한다는 점은 변하지 않습니다(보고서는 `safe-v1`).
+결과와 바이트 단위로 같고, `--json-out`을 요청하지 않으면 파일을 쓰지 않습니다. OTLP artifact는
+기본적으로 오류 문자열을 그대로 보존합니다(보고서는 `safe-v1`). `ingest-otlp --redact-errors`와
+`ingest --redact-errors`는 오류 문자열을 artifact에 남기지 않습니다. 실패한 step은 `error` 상태를
+유지하고 `unknown_fields`에 `error_msg`가 들어가므로, 메시지를 읽는 규칙(`timeout` preset)은 이를
+"없음"이 아니라 "알 수 없음"으로 봅니다. 그래서 이렇게 만든 artifact의 보고서는 직접 진단과 다를 수
+있습니다. span·노드 이름은 그대로 기록됩니다.
 
 파일 안에 trace가 여러 개 있으면 `--trace`로 trace id를 지정합니다. 지정하지 않으면 발견된
 trace id 목록과 함께 종료 코드 2로 끝납니다. artifact는 trace를 하나만 담으므로, artifact에

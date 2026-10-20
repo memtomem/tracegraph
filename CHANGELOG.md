@@ -8,6 +8,18 @@ explicitly.
 
 ## Unreleased
 
+### Added
+
+- **`--redact-errors` on `ingest-otlp` and `ingest`** (#125) leaves error messages out of the
+  artifact. The OTLP and LangGraph adapters record the producer's error text by default
+  (`status.message` and exception events; the error channel's value and a raised exception's
+  `repr`), and `inspect` and `explain` print it; until now only Phoenix ingestion could drop it.
+  With the flag a failed step keeps its `error` status and lists `error_msg` in
+  `unknown_fields`, and nothing else in the artifact changes, so a rule that reads the message
+  (`timeout`) reports `INSUFFICIENT_EVIDENCE` for that side instead of matching nothing. Names are
+  still recorded as given. The default is unchanged. In Python, `LangGraphCheckpointAdapter` and
+  `ingest_snapshot` take `include_error_messages=False`, as `OTLPSpanAdapter` already did.
+
 ### Changed
 
 - **`phoenix diagnose` exits 1, not 2, when `px` is unavailable or its answer cannot be used**

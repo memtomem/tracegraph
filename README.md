@@ -207,8 +207,11 @@ identifiers, and credentials. Missing metrics are reported as `unavailable`, nev
 (identifier-shaped span names only, error messages dropped), but the OTLP and LangGraph
 adapters record the span name and error text they were given: OTLP keeps `status.message`
 and exception messages, and LangGraph stringifies the configured error state channel. Those
-values reach the artifact on disk and are printed verbatim by `inspect` and `explain`. If
-your producer puts prompt text or secrets in span names or error strings, treat artifacts
+values reach the artifact on disk and are printed verbatim by `inspect` and `explain`.
+`ingest-otlp --redact-errors` and `ingest --redact-errors` leave the error text out: a failed
+step keeps its `error` status and lists `error_msg` in `unknown_fields`, so a rule that reads
+the message (the `timeout` preset) reports it as unknown rather than absent. Names are still
+recorded as given. If your producer puts prompt text or secrets in span names, treat artifacts
 from those two adapters as sensitive, or ingest through Phoenix. See "Analysis and output
 guarantees" below.
 
@@ -223,14 +226,16 @@ tracegraph analyze full-dag.json
 ```
 
 `analyze` reads an OTLP span export (JSON or Collector JSONL) directly, with the same adapter
-settings as `ingest-otlp`, so the report is byte-identical to analysing the ingested artifact;
+settings as `ingest-otlp`, so the report is byte-identical to analysing the ingested artifact
+(one ingested with `--redact-errors` can differ where a rule reads the message);
 nothing is written unless `--json-out` asks for a report. The input is identified by shape alone
 (`schema_version` → artifact, `resourceSpans` → OTLP, `spans`/`traces`/`data` → Phoenix); a
 payload carrying both OTLP and Phoenix records is refused, naming the explicit ingest command
 for each format (or, for a list, JSONL or envelope, asking you to extract one format's records). Already have an export? The shortest offline first run is
 `tracegraph analyze your-export.otlp.json` (add `--trace <id>` when the file holds several), then
 copy the `explain` command it prints after saving the artifact it names. The artifact caveat
-above still applies: `ingest-otlp` keeps error text, reports stay `safe-v1`.
+above still applies: `ingest-otlp` keeps error text unless given `--redact-errors`, and
+reports stay `safe-v1`.
 
 The JSON analysis-report contract is versioned at
 [`contracts/analysis-report.schema.json`](contracts/analysis-report.schema.json).
@@ -361,7 +366,7 @@ Known limits:
 - Phoenix exports carry no span links, so their artifacts are parent-only; additional fan-in
   causes may be missing.
 - Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
-  producer's names and error messages.
+  producer's names, and its error messages unless ingested with `--redact-errors`.
 - CI covers Python 3.12 on Linux.
 
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
@@ -407,7 +412,8 @@ with deterministic SHA-256 aliases, and disclose in `warnings` when an alias act
 the report. Trace/step identifiers remain; this is not anonymization.
 Raw artifact names and bytes are not rewritten for report privacy or matching, so the
 artifact — unlike the report — can still carry whatever the producer put in a span name or
-error message. Phoenix ingestion is the exception: it filters at the source, keeping span
+error message (`--redact-errors` on `ingest` and `ingest-otlp` drops the message, not the
+name). Phoenix ingestion is the exception: it filters at the source, keeping span
 names and annotation names and labels only when they are identifier-shaped, and dropping
 status messages. Identifier-shaped is not the same as anonymous: an e-mail address passes.
 `export-review-candidates` output is not passed through the report redactor: its `tool_key`

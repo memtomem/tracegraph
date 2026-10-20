@@ -209,6 +209,7 @@ class LangGraphCheckpointAdapter:
         error_channel: str = "error",
         source_kind: str = "langgraph",
         schedule_graph: Any = None,
+        include_error_messages: bool = True,
     ) -> None:
         self._saver = saver
         self._error_channel = error_channel
@@ -216,6 +217,9 @@ class LangGraphCheckpointAdapter:
         #: A compiled LangGraph graph to ask which tasks are scheduled at the head; see the
         #: module docstring. ``None`` leaves scheduled-but-unwritten tasks unreported.
         self._schedule_graph = schedule_graph
+        #: Off, a failed step keeps its ERROR status but not the error channel's value or the
+        #: exception text, and lists ``error_msg`` as unknown, as OTLP's option of that name does.
+        self._include_error_messages = include_error_messages
 
     # --- TraceAdapter ---
 
@@ -388,14 +392,18 @@ class LangGraphCheckpointAdapter:
                 rewritten_errors += self._rewrote_error(checkpoints[step_id], history)
             if err is not None:
                 step.status = StepStatus.ERROR
-                step.error_msg = err
+                if self._include_error_messages:
+                    step.error_msg = err
+                else:
+                    step.unknown_fields.insert(0, "error_msg")  # sorts before kind and name
 
         # Derived task steps come last: everything above indexes `steps` by checkpoint id
         # (`checkpoints[step_id]`, `key_by_step_id[step_id]`), and a derived id has no entry
         # in either. Building them here also means they inherit each carrying step's *final*
         # seq, after `_topo_seq` may have re-sequenced the whole thread.
         disclosures = self._derive_task_steps(
-            trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges
+            trace_id, steps, checkpoints, key_by_step_id, original_seq, writes_by_step, edges,
+            include_error_messages=self._include_error_messages,
         )
         disclosures.extend(
             self._derive_interrupt_steps(
@@ -463,6 +471,8 @@ class LangGraphCheckpointAdapter:
         original_seq: dict[str, int],
         writes_by_step: dict[str, dict[str, list[tuple[str, Any]]]],
         edges: list[Edge],
+        *,
+        include_error_messages: bool,
     ) -> Disclosures:
         """Add one ERROR step per failed task and return any ingestion disclosures.
 
@@ -506,8 +516,9 @@ class LangGraphCheckpointAdapter:
                         "in LangGraph's task-id algorithm would look like.",
                     )
                 unknown: list[UnknownField] = [] if name else ["kind", "name"]
-                if error is None and not cancelled:
-                    # _error_message's placeholder: the checkpointer kept no exception text.
+                if (error is None or not include_error_messages) and not cancelled:
+                    # _error_message's placeholder (the checkpointer kept no exception text),
+                    # or a message withheld on request.
                     unknown.insert(0, "error_msg")
                 derived_id = f"{step_id}#task:{task_id}"
                 if derived_id in steps or derived_id in derived_ids:
@@ -533,7 +544,7 @@ class LangGraphCheckpointAdapter:
                         # without claiming it failed, and leaves the trace status to the task
                         # that actually raised.
                         status=StepStatus.UNSET if cancelled else StepStatus.ERROR,
-                        error_msg=None if cancelled else message,
+                        error_msg=None if cancelled or not include_error_messages else message,
                         unknown_fields=unknown,
                     ),
                 ))
