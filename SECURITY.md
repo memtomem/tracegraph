@@ -42,19 +42,23 @@ prompts, inputs and outputs, tool arguments and results, raw errors and stacktra
 session/user/project identifiers. Other display text is replaced with a deterministic
 SHA-256 alias, and the report discloses in `warnings` when an alias actually reached it.
 
-The artifact on disk is a different thing. Phoenix ingestion filters at the source, but the
-OTLP and LangGraph adapters record what they were given:
+The artifact on disk is a different thing. Phoenix ingestion filters at the source, but by
+default the OTLP and LangGraph adapters record what they were given:
 
 - OTLP keeps `status.message` and exception messages;
 - LangGraph stringifies the configured error state channel, **and** the `repr` of an
   exception a node raised, which it reads from checkpoint pending writes.
 
-Those values reach the artifact and are printed verbatim by `inspect` and `explain`.
+Those values reach the artifact and are printed verbatim by `inspect` and `explain`, unless
+the trace is ingested with `--redact-errors` (`ingest-otlp` and `ingest` both take it), which
+leaves every error message out and marks it unknown on the step. Span and node names are
+recorded as given either way.
 `export-review-candidates` is likewise not passed through the report redactor: its
 `tool_key` is the raw endpoint span name.
 
 **So: if your producer puts prompt text, customer data, or credentials into span names or
-exception messages, those land in the artifact.** Treat artifacts with the same care as the
+exception messages, those land in the artifact** — the messages only when ingested without
+`--redact-errors`, the names always. Treat artifacts with the same care as the
 traces they came from. Reports, not artifacts, are the artifact you share.
 
 Identifiers are not anonymized in either form — trace and step ids are preserved by design,

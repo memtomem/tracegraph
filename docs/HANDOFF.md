@@ -747,7 +747,7 @@ v2/v3 아티팩트를 생성했다. 현재 판독·canonical 검증·Ladybug 재
 
 1. ~~**Phoenix naive ISO의 UTC 해석**~~ — **해결됨 (2026-09-14, `130cb20` / `8f6c3fa`)**: naive datetime을 UTC로 명시 정규화 (`parsed.replace(tzinfo=timezone.utc)`).
 2. **TREE_PARENT 선택** — **로컬 구현·검증 완료, 착지 대기 (2026-09-15, 브랜치 `feat/tree-parent-origin-preference`)**: EdgeOrigin 우선순위(GRAPH/CHECKPOINT > SPAN_PARENT_FALLBACK > SPAN_LINK > LEGACY) 도입, 레거시 canonical 검증 호환, LadybugStore 라운드트립 보존, 아티팩트 `schema_version: 4` 조건부 스탬핑.
-3. **privacy 기본값**: OTLP `include_error_messages`의 기본값을 `False`로 바꿀지, `--redact-errors` 옵션을 추가할지. README의 범위 설명 정정은 이전 작업에서 완료했다.
+3. ~~**privacy 기본값**~~ — **결정됨 (2026-10-20, #125)**: 기본값은 유지하고 `ingest-otlp`와 `ingest`에 `--redact-errors`를 추가했다. 기본값을 뒤집으면 `timeout` preset 판정과 `analyze`/`ingest-otlp` 바이트 동일성이 함께 바뀐다. (원래 질문: OTLP `include_error_messages`의 기본값을 `False`로 바꿀지, `--redact-errors` 옵션을 추가할지. README의 범위 설명 정정은 이전 작업에서 완료했다.)
 4. **review-candidates 스키마**: candidate 수준이 `additionalProperties: true`라 body 필드가 v1으로 검증된다.
 5. **`phoenix` 종료 코드**: 같은 환경 실패에 `doctor`는 1, `diagnose`는 2를 쓴다.
 6. ~~**LICENSE 부재**~~ — **결정됨(2026-09-12, PR #23)**: Apache-2.0 + DAPADA CLA. 배포명은 `agent-tracegraph`.
@@ -833,7 +833,7 @@ diff와 무관하다** — 로그가 도구 실행 전에 끝나는 것이 판�
 2. **TREE_PARENT 선택**: 가장 이른 원인을 고르므로 `SPAN_LINK`가 containment parent를 이긴다.
    `EdgeOrigin` 우선순위를 도입하면 link를 가진 모든 artifact의 derived layer가 바뀐다.
 3. **privacy 기본값**: OTLP `include_error_messages`의 기본값을 `False`로 바꿀지, `--redact-errors`
-   옵션을 추가할지. 이번에는 README의 범위 설명만 정정했다.
+   옵션을 추가할지. 이번에는 README의 범위 설명만 정정했다. (이후 #125에서 `--redact-errors`로 결정됨.)
 4. **review-candidates 스키마**: candidate 수준이 `additionalProperties: true`라 body 필드가 v1으로 검증된다.
 5. **`phoenix` 종료 코드**: 같은 환경 실패에 `doctor`는 1, `diagnose`는 2를 쓴다.
 6. ~~**LICENSE 부재**~~ — **결정됨(2026-09-12, PR #23)**: Apache-2.0 + DAPADA CLA.

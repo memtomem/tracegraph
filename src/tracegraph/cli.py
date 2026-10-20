@@ -1280,6 +1280,12 @@ def _render_tree(nt: NormalizedTrace) -> None:
     )
 
 
+_REDACT_ERRORS_HELP = (
+    "Leave error messages out of the artifact: a failed step keeps its error status and "
+    "lists its message as unknown. Step names are still recorded as given."
+)
+
+
 @app.command()
 def ingest(
     sqlite: Path = typer.Option(..., help="Path to a LangGraph SqliteSaver DB file."),
@@ -1300,14 +1306,18 @@ def ingest(
             "module, and the graph's state callbacks while reading; never a node."
         ),
     ),
+    redact_errors: bool = typer.Option(False, "--redact-errors", help=_REDACT_ERRORS_HELP),
 ) -> None:
     """Ingest a LangGraph thread's checkpoint history into a portable artifact."""
     from tracegraph.sqlite_snapshot import ingest_snapshot
 
     target = out or artifact.default_path(thread)
     _distinct_paths([sqlite], [target])
-    # Passed only when given, so an ingest without --graph makes exactly the call it always has.
+    # Passed only when given, so an ingest without --graph or --redact-errors makes exactly the
+    # call it always has.
     extra: dict[str, Any] = {}
+    if redact_errors:
+        extra["include_error_messages"] = False
     if graph is not None:
         from tracegraph.graph_ref import load_graph
 
@@ -1328,6 +1338,7 @@ def ingest_otlp(
     file: str = typer.Option(..., "--file", "-f", help="OTLP JSON/JSONL span export (resourceSpans), or '-' for stdin."),
     trace: str = typer.Option(None, "--trace", "-t", help="traceId to ingest (default: the file's only trace)."),
     out: Path = typer.Option(None, "--out", "-o", help="Artifact path (default <traceId>.json)."),
+    redact_errors: bool = typer.Option(False, "--redact-errors", help=_REDACT_ERRORS_HELP),
 ) -> None:
     """Ingest one trace from an OpenInference/OTLP span export into a portable artifact."""
     from tracegraph.adapters import OTLPSpanAdapter
@@ -1336,7 +1347,9 @@ def ingest_otlp(
         # Bounded read through the common size-limited boundary (from_file would
         # read_text the whole file with no ceiling). KeyError joins the usual load
         # errors: the adapter raises it for an unknown/missing trace id.
-        adapter = OTLPSpanAdapter.from_json(_read_source(file))
+        adapter = OTLPSpanAdapter.from_json(
+            _read_source(file), include_error_messages=not redact_errors
+        )
         trace = _select_trace(adapter, trace, what="file")
         nt = _normalize_read(adapter.ingest(trace))
     except (*_LOAD_ERRORS, KeyError) as exc:

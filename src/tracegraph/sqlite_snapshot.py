@@ -36,7 +36,13 @@ def _inert_serde():
 
 
 def ingest_snapshot(
-    source: Path, thread: str, *, error_channel: str, timeout: float = 30, graph: Any = None
+    source: Path,
+    thread: str,
+    *,
+    error_channel: str,
+    timeout: float = 30,
+    graph: Any = None,
+    include_error_messages: bool = True,
 ) -> RawTrace:
     from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -64,7 +70,10 @@ def ingest_snapshot(
             with closing(sqlite3.connect(str(snapshot), check_same_thread=False)) as conn:
                 saver = SqliteSaver(conn, serde=_inert_serde())
                 return LangGraphCheckpointAdapter(
-                    saver, error_channel=error_channel, schedule_graph=graph
+                    saver,
+                    error_channel=error_channel,
+                    schedule_graph=graph,
+                    include_error_messages=include_error_messages,
                 ).ingest(thread)
     except sqlite3.Error as exc:
         raise ValueError("cannot read SQLite checkpoint snapshot") from exc
