@@ -4,9 +4,9 @@
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `4931a33`(PR #114 병합)다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
-- **PyPI 최신은 여전히 0.5.0이다.** `## Unreleased`에는 아래 이전 절의 항목(#85·#79·#82·#93·#60, #90·#96 문서)에
-  이번 세션의 수정 7개가 더해졌다. 다음 릴리스에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의
-  `## Unreleased`다:
+- **PyPI 최신은 여전히 0.5.0이고, 0.6.0을 준비 중이다.** release-prep PR이 `## Unreleased`를
+  `## 0.6.0 - 2026-10-20`으로 옮겼다. 거기에는 아래 이전 절의 항목(#85·#79·#82·#93·#60, #90·#96 문서)과 이번 세션의
+  수정 7개가 있다. 0.6.0에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## 0.6.0`이다:
   - **cost 상한(PR #108).** 끝까지 풀어 쓴 길이가 64자(`model.MAX_COST_CHARS`)를 넘는 cost는 `analyze`가 합산하지
     않고, 총액을 보류하면서 상한을 밝히는 별도 note를 붙인다. OTLP ingest는 그런 값을 정규화해 저장하지 않고, 읽을 수
     없는 값으로 다뤄 `otlp.unreadable_total_cost`·`otlp.unreadable_component_cost`로 공개한다. model 자체는 cost
@@ -84,8 +84,9 @@
 
 ### 남은 결정과 후속 항목
 
-1. **다음 릴리스:** `## Unreleased`가 쌓여 있다. 새 명령(`summarize`)과 새 JSON 계약이 있으므로 minor다. 릴리스할지는
-   소유자가 정한다. 절차는 [릴리스 런북](releasing.md)이다.
+1. **0.6.0 릴리스:** 새 명령(`summarize`)과 새 JSON 계약이 있어 minor다. release-prep PR 다음 단계는 [릴리스
+   런북](releasing.md)의 3~5단계다: merge 뒤 `tests` 통과 확인, `test-v0.6.0` rehearsal(TestPyPI, 환경 승인 필요),
+   게시된 파일 검증, 같은 커밋에 `v0.6.0`, PyPI 확인, GitHub Release(prerelease).
 2. **측정하지 못한 것:** lone surrogate가 `check`에서 crash하는지는 재지 못했다. 시험 입력이 capture provenance가 없어
    `check`가 alias 단계 전에 멈췄다. 같은 helper를 쓰므로 #107이 함께 고쳤을 것으로 본다.
 3. **알려진 한계(문서화, 고치지 않음):** #90·#96. README와 CHANGELOG의 Known limitations에 있다.

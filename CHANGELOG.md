@@ -6,7 +6,7 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.6.0 - 2026-10-20
 
 ### Added
 
@@ -45,8 +45,9 @@ explicitly.
   | fan, `tool-retry-failure-near` | 927 → 74 MiB, 3.2 → 2.1 s | 1470 → 613 MiB (Cypher) |
 
   The Cypher rows stay high because LadybugDB buffers the full result set; an empty store
-  already takes about 300 MiB. Output, exit codes and error precedence are unchanged, and
-  `find_matches` returns the same list for every caller. Time still grows with the match
+  already takes about 300 MiB. The matches selected, their order, the footer total, exit codes
+  and error precedence are unchanged, and `find_matches` returns the same list for every caller.
+  Time still grows with the match
   count. A mode that stops early and reports no total was considered and not built.
   `LadybugStore` gains `first_matches(pattern, n)`; `tracegraph.analysis.patterns` gains
   `iter_matches` and `first_matches`.
@@ -56,10 +57,12 @@ explicitly.
 - **Boundaries that promise `ValueError` no longer leak an error from describing the one they
   caught** (#109). Naming a caught exception runs caller code: `str(exc)` calls its `__str__`,
   and a metaclass can make the type's `__name__` a property. When that raised, its error
-  escaped instead: from `artifact.dumps()` and `analyze()` on a trace whose dump fails, from
-  LangGraph ingest when the saver's listing or a supplied `schedule_graph` fails, and from
-  `--graph` when the module fails to import. These now describe the exception through one guard
-  that falls back to fixed text, and uses only a name or message that is a plain `str`.
+  escaped instead: from LangGraph ingest when the saver's listing or a supplied `schedule_graph`
+  fails, and from `--graph` when the module fails to import. The validated copy that
+  `artifact.dumps()` and `analyze()` use since #82 and #93 (both in this release) named its
+  caught exception the same way and is hardened too. These now describe the exception through
+  one internal guard (`tracegraph._errors`) that falls back to fixed text, and uses only a name or
+  message that is a plain `str`.
   Ordinary exceptions are described exactly as before. `artifact.from_obj()` on a schema-v1
   payload also refuses, as `ValueError`, an edge sequence that raises `SystemExit` or another
   `BaseException` (the current schema already did for `SystemExit`), or whose type check
@@ -87,7 +90,8 @@ explicitly.
   million-digit total into the report. OTLP ingest wrote such a value out in full, so a 10-byte
   attribute `"1e99999999"` became a 100,000,000-character `total_cost` in the artifact. A cost is
   now read only if, written out in full, it is at most 64 characters (`model.MAX_COST_CHARS`),
-  checked from its digits and exponent without writing it out. `analyze` withholds the total
+  checked from its digits and exponent without writing it out (`model.cost_is_bounded(Decimal)`).
+  `analyze` withholds the total
   with its own note, as for an unreadable cost; OTLP ingest treats a longer cost as unreadable,
   so the total and component costs are disclosed as `otlp.unreadable_total_cost` and
   `otlp.unreadable_component_cost` as before, and a readable alias is still used. Artifacts are
@@ -96,8 +100,9 @@ explicitly.
 
 - **A lone surrogate in a producer string no longer ends a command in a traceback** (#101). JSON
   can carry one (`"\ud800"`), and the artifact loads and validates, but strict UTF-8 refused it
-  in several places: `analyze` and `summarize` (and `check`, which shares the helper) hashing a
-  name into its `redacted:` alias; `ingest-otlp` without `--out` hashing the trace id into the default file
+  in several places: `analyze` (and `check` and the new `summarize`, which share the helper)
+  hashing a name into its `redacted:` alias; `ingest-otlp` without `--out` hashing the trace id
+  into the default file
   name; `export-incident-memo` hashing the run id; `inspect`, `explain` and `query` writing the
   name to the terminal; and LangGraph ingest hashing a routing channel into a candidate task id.
   The three hashes now encode with `surrogatepass`, so every other string hashes to the same
@@ -108,8 +113,8 @@ explicitly.
 - **CLI output prints an emoji code in a producer string as written** (#102). The CLI's Rich
   consoles kept emoji substitution on, and escaping markup does not turn it off, so a step named
   `:ok:` printed as 🆗 in `query`, `inspect`, `explain` and `analyze` while the artifact and the
-  JSON reports held `:ok:`. Both consoles now have it off, as `summarize` already did for its own
-  output. No text the CLI prints itself used an emoji code.
+  JSON reports held `:ok:`. Both consoles now have it off, so the new `summarize` prints the same
+  way. No text the CLI prints itself used an emoji code.
 
 - **`artifact.from_obj()` on a schema-v1 payload raises only `ValueError`** (#103). When reading
   a caller-supplied lazy edge sequence failed, the migration formatted the exception into its
@@ -126,14 +131,17 @@ explicitly.
   copy the model validates, the same one `artifact.dumps()` and the writers use, so a value the
   model coerces (`"0"` for a `seq`) is analyzed as it would be read and the caller's trace is
   left unchanged. `analyze()` and the memo still accept structurally sound but non-canonical
-  traces; `check.evaluate()` still requires the canonical form. Reports for
-  valid traces are unchanged. That copy is now made from a Python-mode dump: the JSON-mode dump
+  traces; `check.evaluate()` still requires the canonical form. The validated copy does not change
+  the report for a valid trace; cost totals change separately in this release (#100, #111). That
+  copy is now made from a Python-mode dump: the JSON-mode dump
   turned a NaN in `trace.run_id` or `trace.links_preserved` into `null`, which validated, so
   `dumps()` and both writers erased the value instead of refusing it. It no longer depends on
   the warnings filter either: under `-W error` a coercible value used to be refused through
-  pydantic's serializer warning. Cost on a 6000-step chain, best of 7: `analyze()` 0.25–0.27 s
+  pydantic's serializer warning. Cost on a 6000-step chain, best of 7, measured in PR #95 against
+  its parent `2eaa403` (which already had #82): `analyze()` 0.25–0.27 s
   → 0.30–0.32 s, with a baseline 0.57–0.58 s → 0.69–0.70 s, `check.evaluate()` 0.65–0.67 s →
   0.78–0.79 s, `build_incident_memo()` 0.016 s → 0.044 s.
+
 - **`artifact.dumps()` raises only `ValueError`** (#82). A trace changed in place after it was
   built (pydantic does not revalidate on attribute assignment) could make it raise a raw
   `TypeError` (`seq = "zero"`, `steps = None`, `edges = None`) or write a field the readers
@@ -144,12 +152,16 @@ explicitly.
   `trace = None`. A value the model coerces (`"0"` for a `seq`) is written as it would be read.
   A lazy sequence that fails while being serialized, through `dumps()` or either writer, is now
   reported as a `ValueError` too, instead of whatever it raised. `dumps()` still checks fields,
-  not structure: a dangling edge or a stale trace status is written, because `analyze()`
-  digests such traces. Unknown-field flags without a capture record now reach a `dumps()`
+  not structure: a dangling edge or a stale trace status is written. Checking structure there
+  would refuse the structurally sound but non-canonical traces that `analyze()` digests, such as
+  one with a stale trace status (`analyze()` itself refuses a dangling edge). Unknown-field flags
+  without a capture record now reach a `dumps()`
   caller as `ValidationError`, as they already did for the writers. A valid trace is
-  serialized byte for byte as before. Cost on a 6000-step chain: `dumps()` 0.15 s → 0.20 s;
+  serialized byte for byte as before. Cost on a 6000-step chain, measured in PR #94 (its helper
+  was changed again by #93): `dumps()` 0.15 s → 0.20 s;
   `analyze()` digests the current trace through it, a baseline comparison and `check` digest
   both.
+
 - **An error already in the parent graph is no longer recorded again around a subgraph** (#85).
   A LangGraph checkpoint is an error where the error channel holds one and none of the
   checkpoints it was built from did, but the check read only a checkpoint's causal parents, and
@@ -165,6 +177,7 @@ explicitly.
   node that rewrote the still-set channel is disclosed as `langgraph.rewritten_error_channel`
   instead, with its stderr line, as for any such write since #47; `check` reads that gap as
   before.
+
 - **A fork copy is no longer a second failure.** `update_state(..., as_node="__copy__")`
   copies a checkpoint and runs no node, but it is linked to the copied checkpoint's parent, so
   copying the checkpoint where an error first appeared (in the root graph, or a subgraph's
