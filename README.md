@@ -190,6 +190,15 @@ Phoenix exports preserve span parents but currently do not expose the original O
 links. These artifacts are explicitly marked `causal_fidelity=parent_only`; tracegraph warns
 that additional fan-in causes may be missing instead of claiming a complete DAG.
 
+Phoenix's own export gives times as ISO strings. A time given as a number is read as epoch
+nanoseconds only from 10^17 up; a smaller one (seconds, milliseconds, a relative offset) is in
+a unit tracegraph cannot tell, so it is reported as unavailable and disclosed as
+`otlp.unreadable_timestamp`. Such numbers still order spans for one purpose: when several
+spans carry the `graph.node.id` that a span names as its `graph.node.parent_id`, and that span
+and every candidate start at such a number, the nearest preceding candidate by those numbers is
+the parent. That assumes the export gives every time in one unit, and it is disclosed under
+`otlp.graph_parent_by_timing` with its own warning line, so `check` treats the edge as heuristic.
+
 The exact Phoenix CLI and server versions used by CI are centrally pinned. See the
 [Phoenix runtime pin maintenance runbook](docs/phoenix-cli-contract.md) for the controlled
 upgrade and contract-verification procedure, and the

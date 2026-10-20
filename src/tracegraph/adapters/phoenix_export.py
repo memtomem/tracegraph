@@ -79,6 +79,38 @@ def _nanos(value: Any) -> Any:
     return str(int(parsed.timestamp() * 1_000_000_000))
 
 
+def _start_order(value: Any) -> int | float | None:
+    """A start time below the epoch-nanosecond floor, as the number it is, or ``None``.
+
+    Its unit is unknown, so it is no time, but within one export it still orders spans: the
+    span builder uses it only to choose among several candidate loop parents, and discloses
+    that it did. It follows ``_nanos``'s branches, so an ISO string (a compact one such as
+    ``20260714_123456`` included) never reaches the number path. A bool or bytes value is not
+    taken as a number here, although ``_nanos`` refuses those as times too.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        return value if math.isfinite(value) and int(value) < _MIN_EPOCH_NANOS else None
+    if isinstance(value, int):
+        return value if value < _MIN_EPOCH_NANOS else None
+    if not isinstance(value, str):
+        return None
+    number: int | None
+    if value.isdigit():
+        try:
+            number = int(value)
+        except ValueError:  # a non-ASCII digit, or past the interpreter's int-string limit
+            return None
+    else:
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return None
+        except ValueError:
+            number = _parse_nanos(value)
+    return number if number is not None and number < _MIN_EPOCH_NANOS else None
+
+
 _OPERATION_NAME = re.compile(r"[A-Za-z0-9_.:/#@-]{1,200}")
 
 
@@ -202,6 +234,7 @@ class PhoenixExportAdapter:
             include_error_messages=False,
             preserve_unset_status=True,
             evaluation_channel="_tracegraph_evaluations",
+            start_order_channel="_tracegraph_start_order",
         ).ingest(trace_id)
         if unreadable_scores:
             disclosures = Disclosures()
@@ -257,4 +290,5 @@ class PhoenixExportAdapter:
             "attributes": _attrs(span),
             "events": _span_array(span, "events"),
             "_tracegraph_evaluations": _evaluations(span),
+            "_tracegraph_start_order": _start_order(_first(span, "start_time", "startTime")),
         }

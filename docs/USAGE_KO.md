@@ -501,7 +501,10 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
   표시됩니다. 표시된 이름은 화면용으로 그대로 남습니다. LangGraph task id로 이름을 확인한
   task·interrupt·scheduled step은 표시하지 않습니다.
 - OTLP의 `graph.node.parent_id`를 시작 시각으로 골랐거나 따르지 못하고 `parentSpanId`를 쓴
-  경우에도 gap으로 남고, stderr 경고가 새로 한 줄 나옵니다.
+  경우에도 gap으로 남고, stderr 경고가 새로 한 줄 나옵니다. Phoenix export에서 그 span과 후보가 모두
+  10^17보다 작은 숫자로 시작하면(단위를 알 수 없어 시각으로는 읽지 않는 값), 그 숫자의 순서로 가장
+  가까운 앞 후보를 고르고 같은 `otlp.graph_parent_by_timing` gap에 셉니다. export 전체가 한 단위를
+  쓴다고 가정한다는 경고가 따로 한 줄 나옵니다.
 - LangGraph 오류 채널이 이미 오류를 담고 있는데 노드가 그 채널을 다시 쓰면
   `langgraph.rewritten_error_channel` gap이 됩니다. 다시 실패한 것인지, state 전체를 돌려주는 노드가
   값을 넘긴 것인지(reducer가 있으면 이때도 값이 바뀝니다) checkpoint만으로는 구분할 수 없어서
