@@ -1,14 +1,17 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-20, `2ea927c`(v0.7.0) 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-20, `c4be406`(v0.8.0) 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `4931a33`(PR #114 병합)다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PR #118(`a0d157e`)이 `uv.lock`을 바꿨으므로 그 뒤
   `uv sync --locked --extra cypher`로 venv도 맞춘다. 2026-10-19~20 세션처럼 worktree가 main venv를 공유하면 그
   venv도 맞춰야 한다. 이 Mac에서 sync 전 main venv의 langgraph는 1.2.2였다.
-- **0.8.0을 준비 중이다(PR #139·#141·#144).** release-prep PR이 `## Unreleased`를 `## 0.8.0 - 2026-10-20`으로
-  옮겼다. memo·`analyze`·CLI 출력 문구와 Phoenix loop 부모 선택이 바뀌므로 patch가 아니라 minor다. 사용자에게
-  보이는 변경은 셋이다:
+- **0.8.0 공개 완료(2026-10-20).** `agent-tracegraph` 0.8.0이 PyPI 최신이다. `test-v0.8.0`과 `v0.8.0`이 모두
+  `c4be406`(PR #146)을 가리킨다. 업그레이드 주의는
+  [GitHub Release v0.8.0](https://github.com/memtomem/tracegraph/releases/tag/v0.8.0)의 "Before you upgrade"에
+  있다. PR #145가 `## Unreleased`를 `## 0.8.0 - 2026-10-20`으로 옮겼고, PR #146이 #136 예시를 각각 독립된
+  export로 고쳤다. memo·`analyze`·CLI 출력 문구와 Phoenix loop 부모 선택이 바뀌므로 patch가 아니라 minor다.
+  사용자에게 보이는 변경은 셋이다:
   - **Phoenix loop 부모(#136, PR #139).** 0.7.0부터 읽을 수 없게 된 `10**17` 미만 숫자 시각이라도, span과 모든
     후보가 그런 숫자로 시작하면 그 숫자로 가장 가까운 앞 후보를 부모로 고른다. 0.7.0이 거부하던 예(a·b가
     1783987200·1783987201, c가 1783987202에 `parent_id` 없음)는 다시 b를 부모로 받아들인다. 0.7.0이 c의
@@ -29,7 +32,7 @@
   - **`explain`·`query --explain`·`inspect`(#140, PR #144).** 같은 경고를 붙이고, 그런 trace에서는 fan-in 문구가
     "real causes"와 "trust this raw chain"을 쓰지 않는다. 코드가 없는 trace의 출력은 바이트 단위로 같다.
   artifact schema는 v7 그대로이고, 새 capture gap 코드도 없다.
-- **0.7.0 공개 완료(2026-10-20).** `agent-tracegraph` 0.7.0이 PyPI 최신이다. `test-v0.7.0`과 `v0.7.0`이 모두
+- **0.7.0 공개 완료(2026-10-20).** `test-v0.7.0`과 `v0.7.0`이 모두
   `2ea927c`(PR #135)를 가리킨다. 업그레이드 주의는
   [GitHub Release v0.7.0](https://github.com/memtomem/tracegraph/releases/tag/v0.7.0)의 "Before you upgrade"에
   있다. PR #134가 `## Unreleased`를 `## 0.7.0 - 2026-10-20`으로 옮겼고, PR #135가 #124의 영향을 보탰다. #122의
@@ -114,6 +117,8 @@
 | #139 | `1c538cd` | #136: 단위를 모르는 Phoenix 시작 숫자로 loop 부모를 고른다(`_tracegraph_start_order`, `otlp.graph_parent_by_timing`으로 센다) |
 | #141 | `c992382` | #138: `analyze` 경고와 memo disclosure, `model.HEURISTIC_EDGE_GAP_CODES` |
 | #144 | `3038fe4` | #140: `explain`·`query --explain`·`inspect`의 휴리스틱 부모 경고와 fan-in 문구. 옵션 2는 #142, 문서 문구는 #143 |
+| #145 | `0026cf1` | 0.8.0 준비: 버전 0.7.0 → 0.8.0, `uv.lock`, CHANGELOG 날짜. #136 항목에 0.7.0과 달라지는 경우(순환 거부, 실패 분류, step 번호)를 잰 대로 적었다 |
+| #146 | `c4be406` | 0.8.0 노트의 #136 예시 세 개를 각각 독립된 export로 고쳤다(문서만). 릴리스 커밋 |
 
 ### 이번 세션의 결정(2026-10-19~20, PR #105~#114)
 
@@ -227,6 +232,32 @@
      만들었다. 노트는 claims 리뷰 2라운드를 거쳤다(1건, 0건). 1라운드의 1건은 요약이 CHANGELOG의 범위를 빠뜨린
      것이었다: 10^17 하한은 숫자뿐 아니라 숫자 문자열과 `int()`가 읽는 부호·공백·밑줄 문자열에도 적용된다.
      "0.6.1에서는 1970년 근처 시각"이 그 문자열에도 맞는지는 `git show v0.6.1:`의 `_nanos`로 확인했다.
+8. **0.8.0 릴리스: 완료(2026-10-20).** Phoenix loop 부모 선택과 출력 문구가 바뀌므로 minor다.
+   [릴리스 런북](releasing.md)대로 했다.
+   - 준비 PR #145의 로컬 게이트: `pytest` 2769 passed / 12 skipped, `twine@7.0.0 check` 통과, sdist 40 members
+     모두 허용 목록 안. 게시된 0.7.0의 `validate`가 0.8.0이 쓴 artifact 4개(OTLP 두 휴리스틱 코드 각각과 둘 다
+     없는 것, 0.7.0이 거부하는 Phoenix 숫자 시각 예)를 모두 받아들인다(schema v7).
+   - CHANGELOG claims 리뷰는 커밋 전 2라운드(major 1, 2)와 머지 뒤 #136 집중 1라운드(major 1)였다. 찾은 것:
+     0.7.0이 받던 export의 순환 거부, 실패 분류 변화, step 번호 변화, 그리고 예시가 한 export처럼 읽히는 문제
+     (PR #146). 2라운드 4건 중 1건은 1라운드 수정이 쓴 전칭 규칙이었다. 모두 게시된 0.7.0과 main을 나란히
+     돌려 재현했고, `diagnose`는 가짜 `px`로 쟀다.
+   - TestPyPI 예행: [run 39435637600](https://github.com/memtomem/tracegraph/actions/runs/39435637600).
+     첫 publish는 attestation 생성 중 GitHub OIDC 토큰 요청이 503으로 실패했다(업로드 전, 두 index 모두 404
+     확인). 같은 run의 실패 job만 다시 돌려(attempt 2) 성공했다. 로그의 `repository_url: https://upload.pypi.org/legacy/`
+     는 action의 옛 입력 이름의 기본값이고, 실제 입력 `repository-url`은 TestPyPI였다.
+     production: [run 39436761467](https://github.com/memtomem/tracegraph/actions/runs/39436761467).
+   - wheel `7e868a1e…877d`, sdist `7f369b84…3fdf`. 예행 build, TestPyPI 파일, production build, PyPI 파일이
+     바이트 단위로 같고, 두 index 모두 두 파일의 provenance가 HTTP 200이다. wheel은 PR #145 시점 로컬 빌드와도
+     같다(#146은 문서만 바꿨다).
+   - TestPyPI와 PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치(Python 3.12.11)에서 `scripts/verify_wheel.py`
+     통과(cypher backend parity 포함). 두 index의 description 모두 `v0.8.0`의 `README.md`와 바이트 단위로 같다.
+     게시 직후 `uvx --refresh --from agent-tracegraph==0.8.0`은 "no version"이었다. simple index에 0.8.0이
+     보인 뒤 다시 돌려 설치됐다.
+   - [GitHub Release v0.8.0](https://github.com/memtomem/tracegraph/releases/tag/v0.8.0)은 prerelease로
+     만들었다. 노트는 claims 리뷰 2라운드를 거쳤다(major 2·minor 2, minor 2). 1라운드: "모든 causal chain 뷰"는
+     과장(경고 없는 `query`가 있다), "모든 시각이 한 단위"라는 가정이 빠짐, `check`가 그 edge를 휴리스틱으로
+     보아 `topology-unchanged:shape`가 `INSUFFICIENT_EVIDENCE`(exit 3, 직접 잼), "in this chain" 문구 변경 누락.
+     2라운드: `phoenix diagnose`도 경고를 붙인다, 0.6.1과의 step 순서 단서.
 
 ---
 
