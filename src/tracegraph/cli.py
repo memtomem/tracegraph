@@ -33,7 +33,8 @@ from tracegraph import artifact
 from tracegraph.input_validation import loads as load_json
 from tracegraph.analysis import PRESETS
 from tracegraph.analysis import check as regression_check
-from tracegraph.analysis.diagnose import AnalysisReport
+from tracegraph.analysis.diagnose import HEURISTIC_PARENT_FIDELITY_WARNING, AnalysisReport
+from tracegraph.analysis.diagnose import has_heuristic_edges
 from tracegraph.analysis.diagnose import analyze as build_analysis
 from tracegraph.analysis.diagnose import save_atomic as save_analysis_report
 from tracegraph.analysis import motifs
@@ -1278,6 +1279,10 @@ def _render_tree(nt: NormalizedTrace) -> None:
         f"\n[dim]{len(nt.steps)} steps · {n_tool} tool · "
         f"{n_err} error · {n_lossy} lossy-projection{paused}{scheduled}[/]"
     )
+    # The tree projects CAUSED_BY, so a heuristic parent can place a step whether or not
+    # any step is lossy.
+    if has_heuristic_edges(nt):
+        console.print(f"[yellow]⚠ {HEURISTIC_PARENT_FIDELITY_WARNING}[/]")
 
 
 _REDACT_ERRORS_HELP = (
@@ -1626,7 +1631,9 @@ def explain(
     """Trace a step's raw causal chain back toward its root cause."""
     store = _store_from_artifact(artifact_path, backend)
     try:
-        steps = store.trace().steps_by_id()
+        trace = store.trace()
+        steps = trace.steps_by_id()
+        heuristic = has_heuristic_edges(trace)
         # An exact full-id match always wins — even when that id is also a *suffix* of a longer
         # namespaced id (e.g. "abc" vs "ns:abc"). Only fall back to suffix matching when the
         # input isn't itself a full step id, so a valid id is never rejected as "ambiguous".
@@ -1651,11 +1658,20 @@ def explain(
     for s in result.chain:
         flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
         console.print(f"  ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
-    if result.is_lossy:
+    # Where the capture record says a parent may have been chosen heuristically, the chain is
+    # not called real or trustworthy; elsewhere the wording is unchanged.
+    if result.is_lossy and heuristic:
+        console.print(
+            "\n[yellow]Some steps had more than one recorded cause; the single-parent tree view "
+            "drops some of them, and this raw chain lists every recorded ancestor.[/]"
+        )
+    elif result.is_lossy:
         console.print(
             "\n[yellow]Some steps had multiple real causes; the single-parent tree view "
             "is lossy for them — trust this raw chain, not the tree.[/]"
         )
+    if heuristic and result.chain:
+        console.print(f"\n[yellow]⚠ {HEURISTIC_PARENT_FIDELITY_WARNING}[/]")
 
 
 @app.command()
@@ -1786,16 +1802,26 @@ def query(
                     # Same fallback label as `tracegraph explain` and the tree renderers.
                     console.print(f"    ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
                 # Causal-honesty signal: when the matched effect (or anything in the chain)
-                # has more than one real cause, the single-parent tree projection dropped
+                # has more than one recorded cause, the single-parent tree projection dropped
                 # at least one. `tracegraph explain` surfaces this same warning — `query
                 # --explain` must too, or a fan-in effect's lossiness becomes invisible
                 # (target lossiness doesn't show up in the per-step ⚠ flags above, since
                 # we only flag chain ancestors there).
-                if result.is_lossy:
+                # A lossy step can be an ancestor outside the matched path, hence "chain".
+                heuristic = has_heuristic_edges(traces_by_id[m.trace_id])
+                if result.is_lossy and heuristic:
+                    console.print(
+                        "    [yellow]⚠ some steps in this chain had more than one recorded cause — "
+                        "the single-parent tree drops some of them; this raw chain lists every "
+                        "recorded ancestor.[/]"
+                    )
+                elif result.is_lossy:
                     console.print(
                         "    [yellow]⚠ some steps in this match had multiple real causes — "
                         "trust this raw chain, not the tree.[/]"
                     )
+                if heuristic and result.chain:
+                    console.print(f"    [yellow]⚠ {HEURISTIC_PARENT_FIDELITY_WARNING}[/]")
 
         n_traces = len({m.trace_id for m in matches})
         suffix = f" — truncated from {total}" if truncated else ""

@@ -7,7 +7,7 @@ tracegraph ingests agent execution traces that already exist (LangGraph checkpoi
 Phoenix CLI exports, and OpenInference/OTLP spans) into a **normalized causal graph**,
 then runs analyses the mainstream observability tools don't:
 
-- **`explain`** — walk backward from a failure over the *raw* causal graph to every real cause.
+- **`explain`** — walk backward from a failure over the *raw* causal graph to every recorded cause.
 - **`diff`** — exact structural regression diff between two runs (rooted-tree / AHU isomorphism).
 - **cross-trace pattern matching** — e.g. "tool X → retry → tool X → failure" across all runs.
 
@@ -438,8 +438,10 @@ When the artifact records that a causal parent was chosen heuristically at inges
 (`otlp.graph_parent_by_timing` or `otlp.graph_parent_fallback`), `analyze` adds a warning for
 that side and the memo a fidelity disclosure. The record does not say which edge, so a memo of
 a trace with `otlp.graph_parent_by_timing` writes every `graph_parent` edge as "preceded by
-(graph parent, possibly chosen heuristically)" instead of "caused by". `explain`, `query
---explain` and `inspect` do not show the caveat yet.
+(graph parent, possibly chosen heuristically)" instead of "caused by". `inspect` prints the
+same caveat under its tree, and `explain` and `query --explain` under every chain that has at
+least one cause; there their fan-in note no longer calls the causes real or says to trust the
+chain.
 Explicit OTLP OK takes precedence over handled exception events on new ingestion; old
 artifacts are not reinterpreted.
 A span whose status is UNSET and that carries no exception event (one with a message or

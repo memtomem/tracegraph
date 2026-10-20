@@ -20,8 +20,17 @@ explicitly.
   edge was chosen that way, so in a trace with `otlp.graph_parent_by_timing` the memo writes every
   `graph_parent` edge as "preceded by (graph parent, possibly chosen heuristically)" instead of
   "caused by"; checkpoint parents and span links keep "caused by". Reports and memos of traces
-  without these codes are unchanged. `explain`, `query --explain` and `inspect` still show no
-  caveat (#140).
+  without these codes are unchanged.
+
+- **`explain`, `query --explain` and `inspect` say when a causal parent was chosen heuristically**
+  (#140). They read the same two codes: `inspect` prints the caveat `analyze` uses under its
+  tree, and `explain` and `query --explain` under every chain with at least one cause (a root
+  step has no parent to qualify). In such a trace their fan-in note no longer says "multiple real
+  causes" or "trust this raw chain, not the tree"; it says the single-parent tree drops some
+  recorded causes and the raw chain lists every recorded ancestor, and the `query --explain` note
+  says "in this chain" rather than "in this match", since the step with several causes can be an
+  ancestor outside the match. Output for traces without these codes is unchanged. `analyze` still
+  classifies failures through a `graph_parent` edge as it did.
 
 - **A Phoenix loop parent is chosen by start numbers whose unit is unknown again** (#136). Since
   0.7.0 a Phoenix time given as a number below 10^17 is reported as unavailable, and with it the
