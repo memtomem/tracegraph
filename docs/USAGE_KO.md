@@ -122,7 +122,7 @@ uv run tracegraph inspect A.json
 
 ## 실패 원인 따라가기: explain
 
-`explain`은 특정 step에서 시작해 그 step의 실제 원인들을 거꾸로 따라갑니다.
+`explain`은 특정 step에서 시작해 그 step의 기록된 원인들을 거꾸로 따라갑니다.
 
 먼저 `inspect` 출력이나 JSON에서 실패 step id를 확인한 뒤 실행합니다.
 
@@ -139,6 +139,11 @@ uv run tracegraph explain A.json <step_id_suffix>
 출력의 `←` 방향은 "이전 원인"을 뜻합니다. 예를 들어 `call_tool ← plan ← input`
 처럼 보이면 `call_tool` 실패가 `plan`, `input`에서 이어진 실행 경로 위에 있다는
 뜻입니다.
+
+ingest 단계에서 부모를 시작 순서로 고르거나 span parent로 대신한 trace라면(capture 기록의
+`otlp.graph_parent_by_timing`, `otlp.graph_parent_fallback`), 원인이 하나 이상인 체인 아래에
+그 체인이 추론된 것일 수 있다는 경고가 붙습니다. 어느 edge가 그렇게 골라졌는지는 기록에
+없으므로 경고는 trace 단위입니다.
 
 ## 두 실행 비교하기: diff
 
