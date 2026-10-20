@@ -1,6 +1,100 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-19, `ebf09a2` 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-20, `4931a33` 기준 (Asia/Seoul)
+
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `4931a33`(PR #114 병합)다. 시작 전에
+  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
+- **PyPI 최신은 여전히 0.5.0이다.** `## Unreleased`에는 아래 이전 절의 항목(#85·#79·#82·#93·#60, #90·#96 문서)에
+  이번 세션의 수정 7개가 더해졌다. 다음 릴리스에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의
+  `## Unreleased`다:
+  - **cost 상한(PR #108).** 끝까지 풀어 쓴 길이가 64자(`model.MAX_COST_CHARS`)를 넘는 cost는 `analyze`가 합산하지
+    않고, 총액을 보류하면서 상한을 밝히는 별도 note를 붙인다. OTLP ingest는 그런 값을 정규화해 저장하지 않고, 읽을 수
+    없는 값으로 다뤄 `otlp.unreadable_total_cost`·`otlp.unreadable_component_cost`로 공개한다. model 자체는 cost
+    문자열의 길이를 검사하지 않는다. `model`에 `MAX_COST_CHARS`와
+    `cost_is_bounded`가 새로 생겼다. load 시점에 artifact를 거부하지는 않는다.
+  - **cost 합계와 baseline delta가 정확해졌다(PR #113).** 정밀도 160에 `Inexact`를 trap한다. 유효숫자가 28자리를
+    넘는 합계는 이제 반올림하지 않은 값이 나온다. 그래도 반올림이 필요하면 총액(또는 delta만)을 note와 함께 보류한다.
+    `1.00 + 1.00`은 여전히 `2.00`이다.
+  - **CLI 출력.** 두 모듈 콘솔이 `emoji=False`라서 `:ok:` 같은 이름이 그대로 나온다(PR #106). `main()`이 열린
+    stdout·stderr를 `errors="backslashreplace"`로 다시 설정하므로, 인코딩할 수 없는 문자는 crash 대신 escape로
+    나온다(PR #107).
+  - **해시.** `redacted:` alias, 기본 artifact 파일 이름, memo run digest가 `surrogatepass`로 인코딩한다(PR #107).
+    lone surrogate가 없는 문자열은 이전과 같은 바이트다. UTF-8이 아닌 `--graph` 경로는 `_tracegraph_graph_fs_`
+    접두어 이름을 받는다(PR #112). 이전에 load되던 경로의 이름은 그대로다.
+  - **예외 메시지.** schema-v1 `from_obj()`의 edge 읽기 실패 메시지가 상수 `artifact edges could not be read`가
+    됐다(PR #105). 예외 텍스트는 이제 `__cause__`에만 있다. v1 migration은 `KeyboardInterrupt`를 제외한
+    `BaseException`도 `ValueError`로 거부한다(PR #114). 잡은 예외를 메시지에 쓰는 네 곳은 새 `tracegraph._errors`
+    helper를 거친다. 보통 예외의 메시지는 이전과 같다.
+- **열린 이슈 0개.** #100~#103은 이번 세션에 고쳤고, 그 과정에서 범위 밖으로 찾은 #109~#111도 등록한 뒤 같은
+  세션에 고쳤다. 소유자 결정을 기다리는 이슈는 없다.
+
+### `ebf09a2` 이후 착지한 변경
+
+| PR | merge | 내용 |
+| --- | --- | --- |
+| #104 | `519c9a8` | 2026-10-19 절 handoff(문서만) |
+| #105 | `3173a65` | #103: v1 migration의 edge 읽기 실패 메시지를 상수로 바꿨다. `__str__`도, metaclass를 거친 type 이름도 포맷하지 않는다 |
+| #106 | `dcfa47c` | #102: CLI 모듈 콘솔 두 개를 `Console(emoji=False)`로 만들었다. `summarize`의 `functools.partial`은 지웠다 |
+| #107 | `386b1ff` | #101: `diagnose._safe`·`artifact.default_path`·`memo.compute_run_digest`가 `surrogatepass`로 해시한다. LangGraph `_hash_task_id`는 인코딩 실패 시 `None`을 낸다. `main()`이 출력 스트림을 `backslashreplace`로 설정하고, 닫힌 스트림은 건너뛴다 |
+| #108 | `acb9015` | #100: `model.cost_is_bounded`(64자)를 OTLP `_as_decimal`과 metrics가 공유한다. 1e1000000의 `decimal.Overflow`, report의 100만 자 합계, OTLP의 10바이트 → 1억 자 저장을 막았다 |
+| #113 | `dc49aab` | #111: cost 합계와 delta를 `diagnose._COST_CONTEXT`(정밀도 160, `Inexact` trap)에서 계산한다. #100 CHANGELOG의 "65자·71자"를 "127자·133자"로 정정했다 |
+| #112 | `27a1ab2` | #110: `graph_ref._module_name`이 strict UTF-8 해시를 유지하고, 실패할 때만 `os.fsencode` 바이트를 별도 접두어로 해시한다 |
+| #114 | `4931a33` | #109: `tracegraph/_errors.py`(`type_name`, `describe`)를 `model._validated_copy`·`langgraph_checkpoint`의 두 곳·`graph_ref`가 쓴다. v1 migration은 shape 검사를 guard 안으로 옮기고 `KeyboardInterrupt`를 제외한 `BaseException`을 잡는다 |
+
+### 이번 세션의 결정(2026-10-19~20, PR #105~#114)
+
+1. **#100:** 이슈의 선택지 셋 모두 증폭 경로를 다루지 않았다. report에서는 `9e999999`가 100만 자 합계가 됐고,
+   OTLP ingest에서는 10바이트 `"1e99999999"`가 1억 자가 됐다. 그래서 소유자가 공유 상한을 골랐다. 상한은 지수가
+   아니라 풀어 쓴 길이(64자)이고, `as_tuple()`로 포맷하지 않고 계산한다. load 시 거부는 하지 않는다.
+2. **#101:** `_safe`만 고치면 `analyze`·`summarize`만 살아나고 `inspect`·`explain`·`query`는 stdout 쓰기에서 여전히
+   exit 1이었다. 그래서 소유자가 해시 지점 전부 + 출력 스트림 설정을 골랐다. 이슈 본문은 "The same helper runs in
+   `check`, the incident memo and `summarize`"라고 했지만, memo 경로에서 `_safe` 호출을 세어 보니 0회였다. memo가
+   실패한 원인은 `compute_run_digest`였다(PR #107의 mutation 표).
+3. **#103:** 승인된 옵션 1(type 이름만 포맷)은 metaclass `__name__` 회귀를 새로 만들었다. 구현 리뷰 1라운드가
+   찾았고, 기준 코드는 그 경우에 새지 않았다. 그래서 메시지를 상수로 바꿨고, 이 이탈은 PR #105 본문에 적었다.
+4. **#109~#111:** 리뷰와 측정 중에 범위 밖에서 찾은 결함이다. 등록할지 보고만 할지 물었을 때 소유자가 등록을 골랐다.
+   각각 재현한 뒤 등록했고, 이어서 고쳤다.
+   - #111은 옵션 1+2다. 정밀도 160은 측정한 최소값(10^6 step에서 132자리)이 아니라 여유분이다.
+   - #110은 strict UTF-8을 유지한다. 그냥 `fsencode`를 쓰면 Latin-1 같은 파일시스템 인코딩에서 기존 이름이 바뀌고(계획
+     리뷰 1라운드), 별도 접두어가 없으면 Shift-JIS에서 두 파일이 이름을 공유한다(2라운드).
+   - #109는 옵션 1+3이다. CLI의 `str(exc)` 지점들은 tracegraph가 직접 낸 `ValueError`만 포맷하므로 범위 밖으로 두었다.
+5. **CI:** #106(`a40cd0e`)의 첫 CI에서 두 run(push `39278866531`, pull_request `39278871657`)의 job 3개가 cancelled됐다.
+   `lint` 2개는 10m0s·7m50s, `installed wheel (core)`는 13m33s가 지난 뒤였다. push run의 `lint`는 ruff와 mypy가
+   성공한 뒤 `Post Install uv`가 끝나지 않은 채였다. wheel job은 step이 모두 15:33:25 UTC까지 success로 끝났는데도
+   job은 cancelled였다. 실패한 step이 없으므로 코드 문제로 보지 않았다. 두 run에 `gh run rerun --failed`를 했고, 둘 다
+   attempt 2에서 success였다. 나머지 PR은 이 세션의 `gh run watch`에서 첫 실행이 통과했다.
+
+### 검증 증거
+
+환경: macOS/arm64. PR 생성 시 수치는 각 PR 본문에 있다. rebase 뒤 수치는 이 세션의 suite-run 출력이며 PR 본문에는 없다.
+첫 행의 `4931a33` suite-run만 이 문서를 위해 다시 돌렸다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 `pytest` | PR 생성 시: #105 2600, #106 2602, #107 2607, #108 2633, #113 2653, #112 2651(12 skipped), #114 2666 passed. merge 직전 rebase 뒤(head SHA): #107 `fd83dc6` 2613, #108 `c342837` 2648, #112 `6a9aa54` 2656(12 skipped), #114 `a41f6b2` 2674(12 skipped), 모두 CLEAN. #106의 rebase 뒤에는 `tests/test_cli.py`·`tests/test_validation.py`(477 passed)만 돌렸다. `4931a33`에서 suite-run **2674 passed, 12 skipped, CLEAN**. 늘어난 skip 1개는 macOS에서 건너뛰는 #110의 Linux 전용 테스트다. CI(Linux)에서는 실행된다 |
+| lint·타입 | PR마다 `uvx ruff@0.14.2 check src tests scripts examples`와 mypy 통과 |
+| 골든 하네스 | #105~#108은 `519c9a8`, #112~#114는 `acb9015`와 비교해 커밋된 fixture 출력 265개 중 다른 파일 0개. 대조군 `0bbe9e6`→`43f5ccb`는 39개가 달라 하네스가 살아 있음을 확인했다. 출력 디렉터리는 절대 경로로 넘겨야 한다. 상대 경로를 주면 스크립트가 파일 1개만 쓰고 exit 1로 끝난다 |
+| 회귀 테스트 판별력 | PR마다 확인한 방식이 다르다(각 PR 본문). #105: 기준 코드에서 `str` 케이스, type-name 방식에서 `type-name` 케이스가 실패. #106: 기준 코드에서 4개 실패. #107·#114: 지점을 하나씩 되돌리면 그 지점의 테스트만 실패, #114는 단순 helper로 바꾸면 10개 실패. #108: 어댑터·metrics 수정을 빼면 12개, metrics 검사만 빼면 5개 실패. #113: 기준 코드에서 정확 합계 4개 실패. #112: Linux 테스트가 Docker에서 기준 `graph_ref.py`로 실패 |
+| CI | #107·#114는 check 17개, 나머지는 15개 모두 통과(#106은 재실행 뒤) |
+| 리뷰 게이트 | 계획은 #100~#103 묶음과 #109~#111 묶음으로 각각 2라운드씩 받았다(둘 다 NEEDS-FIX → 반영 → 소유자 승인). 구현: #105 2라운드(NEEDS-FIX → SHIP), #106 1라운드(SHIP), #107 2라운드(NEEDS-FIX: 닫힌 스트림 → SHIP), #108 2라운드(SHIP, Minor 1건 반영 → SHIP), #112·#113 1라운드(SHIP), #114 2라운드(NEEDS-FIX → SHIP). merge 직전 rebase의 충돌은 이 세션의 rebase 출력 기준으로 CHANGELOG(#106·#107·#108·#112·#114. #105·#113은 먼저 머지해 rebase가 없었다)와 `tests/test_cli.py`(#107)뿐이었다. #112와 #114가 함께 고친 `graph_ref.py`는 자동으로 합쳐졌다. rebase 뒤에는 다시 리뷰하지 않았다 |
+
+기록 위치: 결정 근거와 측정은 PR #105~#108·#112~#114와 이슈 #100~#103·#109~#111의 본문에 있다. 리뷰 원문은
+저장소에 보존하지 않았다. 이 세션의 임시 디렉터리(`/private/tmp/claude-501/` 아래 세션 `6010de39-…`의
+`scratchpad/devtrio*`)에 있으며, 임시 경로이므로 오래 남는다고 가정하지 않는다.
+
+### 남은 결정과 후속 항목
+
+1. **다음 릴리스:** `## Unreleased`가 쌓여 있다. 새 명령(`summarize`)과 새 JSON 계약이 있으므로 minor다. 릴리스할지는
+   소유자가 정한다. 절차는 [릴리스 런북](releasing.md)이다.
+2. **측정하지 못한 것:** lone surrogate가 `check`에서 crash하는지는 재지 못했다. 시험 입력이 capture provenance가 없어
+   `check`가 alias 단계 전에 멈췄다. 같은 helper를 쓰므로 #107이 함께 고쳤을 것으로 본다.
+3. **알려진 한계(문서화, 고치지 않음):** #90·#96. README와 CHANGELOG의 Known limitations에 있다.
+4. **`summarize` 후속(등록 안 함):** 아래 2026-10-19 절 3번 그대로다.
+5. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
+
+---
+
+## 이전 전달 상태 — 2026-10-19, `ebf09a2` 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `ebf09a2`(PR #99 병합)다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
