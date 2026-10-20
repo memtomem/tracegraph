@@ -10,6 +10,13 @@ explicitly.
 
 ### Changed
 
+- **`explain` and `query --explain` describe fan-in as "more than one recorded cause" for every
+  lossy chain** (#143). A trace without a heuristic-parent disclosure used to print "multiple real
+  causes … trust this raw chain, not the tree", and `query --explain` said the lossy step was "in
+  this match" although it can be an ancestor outside the match. Both now print the wording that
+  traces with `otlp.graph_parent_by_timing` or `otlp.graph_parent_fallback` have printed since
+  0.8.0, because a recorded cause may have been reconstructed by the adapter without a mark. The
+  heuristic-parent caveat itself is unchanged and still appears only for those traces.
 - **A loop parent chosen by start order is recorded on its edge, and `analyze` no longer treats
   it as declared ancestry** (#142). When several spans carry the `graph.node.id` a span names as
   its `graph.node.parent_id`, OTLP and Phoenix ingest take the nearest preceding one by start

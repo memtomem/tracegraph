@@ -1172,7 +1172,7 @@ def test_query_rejects_duplicate_trace_ids_across_artifacts(tmp_path):
 
 
 def test_query_explain_renders_lossy_warning_for_fan_in_match(tmp_path):
-    # When the matched effect (or any chain step) has multiple real causes — the
+    # When the matched effect (or any chain step) has more than one recorded cause — the
     # raw/derived split's whole point — --explain must surface the same warning
     # `tracegraph explain` prints, otherwise the tree-projection's lossiness becomes
     # invisible and the repo's causal-honesty contract is silently broken.
@@ -1202,9 +1202,47 @@ def test_query_explain_renders_lossy_warning_for_fan_in_match(tmp_path):
     artifact.save(nt, p)
     res = runner.invoke(app, ["query", "tool-failure", "--explain", str(p)])
     assert res.exit_code == 0, res.output
-    # The matched effect "merge" has 2 real causes -> result.is_lossy == True. The copy
-    # ("multiple real causes") is the same load-bearing phrase `tracegraph explain` uses.
-    assert "multiple real causes" in res.output
+    # The matched effect "merge" has 2 recorded causes -> result.is_lossy == True. The copy
+    # ("more than one recorded cause") is the same load-bearing phrase `tracegraph explain` uses.
+    assert "more than one recorded cause" in res.output
+    assert "real causes" not in res.output
+
+
+def test_query_explain_lossy_warning_covers_an_ancestor_outside_the_match(tmp_path):
+    # Only "call" matches tool-failure; the fan-in step "merge" is its ancestor, not part of
+    # the match. The warning must not claim the lossy step is "in this match".
+    p = tmp_path / "ancestor.json"
+    steps = [
+        Step(step_id="a0", trace_id="A", seq=0, name="input", kind=StepKind.CHAIN),
+        Step(step_id="a1", trace_id="A", seq=1, name="plan_a", kind=StepKind.CHAIN),
+        Step(step_id="a2", trace_id="A", seq=2, name="plan_b", kind=StepKind.CHAIN),
+        Step(step_id="a3", trace_id="A", seq=3, name="merge", kind=StepKind.CHAIN),
+        Step(
+            step_id="a4",
+            trace_id="A",
+            seq=4,
+            name="call",
+            kind=StepKind.TOOL,
+            status=StepStatus.ERROR,
+        ),
+    ]
+    edges = [
+        Edge(type=EdgeType.CAUSED_BY, src="a1", dst="a0"),
+        Edge(type=EdgeType.CAUSED_BY, src="a2", dst="a0"),
+        Edge(type=EdgeType.CAUSED_BY, src="a3", dst="a1"),
+        Edge(type=EdgeType.CAUSED_BY, src="a3", dst="a2"),
+        Edge(type=EdgeType.CAUSED_BY, src="a4", dst="a3"),
+    ]
+    nt = normalize(
+        RawTrace(trace=Trace(trace_id="A", source_kind="x"), steps=steps, causal_edges=edges)
+    )
+    assert [s.step_id for s in nt.steps if s.projection_lossy] == ["a3"]
+    artifact.save(nt, p)
+    res = runner.invoke(app, ["query", "tool-failure", "--explain", str(p)])
+    assert res.exit_code == 0, res.output
+    flat = " ".join(res.output.split())
+    assert "some steps in this chain had more than one recorded cause" in flat
+    assert "in this match" not in flat
 
 
 def test_query_explain_skips_lossy_warning_when_match_has_single_cause_chain(
@@ -1215,7 +1253,7 @@ def test_query_explain_skips_lossy_warning_when_match_has_single_cause_chain(
     one = three_failing_traces[0]
     res = runner.invoke(app, ["query", "tool-failure", "--explain", str(one)])
     assert res.exit_code == 0, res.output
-    assert "multiple real causes" not in res.output
+    assert "recorded cause" not in res.output
 
 
 def test_query_explain_with_limit_only_explains_shown_matches(three_failing_traces):
