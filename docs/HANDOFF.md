@@ -6,6 +6,16 @@
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PR #118(`a0d157e`)이 `uv.lock`을 바꿨으므로 그 뒤
   `uv sync --locked --extra cypher`로 venv도 맞춘다. 2026-10-19~20 세션처럼 worktree가 main venv를 공유하면 그
   venv도 맞춰야 한다. 이 Mac에서 sync 전 main venv의 langgraph는 1.2.2였다.
+- **0.7.0을 준비 중이다(PR #131·#132·#133).** release-prep PR이 `## Unreleased`를 `## 0.7.0 - 2026-10-20`으로
+  옮겼다. #122의 종료 코드 변경 때문에 patch가 아니라 minor다. 사용자에게 보이는 변경은 셋이다:
+  - **`phoenix diagnose` 종료 코드(#122, PR #131).** `px`가 없거나, 응답을 쓸 수 없거나, trace가 없으면 2가 아니라
+    1로 끝나고 stderr에 `FAIL <reason>`을 쓴다. 2는 잘못된 인자와 출력 경로에만 남는다. 2로 Phoenix 장애를 감지하던
+    wrapper는 1을 봐야 한다.
+  - **`--redact-errors`(#125, PR #133).** `ingest-otlp`와 `ingest`에서 오류 메시지를 artifact에 남기지 않는다. 실패한
+    step은 `error` 상태를 유지하고 `unknown_fields`에 `error_msg`를 넣는다. 기본값은 그대로다.
+  - **Phoenix 숫자 시각(#124, PR #132).** `10**17`보다 작은 숫자는 나노초로 읽지 않고, 읽을 수 없는 시각으로
+    `otlp.unreadable_timestamp`에 공개한다. Phoenix `trace get`의 ISO 문자열은 그대로다.
+  artifact schema는 v7 그대로이고, 새 capture gap 코드도 없다.
 - **0.6.1 공개 완료(2026-10-20).** `agent-tracegraph` 0.6.1이 PyPI 최신이다. `test-v0.6.1`과 `v0.6.1`이 모두
   `b6b3a7b`(PR #120)를 가리킨다. 업그레이드 주의는
   [GitHub Release v0.6.1](https://github.com/memtomem/tracegraph/releases/tag/v0.6.1)의 "Before you upgrade"에
@@ -36,8 +46,9 @@
     됐다(PR #105). 예외 텍스트는 이제 `__cause__`에만 있다. v1 migration은 `KeyboardInterrupt`를 제외한
     `BaseException`도 `ValueError`로 거부한다(PR #114). 잡은 예외를 메시지에 쓰는 네 곳은 새 `tracegraph._errors`
     helper를 거친다. 보통 예외의 메시지는 이전과 같다.
-- **열린 이슈 0개.** #100~#103은 이번 세션에 고쳤고, 그 과정에서 범위 밖으로 찾은 #109~#111도 등록한 뒤 같은
-  세션에 고쳤다. 소유자 결정을 기다리는 이슈는 없다.
+- **열린 이슈 4개(#126~#129).** 보류 결정을 이슈로 옮긴 것이다(#122~#129, 2026-10-20). #122~#125는 고쳤다.
+  #126 review-candidates `extra="allow"`, #127 중단된 run의 trace status, #128 Python 3.13·3.14 matrix,
+  #129 Phoenix E2E 서버 pin이 남았다. 모두 소유자 결정을 기다린다.
 
 ### `ebf09a2` 이후 착지한 변경
 
@@ -57,6 +68,11 @@
 | #118 | `a0d157e` | Dependabot 8건: lock에서 anyio 4.14.2·urllib3 2.8.0·langsmith 0.8.18(0.8.x 유지)·langgraph-sdk 0.4.8·langgraph-checkpoint-sqlite 3.1.1, SDK 때문에 langgraph 1.2.14·langchain-core 1.6.10. `pyproject`의 sqlite 하한 `>=3.1.1`과 CHANGELOG `## Unreleased` |
 | #119 | `f57fa00` | #117·#118 기록(문서만) |
 | #120 | `b6b3a7b` | 0.6.1 준비: 버전 0.6.0 → 0.6.1, `uv.lock`, CHANGELOG 날짜. 항목에서 lock·테스트 문장을 빼고 설치 범위가 좁아진 점을 적었다 |
+| #121 | `f79d096` | 0.6.1 릴리스 기록(문서만) |
+| #130 | `93abfe3` | #123: 파일을 통째로 읽는 라이브러리 loader 다섯 개를 문서에 적었다(문서만) |
+| #131 | `b0ffe4b` | #122: `px`를 쓸 수 없을 때 `phoenix diagnose`가 exit 1과 `FAIL <reason>`을 낸다 |
+| #132 | `78b8bfa` | #124: Phoenix 숫자 시각은 `10**17` 이상만 나노초로 읽고, 그 아래는 `otlp.unreadable_timestamp` |
+| #133 | `e1f0796` | #125: `ingest-otlp`·`ingest`의 `--redact-errors`, `LangGraphCheckpointAdapter`·`ingest_snapshot`의 `include_error_messages`. 아래 2026-09-15 절의 3번을 결정했다 |
 
 ### 이번 세션의 결정(2026-10-19~20, PR #105~#114)
 
@@ -150,6 +166,10 @@
      위 3.1.2 조합에서 틀린다는 것이었다.
    - 게시 직후 `uvx --from agent-tracegraph==0.6.1`의 "no version"은 uv 캐시였다. simple index에는 이미 있었고
      `--refresh`로 바로 설치됐다.
+7. **0.7.0 릴리스:** 소유자가 진행하기로 했다. #122가 종료 코드를 바꾸므로 minor다. release-prep PR 다음 단계는
+   [릴리스 런북](releasing.md)의 3~5단계다: merge 뒤 `tests` 통과 확인, `test-v0.7.0` rehearsal(TestPyPI, 환경
+   승인 필요), 게시된 파일 검증, 같은 커밋에 `v0.7.0`, PyPI 확인, GitHub Release(prerelease). 노트의
+   "Before you upgrade"에는 #122의 종료 코드를 맨 앞에 둔다.
 
 ---
 
