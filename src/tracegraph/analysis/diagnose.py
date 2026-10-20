@@ -29,6 +29,7 @@ from tracegraph.model import (
     EXPLICIT_ORIGINS,
     MAX_COST_CHARS,
     CausalFidelity,
+    HEURISTIC_EDGE_GAP_CODES,
     EdgeType,
     NormalizedTrace,
     Step,
@@ -54,6 +55,16 @@ LANGGRAPH_FIDELITY_WARNING = (
 LINKS_PRESERVED_FIDELITY_WARNING = (
     "Link preservation covers valid in-trace links only; foreign or unresolved links are omitted."
 )
+HEURISTIC_PARENT_FIDELITY_WARNING = (
+    "Some causal parents were chosen heuristically at ingest, by start order or by falling back "
+    "to the span parent; a chain through them is inferred, not declared."
+)
+
+
+def has_heuristic_edges(nt: NormalizedTrace) -> bool:
+    """Whether the trace's capture record discloses a causal parent chosen heuristically."""
+    capture = nt.trace.capture
+    return capture is not None and any(gap.code in HEURISTIC_EDGE_GAP_CODES for gap in capture.gaps)
 
 
 def _clause(sentence: str) -> str:
@@ -677,6 +688,8 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
         if trace.trace.links_preserved:
             # Mid-sentence after the label, so the shared sentence starts in lower case here.
             warnings.append(f"{label}: {_clause(LINKS_PRESERVED_FIDELITY_WARNING)}")
+        if has_heuristic_edges(trace):
+            warnings.append(f"{label}: {_clause(HEURISTIC_PARENT_FIDELITY_WARNING)}")
     if primary or propagated:
         warnings.append(INCIDENT_FIDELITY_WARNING)
     if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):

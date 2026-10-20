@@ -434,6 +434,12 @@ origins, fidelity disclosures, and the digest of the exact artifact bytes. Logic
 comparison keys are JSON-encoded typed paths; consumers should treat them as opaque strings.
 Containment and unknown edges preserve all error investigation candidates, deeper first.
 Explicit causal ancestry supplies context, not proof that an exception propagated.
+When the artifact records that a causal parent was chosen heuristically at ingest
+(`otlp.graph_parent_by_timing` or `otlp.graph_parent_fallback`), `analyze` adds a warning for
+that side and the memo a fidelity disclosure. The record does not say which edge, so a memo of
+a trace with `otlp.graph_parent_by_timing` writes every `graph_parent` edge as "preceded by
+(graph parent, possibly chosen heuristically)" instead of "caused by". `explain`, `query
+--explain` and `inspect` do not show the caveat yet.
 Explicit OTLP OK takes precedence over handled exception events on new ingestion; old
 artifacts are not reinterpreted.
 A span whose status is UNSET and that carries no exception event (one with a message or
