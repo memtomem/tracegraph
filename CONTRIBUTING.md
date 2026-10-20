@@ -72,7 +72,9 @@ The product is a claim about causality, so the bar is narrower than "the tests p
   reported as "the run succeeded".
 - **Never fabricate a causal edge.** Every `CAUSED_BY` edge must come from something the
   source system declared — a parent pointer, a task id, a span link — never from timing,
-  ordering, or name similarity.
+  ordering, or name similarity alone. Timing or order may only choose among the steps a
+  declared pointer names (which run of a looped node, which checkpoint ends a subgraph), and
+  a new such choice must be marked on its edge or in `trace.capture`.
 - **Never blame by proximity.** If the evidence does not identify which node did something,
   the field stays empty. An unnamed finding is correct; a confidently wrong name is not.
 - **Degrade to slower, never to wrong.** The Cypher accelerator must produce results

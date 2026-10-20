@@ -43,9 +43,20 @@ rather than unsupported.
 ## Design commitment: causality is never faked
 
 We persist the **raw multi-parent causal graph** as the system of record (`CAUSED_BY`,
-keeping *every* real predecessor) and treat the single-parent tree (`TREE_PARENT`) as an
-explicitly **derived, lossy projection**. Any step whose causality is collapsed for the
-tree view is flagged `projection_lossy`, so RCA never silently presents a fabricated cause.
+keeping *every* recorded predecessor — every edge the ingest adapter emitted) and treat the
+single-parent tree (`TREE_PARENT`) as an explicitly **derived, lossy projection**. Any step
+whose causality is collapsed for the tree view is flagged `projection_lossy`, so RCA never
+silently presents the tree's single parent as "the" cause.
+
+Recorded is not the same as declared by the source. Adapters reconstruct some edges: OTLP and
+Phoenix pick which run of a looped node is the parent by start time or start order, or fall back
+to `parentSpanId`; LangGraph routes a subgraph's return through that subgraph invocation's
+chronologically last checkpoint. Some sources lose edges: OTLP span links that resolve to no span in the trace,
+and every link in a Phoenix export, which is ingested parents only. `projection_lossy` measures
+projection loss (more than one recorded parent), not capture fidelity. Some known limitations are
+disclosed per trace (`trace.capture` gaps, `causal_fidelity`, `links_preserved`) or per edge (its
+`origin`); the LangGraph return edge is not marked, and an empty gap list does not mean the
+capture is complete.
 
 | analysis | reads |
 |---|---|
@@ -385,7 +396,9 @@ Known limits:
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
 super-step), and node names/kinds are best-effort metadata. Phoenix/OTLP adapters are
 span-level. Subgraph checkpoints are namespaced, but cross-namespace causality remains
-limited to parent links declared by LangGraph checkpoint metadata.
+limited to parent links declared by LangGraph checkpoint metadata, plus the return edge the
+adapter reconstructs when the parent namespace continues after a subgraph invocation (through
+that invocation's chronologically last checkpoint).
 
 ## Develop
 

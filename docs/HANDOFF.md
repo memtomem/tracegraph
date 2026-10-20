@@ -81,12 +81,17 @@
     됐다(PR #105). 예외 텍스트는 이제 `__cause__`에만 있다. v1 migration은 `KeyboardInterrupt`를 제외한
     `BaseException`도 `ValueError`로 거부한다(PR #114). 잡은 예외를 메시지에 쓰는 네 곳은 새 `tracegraph._errors`
     helper를 거친다. 보통 예외의 메시지는 이전과 같다.
-- **열린 이슈 6개(#126~#129, #142, #143).** #126~#129는 보류 결정을 이슈로 옮긴 것이다(#122~#129, 2026-10-20).
+- **열린 이슈 5개(#126~#129, #143).** #126~#129는 보류 결정을 이슈로 옮긴 것이다(#122~#129, 2026-10-20).
   #122~#125는 고쳤다. #126 review-candidates `extra="allow"`, #127 중단된 run의 trace status, #128 Python
   3.13·3.14 matrix, #129 Phoenix E2E 서버 pin이 남았다. #136·#138·#140은 고쳤다(0.8.0). #142는 #140의 옵션 2로,
-  시작 순서로 고른 `graph_parent`를 `analyze`가 명시된 조상으로 보아 실패를 propagated로 분류하는 문제다. #143은
-  `README.md`·`docs/USAGE_KO.md`·`analysis/explain.py`의 "every real predecessor" 문구와, 코드가 없는 trace의
-  `query --explain` 문구 "in this match … real causes"다. 모두 소유자 결정을 기다린다.
+  시작 순서로 고른 `graph_parent`를 `analyze`가 명시된 조상으로 보아 실패를 propagated로 분류하는 문제다(PR #148로
+  고침, 미배포). #143은 `README.md`·`docs/USAGE_KO.md`·`analysis/explain.py`의 "every real predecessor" 문구와, 코드가
+  없는 trace의 `query --explain` 문구 "in this match … real causes"다. 문서 부분은 소유자 선택(옵션 1)대로 "recorded
+  predecessor"로 고쳤고, 기록된 edge와 원본이 선언한 edge의 차이, projection 손실과 수집 충실도의 차이를 적었다.
+  `CONTRIBUTING.md`의 "never from timing, ordering" 규칙도 실제 동작에 맞췄다: 선언된 후보 중 선택만 허용하고,
+  새로 추가하는 선택은 edge나 `trace.capture`에 표시해야 한다. 기존 LangGraph subgraph 복귀 edge는 표시가 없는
+  예외로 문서에 적었다. CLI 문구(`cli.py`의 heuristic 없는 lossy 줄)는 heuristic 고지가 없는 lossy trace의 출력이
+  모두 바뀌므로 별도 PR로 남겼고, #143은 그래서 열려 있다. #126~#129는 소유자 결정을 기다린다.
 
 ### `ebf09a2` 이후 착지한 변경
 

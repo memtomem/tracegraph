@@ -433,14 +433,24 @@ SHA-256이 함께 기록됩니다.
 
 ### raw causal graph
 
-실제 인과관계를 모두 보존하는 graph입니다. 한 step에 원인이 여러 개면 여러 개를
+기록된 인과관계를 모두 보존하는 graph입니다. 한 step에 원인이 여러 개면 여러 개를
 그대로 둡니다. `explain`과 `query`는 이 계층을 봅니다.
+
+"기록된"은 ingest adapter가 만든 edge라는 뜻이고, 원본이 직접 선언한 관계와 항상 같지는
+않습니다. adapter가 재구성하는 edge가 있습니다. OTLP와 Phoenix는 같은 node가 여러 번 실행되면
+시작 시각이나 시작 순서로 그중 하나를 부모로 고르고, 고르지 못하면 `parentSpanId`를 씁니다.
+LangGraph는 subgraph에서 돌아오는 edge를 그 subgraph 호출의 시간상 마지막 checkpoint로 잇습니다.
+빠지는 edge도 있습니다. trace 안의 span을 가리키지 못하는 OTLP span link, 그리고 부모만 읽는
+Phoenix export의 link 전부입니다. 알려진 한계 일부는 trace 단위(`trace.capture`의 gap,
+`causal_fidelity`, `links_preserved`)나 edge 단위(`origin`)로 기록됩니다. LangGraph의 복귀 edge는
+표시되지 않으며, gap 목록이 비어 있다고 수집이 완전하다는 뜻은 아닙니다.
 
 ### derived tree
 
 사람이 보기 좋고 구조 비교가 쉬운 단일 부모 트리입니다. 원인이 여러 개인 step은
 하나의 부모만 고르므로 정보가 줄어들 수 있습니다. 이런 step에는
-`projection_lossy=True`가 붙습니다.
+`projection_lossy=True`가 붙습니다. 이 표시는 기록된 부모가 둘 이상이라 트리에서 빠진 것이
+있다는 뜻이며, 기록된 edge가 얼마나 정확한지(수집 충실도)는 말해 주지 않습니다.
 
 ### interrupt step
 

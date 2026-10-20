@@ -2,7 +2,9 @@
 
 Reads any ``BaseCheckpointSaver`` via ``.list()`` and reconstructs the causal chain from
 each checkpoint's declared parentage. One checkpoint (super-step) becomes one ``Step``;
-the parent-checkpoint links become ``CAUSED_BY`` edges (effect → cause).
+the parent-checkpoint links become ``CAUSED_BY`` edges (effect → cause). One kind of edge is
+reconstructed rather than declared: the return from a subgraph (below), which runs through the
+subgraph invocation's chronologically last checkpoint and is not marked as such.
 
 All checkpoint namespaces for the requested thread are ingested. Root-namespace
 checkpoints keep their checkpoint id as ``step_id``; non-root checkpoints use

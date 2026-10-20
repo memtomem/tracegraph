@@ -1,8 +1,8 @@
 """``explain`` — the causal-chain primitive, reads the RAW layer only.
 
-Per the layer contract, root-cause work reads ``CAUSED_BY`` (every real predecessor),
+Per the layer contract, root-cause work reads ``CAUSED_BY`` (every recorded predecessor),
 never the derived single-parent tree. ``explain`` walks backward from a step (typically
-a failure) and surfaces the full set of real causes, explicitly flagging any step whose
+a failure) and surfaces the full set of recorded causes, explicitly flagging any step whose
 causality is *lossy* under the tree projection — so a reader is never misled into
 trusting the single ``TREE_PARENT`` as "the" cause.
 """
@@ -20,7 +20,7 @@ class Explanation:
     target: Step
     #: Raw causal ancestors of ``target``, nearest cause first.
     chain: list[Step] = field(default_factory=list)
-    #: step_ids within {target} ∪ chain whose true causality was collapsed by the
+    #: step_ids within {target} ∪ chain whose recorded causes were collapsed by the
     #: single-parent projection (had more than one CAUSED_BY).
     lossy_steps: list[str] = field(default_factory=list)
 
