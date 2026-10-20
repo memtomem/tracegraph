@@ -6,6 +6,21 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Changed
+
+- **`phoenix diagnose` exits 1, not 2, when `px` is unavailable or its answer cannot be used**
+  (#122). That covers a `px` that is missing or cannot run, fails, times out, prints too much,
+  prints output that is not UTF-8 or not valid JSON, reports no recognizable version or one
+  older than the supported floor, or returns an export tracegraph cannot read, and a project
+  with no traces. The command now
+  prints `FAIL <reason>` on stderr, as `phoenix doctor` does, instead of the usage banner.
+  `diagnose` used 2 for these, the same code as an invalid invocation, so a wrapper could not
+  tell "called wrong" from "Phoenix is not reachable". 2 still means invalid arguments or output
+  paths, such as `--limit 0`, two outputs naming the same file, or a destination that cannot be
+  written. `doctor` is unchanged.
+
 ## 0.6.1 - 2026-10-20
 
 ### Dependencies
