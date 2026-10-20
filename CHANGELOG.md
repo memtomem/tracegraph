@@ -48,16 +48,21 @@ explicitly.
   candidates where any one has a readable time, no start, or no number below the floor. The
   0.7.0 example (spans `a` and `b` at 1783987200 and 1783987201, `c` at 1783987202 with no
   `parent_id`) is accepted again with `b` as `c`'s parent. Where 0.7.0 fell back to the span's
-  `parent_id`, the parent taken now can differ, and so can what follows from it. The export can
-  be refused if the new choice closes a causal cycle: with `b` (1783987201, `parent_id` `c`) and
-  `c` (1783987202, `parent_id` `r`) as above, 0.7.0 kept `r` as `c`'s parent and exited 0; this
-  release takes `b`, so `ingest-phoenix` and `analyze` exit 2 and `phoenix diagnose` exits 1
-  (0.6.1 refused that export too). `analyze` can classify failures differently, because the edge
-  is now a `graph_parent`, which it reads as explicit ancestry (#142): with `b` and `c` failing
-  and `c`'s `parent_id` `b`, 0.7.0 reported both as primary failures and this release reports `b`
-  as primary and `c` as propagated. Step numbers can change too: in one measured export `c` moved
-  from step 3 to 5. Ties are still broken with these spans at time 0, so step order can also
-  differ from 0.6.1.
+  `parent_id`, the parent taken now can differ, and so can what follows from it. Each case below
+  is a separate export built from that example, adding only what it names:
+  - The export can be refused if the new choice closes a causal cycle. Add a root span `r` at
+    1783987199 and give `c` the `parent_id` `r` and `b` the `parent_id` `c`: 0.7.0 kept `r` as
+    `c`'s parent and exited 0; this release takes `b`, so `ingest-phoenix` and `analyze` exit 2
+    and `phoenix diagnose` exits 1 (0.6.1 refused that export too).
+  - `analyze` can classify failures differently, because the edge is now a `graph_parent`, which
+    it reads as explicit ancestry (#142). Give `c` the `parent_id` `b` and let `b` and `c` fail:
+    0.7.0 reported both as primary failures; this release reports `b` as primary and `c` as
+    propagated.
+  - Step numbers can change. Add spans `x`, `y` (`parent_id` `x`) and `z` with no start time,
+    and give `b` the `parent_id` `y` and `c` the `parent_id` `z`: 0.7.0 numbered `c` 3 and `b` 5;
+    this release numbers `b` 4 and `c` 5.
+
+  Ties are still broken with these spans at time 0, so step order can also differ from 0.6.1.
 
 ## 0.7.0 - 2026-10-20
 
