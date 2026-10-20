@@ -423,6 +423,106 @@ def test_phoenix_unconvertible_timestamp_is_disclosed(value):
     assert any("timestamp" in w for w in raw.ingest_warnings)
 
 
+_PHOENIX_NS = 1_783_987_200_100_000_000  # 2026-07-14T00:00:00.1Z
+
+
+def _phoenix_times(start, end):
+    raw = PhoenixExportAdapter(_phoenix_span(start_time=start, end_time=end)).ingest("t")
+    gaps = {gap.code: gap.count for gap in raw.trace.capture.gaps}
+    evidence = raw.steps[0].evidence
+    return raw.steps[0].ts, evidence.duration_ms if evidence else None, gaps.get("otlp.unreadable_timestamp")
+
+
+@pytest.mark.parametrize("value", [
+    _PHOENIX_NS / 1e9, _PHOENIX_NS // 10**6, _PHOENIX_NS // 10**3, 10**17 - 1, True, "20260714",
+    "+1783987200100", " 1783987200100 ", "-1", "1_783_987_200_100",
+])
+def test_phoenix_number_too_small_for_epoch_nanoseconds_is_disclosed(value):
+    # Seconds, milliseconds or microseconds read as nanoseconds would land near 1970 (#124).
+    assert _phoenix_times(value, value) == (None, None, 1)
+
+
+@pytest.mark.parametrize("start", [_PHOENIX_NS, str(_PHOENIX_NS), f"+{_PHOENIX_NS}", float(_PHOENIX_NS),
+                                   "2026-07-14T00:00:00.1Z"])
+def test_phoenix_epoch_nanoseconds_and_iso_are_still_read(start):
+    ts, duration, gap = _phoenix_times(start, "2026-07-14T00:00:00.6Z")
+    assert ts == "2026-07-14T00:00:00.100000+00:00" and duration == 500.0 and gap is None
+
+
+@pytest.mark.parametrize(("value", "ts"), [(10**17, "1973-03-03T09:46:40+00:00"),
+                                          ("20260714_123456", "2026-07-14T12:34:56+00:00"),
+                                          ("20260714_1234", "2026-07-14T12:34:00+00:00")])
+def test_phoenix_floor_and_iso_strings_that_int_also_reads(value, ts):
+    # ISO comes before the integer fallback, so a compact ISO time `int()` accepts stays a time.
+    assert _phoenix_times(value, None)[0] == ts
+
+
+@pytest.mark.parametrize("value", ["²", "9" * 5000])
+def test_phoenix_digit_text_int_cannot_read_is_still_disclosed_once(value):
+    assert _phoenix_times(value, value) == (None, None, 1)
+
+
+@pytest.mark.parametrize(("start", "end"), [(1783987200, "yesterday"), ("yesterday", 1783987200)])
+def test_phoenix_span_with_two_bad_times_is_counted_once(start, end):
+    assert _phoenix_times(start, end) == (None, None, 1)
+
+
+class _ReprRaisesInt(int):
+    def __repr__(self):
+        raise RuntimeError("producer __repr__ ran")
+
+
+class _ReprRaisesStr(str):
+    def __repr__(self):
+        raise ValueError("producer __repr__ ran")
+
+
+class _StrAndIntDisagree:
+    def __str__(self):
+        return "-1"
+
+    def __int__(self):
+        return _PHOENIX_NS
+
+
+@pytest.mark.parametrize("value", [b"1783987200100", bytearray(b"1783987200100"),
+                                   _ReprRaisesInt(1), _ReprRaisesStr("+1783987200100")],
+                         ids=["bytes", "bytearray", "int-repr-raises", "str-repr-raises"])
+def test_phoenix_small_number_floor_follows_int_value_and_runs_no_repr(value):
+    # The floor tests what the span builder's int(value) reads, and the unreadable marker is
+    # fixed text, so a producer's __repr__ never runs.
+    assert _phoenix_times(value, value) == (None, None, 1)
+
+
+class _IntRaisesOSError:
+    def __str__(self):
+        return "unreadable"
+
+    def __int__(self):
+        raise OSError("producer __int__")
+
+
+def test_phoenix_value_the_builder_cannot_read_stays_disclosed_whatever_int_raises():
+    # The fallback asks the span builder's own parser, so it rejects exactly what the builder
+    # rejects, including an __int__ that raises OSError.
+    assert _phoenix_times(_IntRaisesOSError(), None) == (None, None, 1)
+
+
+class _DigitTextWithInt(str):
+    def __int__(self):
+        return 1783987200100
+
+
+def test_phoenix_digit_text_int_cannot_read_is_handed_on_as_text():
+    # As before #124, the text goes on, so the builder never consults the producer's __int__.
+    assert _phoenix_times(_DigitTextWithInt("²"), None) == (None, None, 1)
+
+
+def test_phoenix_value_whose_str_is_not_its_int_is_read_by_its_int():
+    ts, _, gap = _phoenix_times(_StrAndIntDisagree(), None)
+    assert ts == "2026-07-14T00:00:00.100000+00:00" and gap is None
+
+
 def test_cli_prints_read_disclosures_for_otlp(tmp_path):
     source = tmp_path / "inf.json"
     source.write_text(json.dumps(otlp(startTimeUnixNano=1)).replace('"startTimeUnixNano": 1', '"startTimeUnixNano": Infinity'))
