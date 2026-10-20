@@ -4,8 +4,10 @@
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `4931a33`(PR #114 병합)다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다.
-- **PyPI 최신은 여전히 0.5.0이고, 0.6.0을 준비 중이다.** release-prep PR이 `## Unreleased`를
-  `## 0.6.0 - 2026-10-20`으로 옮겼다. 거기에는 아래 이전 절의 항목(#85·#79·#82·#93·#60, #90·#96 문서)과 이번 세션의
+- **0.6.0 공개 완료(2026-10-20).** `agent-tracegraph` 0.6.0이 PyPI 최신이다. `test-v0.6.0`과 `v0.6.0`이
+  모두 `218abe6`(PR #116)을 가리킨다. 업그레이드 주의는
+  [GitHub Release v0.6.0](https://github.com/memtomem/tracegraph/releases/tag/v0.6.0)의 "Before you upgrade"에
+  있다. release-prep PR이 `## Unreleased`를 `## 0.6.0 - 2026-10-20`으로 옮겼다. 거기에는 아래 이전 절의 항목(#85·#79·#82·#93·#60, #90·#96 문서)과 이번 세션의
   수정 7개가 있다. 0.6.0에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## 0.6.0`이다:
   - **cost 상한(PR #108).** 끝까지 풀어 쓴 길이가 64자(`model.MAX_COST_CHARS`)를 넘는 cost는 `analyze`가 합산하지
     않고, 총액을 보류하면서 상한을 밝히는 별도 note를 붙인다. OTLP ingest는 그런 값을 정규화해 저장하지 않고, 읽을 수
@@ -40,6 +42,8 @@
 | #113 | `dc49aab` | #111: cost 합계와 delta를 `diagnose._COST_CONTEXT`(정밀도 160, `Inexact` trap)에서 계산한다. #100 CHANGELOG의 "65자·71자"를 "127자·133자"로 정정했다 |
 | #112 | `27a1ab2` | #110: `graph_ref._module_name`이 strict UTF-8 해시를 유지하고, 실패할 때만 `os.fsencode` 바이트를 별도 접두어로 해시한다 |
 | #114 | `4931a33` | #109: `tracegraph/_errors.py`(`type_name`, `describe`)를 `model._validated_copy`·`langgraph_checkpoint`의 두 곳·`graph_ref`가 쓴다. v1 migration은 shape 검사를 guard 안으로 옮기고 `KeyboardInterrupt`를 제외한 `BaseException`을 잡는다 |
+| #115 | `381ede3` | 2026-10-20 절 handoff(문서만) |
+| #116 | `218abe6` | 0.6.0 준비: 버전 0.5.0 → 0.6.0, `uv.lock`, CHANGELOG 날짜와 릴리스 전체 기준의 문장 정정, 이 문서 |
 
 ### 이번 세션의 결정(2026-10-19~20, PR #105~#114)
 
@@ -84,11 +88,34 @@
 
 ### 남은 결정과 후속 항목
 
-1. **0.6.0 릴리스:** 새 명령(`summarize`)과 새 JSON 계약이 있어 minor다. release-prep PR 다음 단계는 [릴리스
-   런북](releasing.md)의 3~5단계다: merge 뒤 `tests` 통과 확인, `test-v0.6.0` rehearsal(TestPyPI, 환경 승인 필요),
-   게시된 파일 검증, 같은 커밋에 `v0.6.0`, PyPI 확인, GitHub Release(prerelease).
-2. **측정하지 못한 것:** lone surrogate가 `check`에서 crash하는지는 재지 못했다. 시험 입력이 capture provenance가 없어
-   `check`가 alias 단계 전에 멈췄다. 같은 helper를 쓰므로 #107이 함께 고쳤을 것으로 본다.
+1. **0.6.0 릴리스: 완료(2026-10-20).** 새 명령(`summarize`)과 새 JSON 계약이 있어 minor다. [릴리스
+   런북](releasing.md)대로 했다.
+   - TestPyPI 예행: [run 39348336333](https://github.com/memtomem/tracegraph/actions/runs/39348336333).
+     production: [run 39349638025](https://github.com/memtomem/tracegraph/actions/runs/39349638025).
+   - wheel `fb131cc9…7343`, sdist `4fc5a65f…6b84`. production build의 digest, TestPyPI 파일, PyPI 파일이
+     바이트 단위로 같고(각 출처에서 직접 읽어 diff), 두 파일 모두 PyPI provenance가 HTTP 200이다.
+   - PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치(Python 3.12.11)에서 `scripts/verify_wheel.py` 통과(cypher
+     backend parity 포함). PyPI description은 `v0.6.0`의 `README.md`와 바이트 단위로 같다. 게시된 wheel로
+     `summarize --out`을 돌려 `tracegraph.motif-summary` v1이 나오는 것을 확인했다.
+   - 게시된 0.5.0의 `validate`가 0.6.0이 ingest한 Phoenix·LangGraph artifact(schema v7)를 받아들인다. 노트의
+     "0.5.x reads what this release writes"는 이 측정에 근거한다.
+   - [GitHub Release v0.6.0](https://github.com/memtomem/tracegraph/releases/tag/v0.6.0)은 prerelease로
+     만들었다. 노트는 claims 리뷰 2라운드를 거쳤다(7건, 2건. 2라운드 2건은 모두 1라운드 수정에서 나왔다).
+     1라운드는 CHANGELOG에 있지만 노트의 "Before you upgrade"에서 빠진 동작 변경 3개를 찾았다:
+     `langgraph.rewritten_error_channel` 갭과 `check`의 방향성, writer의 NaN 거부, v1 `from_obj()`의
+     `BaseException` 처리.
+2. **lone surrogate와 `check`: 측정 완료(2026-10-20, 게시된 wheel로).** 0.6.0으로 ingest한 Phoenix artifact
+   (capture 레코드 있음)의 TOOL 이름을 `"search\ud800"`으로 바꾼 쌍으로, 규칙 4개를 양방향으로 돌렸다.
+   - 0.6.0: 규칙 4개 × 방향 2개, 8개 조합 모두 traceback 없이 판정이 나온다. alias는
+     `"redacted:" + hashlib.sha256("search\ud800".encode("utf-8", "surrogatepass")).hexdigest()`와 같고,
+     `check --json-out`과 `analyze`가 같은 값을
+     낸다. `failures-not-increased`·`pattern-not-increased:tool-failure`가 FAIL인 것은 이름이 바뀌어 새 시그니처가
+     생겼기 때문이다(surrogate 없는 대조군 base vs base는 PASS). `topology-unchanged`의 exit 3은 대조군에서도 같다.
+   - 대조군 0.5.0: crash가 아니라 거부였다. surrogate가 current 쪽에 있으면 count 규칙 둘이 exit 2로 끝난다(`cannot
+     check these inputs: 'utf-8' codec can't encode character '\ud800' ...`). baseline 쪽에 있으면 판정이 나온다.
+     즉 #107은 `check`에서 유효한 입력의 exit 2 거부를 고쳤다. 같은 입력에서 0.5.0 `analyze`는 실제로
+     `UnicodeEncodeError` traceback으로 끝난다(exit 1). 그러니 CHANGELOG #101의 "ends a command in a traceback"은
+     `analyze`에는 맞고, `check`에는 정확하지 않다(고치지 않음).
 3. **알려진 한계(문서화, 고치지 않음):** #90·#96. README와 CHANGELOG의 Known limitations에 있다.
 4. **`summarize` 후속(등록 안 함):** 아래 2026-10-19 절 3번 그대로다.
 5. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
