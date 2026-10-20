@@ -6,6 +6,25 @@
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PR #118(`a0d157e`)이 `uv.lock`을 바꿨으므로 그 뒤
   `uv sync --locked --extra cypher`로 venv도 맞춘다. 2026-10-19~20 세션처럼 worktree가 main venv를 공유하면 그
   venv도 맞춰야 한다. 이 Mac에서 sync 전 main venv의 langgraph는 1.2.2였다.
+- **0.8.0을 준비 중이다(PR #139·#141·#144).** release-prep PR이 `## Unreleased`를 `## 0.8.0 - 2026-10-20`으로
+  옮겼다. memo·`analyze`·CLI 출력 문구와 Phoenix loop 부모 선택이 바뀌므로 patch가 아니라 minor다. 사용자에게
+  보이는 변경은 셋이다:
+  - **Phoenix loop 부모(#136, PR #139).** 0.7.0부터 읽을 수 없게 된 `10**17` 미만 숫자 시각이라도, span과 모든
+    후보가 그런 숫자로 시작하면 그 숫자로 가장 가까운 앞 후보를 부모로 고른다. 0.7.0이 거부하던 예(a·b가
+    1783987200·1783987201, c가 1783987202에 `parent_id` 없음)는 다시 b를 부모로 받아들인다. 0.7.0이 c의
+    `parent_id`로 대신하던 export에서는 고르는 부모가 달라질 수 있고, 그에 따라 세 가지가 달라질 수 있다.
+    새 선택이 인과 순환을 만들면 거부된다: 위 예에서 b의 `parent_id`가 c이고 c의 `parent_id`가 r이면 0.7.0은
+    r을 부모로 두고 exit 0이었고, 지금은 b를 골라 `ingest-phoenix`·`analyze`가 2, `phoenix diagnose`가 1로
+    끝난다(0.6.1도 거부했다). edge가 `graph_parent`가 되므로 `analyze`가 명시된 조상으로 읽어 실패 분류가 바뀔
+    수 있다(#142): b·c가 실패하고 c의 `parent_id`가 b이면 0.7.0은 둘 다 primary, 지금은 b가 primary이고 c가
+    propagated다. step 번호도 바뀔 수 있다: 잰 export 하나에서 c가 step 3에서 5로 옮겼다. 시각 자체는 계속
+    읽을 수 없는 것으로 공개하고, 고른 것은 기존 `otlp.graph_parent_by_timing`으로 센다.
+  - **`analyze`와 incident memo(#138, PR #141).** 두 휴리스틱 부모 코드가 있으면 `analyze`가 그 쪽에 경고를
+    붙이고, memo가 fidelity disclosure를 붙인다. `otlp.graph_parent_by_timing`이 있는 trace의 memo는 causal
+    ancestry graph에 적는 모든 `graph_parent` edge를 "caused by" 대신 "preceded by (graph parent, possibly chosen heuristically)"로 쓴다.
+  - **`explain`·`query --explain`·`inspect`(#140, PR #144).** 같은 경고를 붙이고, 그런 trace에서는 fan-in 문구가
+    "real causes"와 "trust this raw chain"을 쓰지 않는다. 코드가 없는 trace의 출력은 바이트 단위로 같다.
+  artifact schema는 v7 그대로이고, 새 capture gap 코드도 없다.
 - **0.7.0 공개 완료(2026-10-20).** `agent-tracegraph` 0.7.0이 PyPI 최신이다. `test-v0.7.0`과 `v0.7.0`이 모두
   `2ea927c`(PR #135)를 가리킨다. 업그레이드 주의는
   [GitHub Release v0.7.0](https://github.com/memtomem/tracegraph/releases/tag/v0.7.0)의 "Before you upgrade"에
@@ -55,10 +74,12 @@
     됐다(PR #105). 예외 텍스트는 이제 `__cause__`에만 있다. v1 migration은 `KeyboardInterrupt`를 제외한
     `BaseException`도 `ValueError`로 거부한다(PR #114). 잡은 예외를 메시지에 쓰는 네 곳은 새 `tracegraph._errors`
     helper를 거친다. 보통 예외의 메시지는 이전과 같다.
-- **열린 이슈 5개(#126~#129, #136).** #126~#129는 보류 결정을 이슈로 옮긴 것이다(#122~#129, 2026-10-20).
+- **열린 이슈 6개(#126~#129, #142, #143).** #126~#129는 보류 결정을 이슈로 옮긴 것이다(#122~#129, 2026-10-20).
   #122~#125는 고쳤다. #126 review-candidates `extra="allow"`, #127 중단된 run의 trace status, #128 Python
-  3.13·3.14 matrix, #129 Phoenix E2E 서버 pin이 남았다. #136은 0.7.0 claims 리뷰가 찾은 #124의 후속이다: 단위를
-  모르는 숫자 시각이라도 같은 export 안의 상대 순서를 loop 부모 선택에 쓸지. 모두 소유자 결정을 기다린다.
+  3.13·3.14 matrix, #129 Phoenix E2E 서버 pin이 남았다. #136·#138·#140은 고쳤다(0.8.0). #142는 #140의 옵션 2로,
+  시작 순서로 고른 `graph_parent`를 `analyze`가 명시된 조상으로 보아 실패를 propagated로 분류하는 문제다. #143은
+  `README.md`·`docs/USAGE_KO.md`·`analysis/explain.py`의 "every real predecessor" 문구와, 코드가 없는 trace의
+  `query --explain` 문구 "in this match … real causes"다. 모두 소유자 결정을 기다린다.
 
 ### `ebf09a2` 이후 착지한 변경
 
@@ -85,6 +106,10 @@
 | #133 | `e1f0796` | #125: `ingest-otlp`·`ingest`의 `--redact-errors`, `LangGraphCheckpointAdapter`·`ingest_snapshot`의 `include_error_messages`. 아래 2026-09-15 절의 3번을 결정했다 |
 | #134 | `35dfc75` | 0.7.0 준비: 버전 0.6.1 → 0.7.0, `uv.lock`, CHANGELOG 날짜. #125 항목의 `timeout` 결과를 방향별로 잰 대로 적었다 |
 | #135 | `2ea927c` | 0.7.0 노트에 #124의 영향(step 순서, loop 부모, 수용 여부가 달라질 수 있음)과 잰 예 하나를 보탰다(문서만). 릴리스 커밋 |
+| #137 | `f2ecf79` | 0.7.0 릴리스 기록(문서만) |
+| #139 | `1c538cd` | #136: 단위를 모르는 Phoenix 시작 숫자로 loop 부모를 고른다(`_tracegraph_start_order`, `otlp.graph_parent_by_timing`으로 센다) |
+| #141 | `c992382` | #138: `analyze` 경고와 memo disclosure, `model.HEURISTIC_EDGE_GAP_CODES` |
+| #144 | `3038fe4` | #140: `explain`·`query --explain`·`inspect`의 휴리스틱 부모 경고와 fan-in 문구. 옵션 2는 #142, 문서 문구는 #143 |
 
 ### 이번 세션의 결정(2026-10-19~20, PR #105~#114)
 

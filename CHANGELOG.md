@@ -6,7 +6,7 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.8.0 - 2026-10-20
 
 ### Changed
 
@@ -14,11 +14,12 @@ explicitly.
   Ingest records `otlp.graph_parent_by_timing` (a loop parent taken by start time or, since #136,
   by start number) or `otlp.graph_parent_fallback` (a declared graph parent not honored, so the
   span parent is used) in the artifact, and `check` and `summarize` read those codes, but
-  `analyze` and `export-incident-memo` did not, so a report or memo built from the artifact
-  presented such a parent like a declared one. `analyze` now adds a warning for each side that
+  `analyze` and `export-incident-memo` did not, so a report or memo built from the artifact did
+  not say that a parent may have been chosen heuristically, and the memo wrote a graph parent
+  taken by start order as "caused by". `analyze` now adds a warning for each side that
   carries either code, and the memo adds a fidelity disclosure. The record does not say which
   edge was chosen that way, so in a trace with `otlp.graph_parent_by_timing` the memo writes every
-  `graph_parent` edge as "preceded by (graph parent, possibly chosen heuristically)" instead of
+  `graph_parent` edge in its causal ancestry graph as "preceded by (graph parent, possibly chosen heuristically)" instead of
   "caused by"; checkpoint parents and span links keep "caused by". Reports and memos of traces
   without these codes are unchanged.
 
@@ -46,8 +47,17 @@ explicitly.
   readable time. Exports with ISO or nanosecond times are read as before, and so is a set of
   candidates where any one has a readable time, no start, or no number below the floor. The
   0.7.0 example (spans `a` and `b` at 1783987200 and 1783987201, `c` at 1783987202 with no
-  `parent_id`) is accepted again with `b` as `c`'s parent. Step order still breaks ties with
-  these spans at time 0, so it can differ from 0.6.1.
+  `parent_id`) is accepted again with `b` as `c`'s parent. Where 0.7.0 fell back to the span's
+  `parent_id`, the parent taken now can differ, and so can what follows from it. The export can
+  be refused if the new choice closes a causal cycle: with `b` (1783987201, `parent_id` `c`) and
+  `c` (1783987202, `parent_id` `r`) as above, 0.7.0 kept `r` as `c`'s parent and exited 0; this
+  release takes `b`, so `ingest-phoenix` and `analyze` exit 2 and `phoenix diagnose` exits 1
+  (0.6.1 refused that export too). `analyze` can classify failures differently, because the edge
+  is now a `graph_parent`, which it reads as explicit ancestry (#142): with `b` and `c` failing
+  and `c`'s `parent_id` `b`, 0.7.0 reported both as primary failures and this release reports `b`
+  as primary and `c` as propagated. Step numbers can change too: in one measured export `c` moved
+  from step 3 to 5. Ties are still broken with these spans at time 0, so step order can also
+  differ from 0.6.1.
 
 ## 0.7.0 - 2026-10-20
 
