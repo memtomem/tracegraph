@@ -4,7 +4,8 @@ Parses an exported OTLP trace document (the protobuf-JSON shape with
 ``resourceSpans[].scopeSpans[].spans[]`` emitted by the OpenTelemetry Collector or another
 OTLP source) and reconstructs one trace's *raw* causal graph. One span
 becomes one :class:`Step`; causal edges (``CAUSED_BY``, effect → cause) come from two
-**declared** signals only — never from inferred sibling order:
+**declared** signals only — never from inferred sibling order. Which run of a looped node a
+declared parent names can still be chosen by start time or order (see below):
 
 * **One parent per span — the logical causal edge.** We use the OpenInference
   ``graph.node.parent_id`` (the *agent-graph* parent): a single span carrying that
@@ -31,7 +32,9 @@ Honesty guards, mirrored from the LangGraph adapter:
 * **Never invent causality.** Sequentially-adjacent sibling spans are *not* linked — only
   the declared parent and explicit links become edges, because only those are asserted by
   the source data. Guessing "B ran after A so A caused B" is exactly the fabrication the
-  raw/derived contract exists to prevent.
+  raw/derived contract exists to prevent. Timing only ever selects among the spans a declared
+  parent names; a choice no link corroborates is marked (``GRAPH_PARENT_HEURISTIC``, a capture
+  gap).
 
 Documented MVP assumptions:
 
@@ -219,8 +222,8 @@ def _parse_nanos(value: Any) -> int | None:
     """Nanoseconds since the epoch, or None when ``value`` is missing or cannot be a time.
 
     Garbage text and non-finite or out-of-range numbers are all "unavailable" rather than an
-    error: timestamps order and time a trace but never decide its causality. The caller
-    discloses how many it could not read.
+    error: timestamps order and time a trace and may pick a loop parent among declared
+    candidates, but never create an edge. The caller discloses how many it could not read.
     """
     try:
         nanos = int(value)
@@ -745,10 +748,12 @@ class OTLPSpanAdapter:
     ) -> tuple[dict[str, list[str]], dict[tuple[str, str], EdgeOrigin]]:
         """Reconstruct ``effect -> [causes]`` from declared signals: one parent + links.
 
-        A logical parent chosen by start time among several candidates, or not honored at all,
-        is a heuristic edge; each is counted as a capture gap, since a comparison of two traces
-        cannot tell such an edge from a declared one. A chosen parent that the span also links to
-        is declared after all: it keeps ``GRAPH_PARENT`` and is not counted.
+        A logical parent chosen by start time or start order among several candidates gets
+        origin ``GRAPH_PARENT_HEURISTIC`` and is counted under ``otlp.graph_parent_by_timing``.
+        A chosen parent that the span also links to is declared after all: it becomes
+        ``GRAPH_PARENT`` and is not counted. A logical parent not honored at all falls back to
+        ``parentSpanId`` as ``SPAN_PARENT_FALLBACK`` and is counted under
+        ``otlp.graph_parent_fallback``; a link to that parent changes neither.
         """
         node_index: dict[str, list[str]] = {}
         if self._prefer_graph_parent:

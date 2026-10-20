@@ -2,8 +2,8 @@
 
 The headline "graph queries, not columns" capability: find a causal *sequence* of steps
 (e.g. "a tool step that errored", "plan immediately followed by a failing tool") across many
-traces at once. Reads the raw ``CAUSED_BY`` layer — patterns are about real causality, so they
-must see every real predecessor, not the lossy single-parent projection.
+traces at once. Reads the raw ``CAUSED_BY`` layer — patterns are about causality, so they
+must see every recorded predecessor, not the lossy single-parent projection.
 
 A ``PathPattern`` is a backend-neutral spec: an ordered list of ``StepPredicate``. The matcher
 here is pure-Python (zero optional deps); the *same spec* also compiles to standard Cypher

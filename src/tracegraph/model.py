@@ -9,8 +9,10 @@ fixed here in Phase 0, must never drift:
 
 2. **Two layers, one vocabulary.**
    - ``CAUSED_BY`` is the *raw* layer and the system of record: it keeps **every**
-     real predecessor of a step (fan-in, retries, nested tool/LLM calls). Nothing
-     is dropped. Root-cause analysis reads this layer.
+     recorded predecessor of a step (fan-in, retries, nested tool/LLM calls) — every
+     edge the adapter emitted. Normalization drops none. Root-cause analysis reads this
+     layer. Recorded is not declared: some edges are reconstructed by the adapter, and
+     each edge's ``origin`` says which evidence it rests on.
    - ``TREE_PARENT`` is the *derived* layer: a computed projection that picks
      exactly one parent per non-root step, yielding the single-parent forest the
      structural (AHU) diff needs. It is **not** asserted to be "the cause" — it is
@@ -99,7 +101,7 @@ class StepStatus(str, Enum):
 
 
 class EdgeOrigin(str, Enum):
-    """Declared evidence behind a raw causal edge."""
+    """Evidence behind a raw causal edge: declared by the source, or chosen by the adapter."""
 
     CHECKPOINT_PARENT = "checkpoint_parent"
     GRAPH_PARENT = "graph_parent"
@@ -191,7 +193,7 @@ SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 class EdgeType(str, Enum):
     """The frozen edge vocabulary. Direction is effect → cause for causal edges."""
 
-    CAUSED_BY = "CAUSED_BY"      # raw layer: step -> a real predecessor (keep ALL)
+    CAUSED_BY = "CAUSED_BY"      # raw layer: step -> a recorded predecessor (keep ALL)
     TREE_PARENT = "TREE_PARENT"  # derived layer: step -> its single chosen parent
     BELONGS_TO = "BELONGS_TO"    # step -> trace
     WROTE = "WROTE"              # step -> channel (optional, flagged)
@@ -228,7 +230,7 @@ class Step(BaseModel):
     error_msg: str | None = None
     evidence: StepEvidence | None = None
     #: Set during normalization: True iff this step had >1 raw CAUSED_BY edge and
-    #: the derived TREE_PARENT projection therefore dropped at least one real cause.
+    #: the derived TREE_PARENT projection therefore dropped at least one recorded cause.
     projection_lossy: bool = False
     #: Fields whose value is a substitute, sorted. Only an adapter that also records a trace
     #: ``capture`` sets it, so an artifact without one never claims its values are complete.
@@ -383,7 +385,7 @@ class RawTrace(BaseModel):
     """What an adapter emits: a trace, its steps, and the RAW causal edges only.
 
     ``causal_edges`` must all be ``CAUSED_BY`` (effect → cause) — the system of record,
-    keeping every real predecessor. Adapters never compute the derived tree; they hand a
+    keeping every recorded predecessor. Adapters never compute the derived tree; they hand a
     ``RawTrace`` to :func:`tracegraph.normalize.normalize`, which validates it and returns
     a :class:`NormalizedTrace`. Keeping the two as **distinct types** is the contract
     guard: an un-normalized trace (no ``TREE_PARENT`` layer) cannot reach ``diff``/

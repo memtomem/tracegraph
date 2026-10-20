@@ -38,7 +38,7 @@ that *already exist* (LangGraph checkpoint history and OpenInference/OTLP spans)
 a normalized causal graph, then runs analyses that the incumbents don't:
 
 - **`explain` / causal RCA** — backward traversal over the *raw* causal graph from a
-  failure, surfacing every real predecessor.
+  failure, surfacing every recorded predecessor.
 - **structural regression diff** — rooted-tree (AHU) isomorphism over a *derived*
   single-parent view; exact and linear-time.
 - **cross-trace pattern matching** — e.g. "tool X → retry → tool X → failure" across
@@ -46,9 +46,9 @@ a normalized causal graph, then runs analyses that the incumbents don't:
 
 The one non-obvious design commitment that makes the RCA *honest*: we persist the
 **raw multi-parent causal graph** as the system of record and treat the single-parent
-tree as an explicitly **derived, lossy projection**. Any step whose real causality had
-to be collapsed for the tree view is flagged, so an analysis never silently presents a
-fabricated single "cause." (This was the sharpest critique surfaced in review, and it
+tree as an explicitly **derived, lossy projection**. Any step whose recorded causes had
+to be collapsed for the tree view is flagged, so an analysis never silently presents the
+tree's single parent as "the cause." (This was the sharpest critique surfaced in review, and it
 shaped the schema — see `normalize.py` and the `test_normalize_lossy.py` golden test.)
 
 ## Competitive landscape (early–mid 2026)

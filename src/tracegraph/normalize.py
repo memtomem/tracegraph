@@ -1,7 +1,7 @@
 """The correctness core: validate the raw causal graph, then derive the tree.
 
 Adapters emit a :class:`~tracegraph.model.RawTrace` carrying steps and the **raw**
-``CAUSED_BY`` edges (every real predecessor of every step). :func:`normalize`:
+``CAUSED_BY`` edges (every recorded predecessor of every step). :func:`normalize`:
 
 * **validates** the raw graph (:func:`validate_raw`) — endpoints exist, edges are
   ``CAUSED_BY``, no self-edges, and every cause precedes its effect (which also makes
@@ -9,7 +9,7 @@ Adapters emit a :class:`~tracegraph.model.RawTrace` carrying steps and the **raw
 * derives the ``TREE_PARENT`` layer — exactly one parent per non-root step — by prioritizing
   explicit structural graph parents over containment and links, breaking ties by earliest time
   (with legacy temporal-only fallback for backward compatibility),
-* flags ``projection_lossy=True`` on any step whose real causality had to be collapsed
+* flags ``projection_lossy=True`` on any step whose recorded causes had to be collapsed
   (more than one ``CAUSED_BY``), and
 * re-checks the derived layer is a forest (:func:`validate_tree`).
 
