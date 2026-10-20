@@ -692,7 +692,8 @@ def test_declared_floor_covers_the_serializer_api_we_depend_on():
 
     `JsonPlusSerializer(allowed_msgpack_modules=...)` does not exist before
     langgraph-checkpoint 4.1 — 4.0.0 raises `TypeError` — so leaving that dependency
-    transitive behind `langgraph-checkpoint-sqlite>=2` would let a resolver pick a version
+    transitive would make the guarantee another package's metadata. Behind the
+    `langgraph-checkpoint-sqlite>=2` floor declared before, a resolver could pick a version
     where `ingest` raises instead of ingesting, and where nothing blocks a hostile payload.
     """
     import tomllib
