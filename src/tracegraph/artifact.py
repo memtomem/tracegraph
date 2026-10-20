@@ -243,6 +243,7 @@ def save_atomic(nt: NormalizedTrace, path: str | Path, *, replace: bool = True) 
 
 
 def load(path: str | Path) -> NormalizedTrace:
+    """Reads the whole file: the CLI's ``TRACEGRAPH_MAX_ARTIFACT_BYTES`` cap does not apply here."""
     return loads(Path(path).read_text(encoding="utf-8"))
 
 

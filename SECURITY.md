@@ -64,12 +64,16 @@ because they are what makes a finding traceable back to the run.
 
 Artifact and span-export loading is a parsing boundary, not a trust boundary: input is
 validated, never executed. Malformed input raises a clean error rather than a traceback, and
-tree walks are iterative so a deeply nested document cannot exhaust the stack. **CLI inputs**,
-files named on the command line and `-` for stdin alike, are size-capped by default at 256 MiB
-(`TRACEGRAPH_MAX_ARTIFACT_BYTES` changes it, and `0` disables it). That cap is a property of
-the command-line entry points, not of the library: `artifact.load()` and
-`OTLPSpanAdapter.from_file()` read what they are given, so a library caller handling untrusted
-input should bound it themselves. Still, analyzing an artifact you did not produce means reading
+tree walks are iterative so a deeply nested document cannot exhaust the stack. **CLI JSON
+inputs** (artifacts and span exports), files named on the command line and `-` for stdin
+alike, are size-capped by default at 256 MiB (`TRACEGRAPH_MAX_ARTIFACT_BYTES` changes it, and
+`0` disables it). A LangGraph checkpoint database (`ingest --sqlite`) is not byte-capped: it
+is copied to a private snapshot under a deadline (30 seconds by default) before it is read.
+The cap is a property of the command-line entry points, not of the library:
+`artifact.load()`, `OTLPSpanAdapter.from_file()`, `PhoenixExportAdapter.from_file()`, and
+`InMemoryStore.load_artifact()` and `LadybugStore.load_artifact()` (which call
+`artifact.load()`) read what they are given, so a library caller handling untrusted input
+should bound it themselves. Still, analyzing an artifact you did not produce means reading
 strings an attacker may have chosen; render them as data.
 
 Subprocess use is limited to one call site, the Phoenix CLI (`px`), invoked as an argument
