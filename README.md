@@ -170,8 +170,9 @@ trace. If none failed, it says so and diagnoses the newest trace, so a first suc
 still useful. Explicit ids bypass that selection. The command invokes only read-only
 `px trace list/get --include-annotations` exports, analyzes them in memory, and does not persist
 the raw Phoenix response. Phoenix connection details and credentials remain owned by `px`
-profiles or environment variables; tracegraph never accepts an API key option. For an already
-exported file or a shell pipeline:
+profiles or environment variables; tracegraph never accepts an API key option. Both commands exit
+1 when `px` is missing, cannot run, or returns a response tracegraph cannot use, and 2 for
+invalid arguments or output paths. For an already exported file or a shell pipeline:
 
 Automatic retry diagnosis intentionally requires an upstream `retry:` CHAIN marker. SyncMill's
 controlled retry telemetry emits this contract; generic OTLP and LangGraph-checkpoint producers

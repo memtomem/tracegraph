@@ -1511,7 +1511,10 @@ def phoenix_diagnose(
                 )
         baseline_nt = _px_trace(baseline, project=project) if baseline else None
     except _PxError as exc:
-        raise typer.BadParameter(str(exc)) from exc
+        # Phoenix or `px` is unavailable or answered unusably: report it as `doctor` does
+        # (exit 1), keeping 2 for an invalid invocation.
+        err_console.print(f"[bold red]FAIL[/] {escape(str(exc))}")
+        raise typer.Exit(1) from exc
     report = build_analysis(nt, baseline=baseline_nt)
     _render_analysis(report, limit=limit)
     if save_artifact:

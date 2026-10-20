@@ -460,7 +460,8 @@ def test_phoenix_diagnose_sanitizes_px_process_failures(monkeypatch, failure, ex
 
     _patch_px(monkeypatch, fake_run)
     result = runner.invoke(app, ["phoenix", "diagnose", "trace"])
-    assert result.exit_code == 2
+    assert result.exit_code == 1, result.output
+    assert _flat(result.stderr).startswith("FAIL ") and "Usage:" not in result.output
     assert expected in _flat(result.output)
     assert "password=secret" not in result.output
 
@@ -591,8 +592,20 @@ def test_phoenix_commands_report_a_px_that_cannot_be_run(tmp_path, monkeypatch, 
     assert stderr.endswith("); check that `px` on PATH is an executable file")
     for args in (["phoenix", "diagnose"], ["phoenix", "diagnose", "trace"]):
         result = runner.invoke(app, args)
-        assert result.exit_code == 2, result.output
+        assert result.exit_code == 1, result.output
+        assert _flat(result.stderr).startswith("FAIL ") and "Usage:" not in result.output
         assert "check that `px` on PATH is an executable file" in _flat(result.output)
+
+
+def test_phoenix_exit_codes_separate_an_unavailable_px_from_a_bad_invocation(tmp_path, monkeypatch):
+    # Both commands report a missing `px` as 1; only an invalid invocation is 2.
+    monkeypatch.setenv("PATH", str(tmp_path))
+    for args in (["phoenix", "doctor"], ["phoenix", "diagnose"], ["phoenix", "diagnose", "trace"]):
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1, (args, result.output)
+        assert "was not found" in _flat(result.stderr) and "Usage:" not in result.output
+    result = runner.invoke(app, ["phoenix", "diagnose", "--limit", "0"])
+    assert result.exit_code == 2 and "Usage:" in result.output
 
 
 def _px_script(tmp_path, body):
@@ -860,7 +873,8 @@ def test_phoenix_commands_report_oversized_px_output(tmp_path, monkeypatch, comm
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     _px_limit(monkeypatch, 100)
     result = runner.invoke(app, command)
-    assert result.exit_code == (1 if command[1] == "doctor" else 2), result.output
+    assert result.exit_code == 1, result.output
+    assert _flat(result.stderr).startswith("FAIL ") and "Usage:" not in result.output
     assert "exceeded the 100-byte limit" in _flat(result.output)
     assert "PRIVATE" not in result.output
 
