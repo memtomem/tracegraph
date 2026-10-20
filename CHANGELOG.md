@@ -20,6 +20,20 @@ explicitly.
   tell "called wrong" from "Phoenix is not reachable". 2 still means invalid arguments or output
   paths, such as `--limit 0`, two outputs naming the same file, or a destination that cannot be
   written. `doctor` is unchanged.
+### Fixed
+
+- **A Phoenix time given as a number too small to be epoch nanoseconds is no longer read as one**
+  (#124). The Phoenix adapter took every numeric `start_time` / `end_time` as nanoseconds, so a
+  time in seconds, milliseconds or microseconds became a moment near 1970, with its sub-unit
+  digits truncated and no warning: a 500 ms span given in float seconds was recorded at
+  `1970-01-01T00:00:01.783987+00:00` with a duration of 0.0. A number is now read as nanoseconds
+  only from 10^17 (1973-03-03T09:46:40Z) up. Below that, seconds, milliseconds and microseconds
+  for any date before the year 5138 cannot be told apart, so the time is reported as unavailable
+  and disclosed as `otlp.unreadable_timestamp`, the code an unreadable time already uses, which
+  0.6.x readers know. That applies to numbers, digit strings, and strings `int()` reads with a
+  sign, surrounding whitespace or underscores. ISO strings are read as before, including compact
+  forms such as `20260714_123456`, and so are nanosecond values. Phoenix's own `trace get` export
+  uses ISO strings, so artifacts change only for exports that carried such numbers.
 
 ## 0.6.1 - 2026-10-20
 

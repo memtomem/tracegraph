@@ -9,7 +9,13 @@ import re
 from typing import Any
 
 from tracegraph.adapters.base import Disclosures
-from tracegraph.adapters.otlp_spans import OTLPSpanAdapter, _attributes, _first, _span_array
+from tracegraph.adapters.otlp_spans import (
+    OTLPSpanAdapter,
+    _attributes,
+    _first,
+    _parse_nanos,
+    _span_array,
+)
 from tracegraph.input_validation import loads, object_field
 from tracegraph.model import RawTrace
 
@@ -30,22 +36,44 @@ _SAFE_ATTRIBUTES = {
 }
 
 
+#: The smallest number read as epoch nanoseconds: 1973-03-03T09:46:40Z. Seconds, milliseconds and
+#: microseconds for any date before the year 5138 all fall below it, so a smaller number is in
+#: some other unit, and which one cannot be told from its size.
+_MIN_EPOCH_NANOS = 10**17
+#: Handed on for a number below the floor. ``int()`` cannot read it, so the span builder reports
+#: the time as unavailable and counts it under ``otlp.unreadable_timestamp``. It is fixed text, so
+#: no producer code (a ``__repr__``) runs, and only the parsed time ever reaches the artifact.
+_NOT_EPOCH_NANOS = "not epoch nanoseconds"
+
+
+def _epoch_nanos(number: int) -> str:
+    return str(number) if number >= _MIN_EPOCH_NANOS else _NOT_EPOCH_NANOS
+
+
 def _nanos(value: Any) -> Any:
-    """Phoenix's time to OTLP nanoseconds. A value that cannot be converted is passed on
-    unchanged, so the span builder reports it as unavailable *and* discloses it."""
+    """Phoenix's time to OTLP nanoseconds. A value that cannot be converted, or a number too
+    small to be epoch nanoseconds, is handed on in a form the span builder cannot read, so it
+    reports the time as unavailable *and* discloses it."""
     if value is None:
         return None
     if isinstance(value, float) and not math.isfinite(value):
         return value
     if isinstance(value, (int, float)):
-        return str(int(value))
+        return _epoch_nanos(int(value))
     text = str(value)
     if text.isdigit():
-        return text
+        try:
+            return _epoch_nanos(int(text))
+        except ValueError:  # a non-ASCII digit, or past the interpreter's int-string limit
+            return text
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        return value
+        # Whatever the span builder would still read as a time (a sign, whitespace, underscores,
+        # bytes) is a number, so the floor applies to it too. Asking the builder's own parser
+        # keeps the two from disagreeing about what is a number.
+        number = _parse_nanos(value)
+        return value if number is None else _epoch_nanos(number)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return str(int(parsed.timestamp() * 1_000_000_000))
