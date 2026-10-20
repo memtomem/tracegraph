@@ -1,17 +1,19 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-20, `4931a33` 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-20, `b6b3a7b`(v0.6.1) 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `4931a33`(PR #114 병합)다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PR #118(`a0d157e`)이 `uv.lock`을 바꿨으므로 그 뒤
   `uv sync --locked --extra cypher`로 venv도 맞춘다. 2026-10-19~20 세션처럼 worktree가 main venv를 공유하면 그
   venv도 맞춰야 한다. 이 Mac에서 sync 전 main venv의 langgraph는 1.2.2였다.
-- **0.6.1을 준비 중이다(PR #118 하나).** release-prep PR이 `## Unreleased`를 `## 0.6.1 - 2026-10-20`으로
-  옮겼다. 사용자에게 보이는 변경은 하나다: `langgraph-checkpoint-sqlite` 하한이 `>=2`에서 `>=3.1.1`로
-  올랐다(GHSA-47pj-3jcm-6whg). 이 advisory는 store 경로에 관한 것이고 tracegraph는 `SqliteSaver`를 쓴다. PR #118에는
-  새 lock에서 전체 테스트 통과와 fixture 출력 일치가 기록돼 있다. lock은 Dependabot 경고 8건을 모두 넘겼다(전부
-  `fixed`, 열린 경고 0개). 버전은 소유자가 0.6.1로 정했다.
-- **0.6.0 공개 완료(2026-10-20).** `agent-tracegraph` 0.6.0이 PyPI 최신이다. `test-v0.6.0`과 `v0.6.0`이
+- **0.6.1 공개 완료(2026-10-20).** `agent-tracegraph` 0.6.1이 PyPI 최신이다. `test-v0.6.1`과 `v0.6.1`이 모두
+  `b6b3a7b`(PR #120)를 가리킨다. 업그레이드 주의는
+  [GitHub Release v0.6.1](https://github.com/memtomem/tracegraph/releases/tag/v0.6.1)의 "Before you upgrade"에
+  있다. `## 0.6.1 - 2026-10-20`의 변경은 하나다: `langgraph-checkpoint-sqlite` 하한이 `>=2`에서 `>=3.1.1`로
+  올랐다(GHSA-47pj-3jcm-6whg). `git diff v0.6.0 v0.6.1 -- src/ README.md`는 비어 있다. 이 advisory는 store
+  경로에 관한 것이고 tracegraph는 `SqliteSaver`를 쓴다. PR #118에는 새 lock에서 전체 테스트 통과와 fixture 출력
+  일치가 기록돼 있다. lock은 Dependabot 경고 8건을 모두 넘겼다(전부 `fixed`, 열린 경고 0개).
+- **0.6.0 공개 완료(2026-10-20).** `test-v0.6.0`과 `v0.6.0`이
   모두 `218abe6`(PR #116)을 가리킨다. 업그레이드 주의는
   [GitHub Release v0.6.0](https://github.com/memtomem/tracegraph/releases/tag/v0.6.0)의 "Before you upgrade"에
   있다. release-prep PR이 `## Unreleased`를 `## 0.6.0 - 2026-10-20`으로 옮겼다. 거기에는 아래 이전 절의 항목(#85·#79·#82·#93·#60, #90·#96 문서)과 이번 세션의
@@ -53,6 +55,8 @@
 | #116 | `218abe6` | 0.6.0 준비: 버전 0.5.0 → 0.6.0, `uv.lock`, CHANGELOG 날짜와 릴리스 전체 기준의 문장 정정, 이 문서 |
 | #117 | `7340258` | 0.6.0 릴리스 기록과 lone surrogate `check` 측정(문서만) |
 | #118 | `a0d157e` | Dependabot 8건: lock에서 anyio 4.14.2·urllib3 2.8.0·langsmith 0.8.18(0.8.x 유지)·langgraph-sdk 0.4.8·langgraph-checkpoint-sqlite 3.1.1, SDK 때문에 langgraph 1.2.14·langchain-core 1.6.10. `pyproject`의 sqlite 하한 `>=3.1.1`과 CHANGELOG `## Unreleased` |
+| #119 | `f57fa00` | #117·#118 기록(문서만) |
+| #120 | `b6b3a7b` | 0.6.1 준비: 버전 0.6.0 → 0.6.1, `uv.lock`, CHANGELOG 날짜. 항목에서 lock·테스트 문장을 빼고 설치 범위가 좁아진 점을 적었다 |
 
 ### 이번 세션의 결정(2026-10-19~20, PR #105~#114)
 
@@ -95,7 +99,7 @@
 저장소에 보존하지 않았다. 이 세션의 임시 디렉터리(`/private/tmp/claude-501/` 아래 세션 `6010de39-…`의
 `scratchpad/devtrio*`)에 있으며, 임시 경로이므로 오래 남는다고 가정하지 않는다.
 
-### 남은 결정과 후속 항목
+### 완료 기록과 남은 결정·후속 항목
 
 1. **0.6.0 릴리스: 완료(2026-10-20).** 새 명령(`summarize`)과 새 JSON 계약이 있어 minor다. [릴리스
    런북](releasing.md)대로 했다.
@@ -128,9 +132,24 @@
 3. **알려진 한계(문서화, 고치지 않음):** #90·#96. README와 CHANGELOG의 Known limitations에 있다.
 4. **`summarize` 후속(등록 안 함):** 아래 2026-10-19 절 3번 그대로다.
 5. **기존 보류 결정**(아래 2026-10-14 절의 5번, 2026-09-15 절의 3·4·5·7·8번)은 그대로다.
-6. **0.6.1 릴리스:** 소유자가 0.6.1로 정했다. release-prep PR 다음 단계는 [릴리스 런북](releasing.md)의
-   3~5단계다: merge 뒤 `tests` 통과 확인, `test-v0.6.1` rehearsal(TestPyPI, 환경 승인 필요), 게시된 파일 검증,
-   같은 커밋에 `v0.6.1`, PyPI 확인, GitHub Release(prerelease).
+6. **0.6.1 릴리스: 완료(2026-10-20).** 소유자가 patch로 정했다. [릴리스 런북](releasing.md)대로 했다.
+   - 준비 PR #120의 로컬 게이트: `pytest` 2674 passed / 12 skipped, `twine@7.0.0 check` 통과, sdist 40 members
+     모두 허용 목록 안. 리뷰 1라운드가 PR #118에서 넘어온 lock·테스트 문장을 릴리스 항목에서 빼게 했고, "contract
+     변경 없음"을 설치 호환성 변경으로 고치게 했다.
+   - TestPyPI 예행: [run 39361634216](https://github.com/memtomem/tracegraph/actions/runs/39361634216).
+     production: [run 39362073086](https://github.com/memtomem/tracegraph/actions/runs/39362073086).
+   - wheel `c7d6a4d2…ae35`, sdist `e48727e5…9bb5`. 예행 build, TestPyPI 파일, production build, PyPI 파일이
+     바이트 단위로 같고(각 출처에서 직접 읽어 diff), 두 파일 모두 PyPI provenance가 HTTP 200이다.
+   - PyPI에서 받은 wheel의 깨끗한 core·`[cypher]` 설치(Python 3.12.11)에서 `scripts/verify_wheel.py` 통과(cypher
+     backend parity 포함). PyPI description은 `v0.6.1`의 `README.md`와 바이트 단위로 같다.
+   - 설치 범위는 `uv pip compile`(PyPI)로 쟀다. `0.6.0`과 `langgraph-checkpoint-sqlite==3.1.0`은 해석되고 `0.6.1`과는
+     안 된다. `0.6.0`과 `==3.0.0`도 안 되므로 CHANGELOG는 `==3.1.0`만 예로 든다. `0.6.1`에서 sqlite `==3.1.2`와
+     `langgraph-checkpoint==4.1.1`을 함께 고정하면 해석되지 않는다(3.1.2는 `langgraph-checkpoint>=4.3.0`).
+   - [GitHub Release v0.6.1](https://github.com/memtomem/tracegraph/releases/tag/v0.6.1)은 prerelease로
+     만들었다. 노트는 claims 리뷰 2라운드를 거쳤다(1건, 0건). 1라운드의 1건은 "3.1.1 이상으로 올리라"는 조언이
+     위 3.1.2 조합에서 틀린다는 것이었다.
+   - 게시 직후 `uvx --from agent-tracegraph==0.6.1`의 "no version"은 uv 캐시였다. simple index에는 이미 있었고
+     `--refresh`로 바로 설치됐다.
 
 ---
 
