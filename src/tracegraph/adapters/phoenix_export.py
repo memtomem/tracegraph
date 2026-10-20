@@ -151,6 +151,7 @@ class PhoenixExportAdapter:
 
     @classmethod
     def from_file(cls, path: str | Path) -> "PhoenixExportAdapter":
+        """Reads the whole file: the CLI's ``TRACEGRAPH_MAX_ARTIFACT_BYTES`` cap does not apply here."""
         return cls.from_json(Path(path).read_text(encoding="utf-8"))
 
     def discover(self) -> list[str]:
