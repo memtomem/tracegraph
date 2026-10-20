@@ -198,6 +198,8 @@ spans carry the `graph.node.id` that a span names as its `graph.node.parent_id`,
 and every candidate start at such a number, the nearest preceding candidate by those numbers is
 the parent. That assumes the export gives every time in one unit, and it is disclosed under
 `otlp.graph_parent_by_timing` with its own warning line, so `check` treats the edge as heuristic.
+Either way the chosen edge has origin `graph_parent_heuristic` rather than `graph_parent`, unless
+the span also links to that parent, which declares it.
 
 The exact Phoenix CLI and server versions used by CI are centrally pinned. See the
 [Phoenix runtime pin maintenance runbook](docs/phoenix-cli-contract.md) for the controlled
@@ -295,8 +297,10 @@ A group is one observed shape. Two matches share a group when, for every matched
 status, source and safe-v1 name agree, and for every edge between them the `CAUSED_BY` origin
 agrees, under the same source kind, causal fidelity and link setting, and the same answer to
 whether the trace discloses causal edges chosen heuristically at ingest (`motif-signature/v1`).
-That last answer is per trace: an OTLP export records a parent picked by timing with the same
-origin as an unambiguous one, and says only that some edge was picked that way, not which. The
+That last answer is per trace: the gap says only that some edge was picked heuristically, not
+which. (A parent picked by start order now has its own origin, `graph_parent_heuristic`, so the
+edge comparison already separates it; an artifact written before that records it as
+`graph_parent`, like an unambiguous one, and a fallback edge is `span_parent_fallback`.) The
 answer is `disclosed` whenever a recognized heuristic-edge gap is present, else `not_disclosed`.
 It is `unknown` for a trace with no capture record, or with a gap code this build does not know
 and no recognized heuristic-edge gap. It is `not_applicable` for a single-step preset, which has
@@ -436,9 +440,13 @@ Containment and unknown edges preserve all error investigation candidates, deepe
 Explicit causal ancestry supplies context, not proof that an exception propagated.
 When the artifact records that a causal parent was chosen heuristically at ingest
 (`otlp.graph_parent_by_timing` or `otlp.graph_parent_fallback`), `analyze` adds a warning for
-that side and the memo a fidelity disclosure. The record does not say which edge, so a memo of
-a trace with `otlp.graph_parent_by_timing` writes every `graph_parent` edge as "preceded by
-(graph parent, possibly chosen heuristically)" instead of "caused by". `inspect` prints the
+that side and the memo a fidelity disclosure. A loop parent picked by start order has origin
+`graph_parent_heuristic`: `analyze` does not count it as explicit ancestry when it splits primary
+from propagated failures, and the memo writes it "preceded by (graph parent, chosen
+heuristically)". An artifact written before that origin existed does not say which edge, so a
+memo of such a trace with `otlp.graph_parent_by_timing` writes every `graph_parent` edge as
+"preceded by (graph parent, possibly chosen heuristically)" instead of "caused by", and
+`analyze` classifies it as before. `inspect` prints the
 same caveat under its tree, and `explain` and `query --explain` under every chain that has at
 least one cause; there their fan-in note no longer calls the causes real or says to trust the
 chain.
@@ -511,7 +519,8 @@ managed values, cache-key functions — though no node runs. It is never inferre
 Every ingest records what the adapter could not observe: `trace.capture` is an object whose
 `gaps` list holds a fixed code and count per ingest disclosure (empty when there was none),
 and a step's `unknown_fields` names a kind, name or error message the adapter substituted. That
-record makes a fresh artifact declare `schema_version` 7. The envelope otherwise follows
+record makes a fresh artifact declare `schema_version` 7, or 8 when a causal edge has origin
+`graph_parent_heuristic`. The envelope otherwise follows
 content, which is what an artifact written by an earlier release keeps when it is loaded and
 saved again: a graph read (`--graph`) needs 6, interrupt steps 5, a derived tree that relies on
 EdgeOrigin precedence 4, derived task steps 3, and anything else 2, byte for byte (a v1 file is

@@ -6,6 +6,31 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Changed
+
+- **A loop parent chosen by start order is recorded on its edge, and `analyze` no longer treats
+  it as declared ancestry** (#142). When several spans carry the `graph.node.id` a span names as
+  its `graph.node.parent_id`, OTLP and Phoenix ingest take the nearest preceding one by start
+  time or start number. That edge used to say `graph_parent`, like a parent with one candidate,
+  so a failing loop run that happened to be picked made the child's failure "propagated" instead
+  of primary. The edge now has origin `graph_parent_heuristic`: `analyze` splits primary and
+  propagated failures only through declared origins, the edge still appears among a finding's
+  causal steps and edges with that origin, the memo writes it "preceded by (graph parent, chosen
+  heuristically)", and `summarize` groups it apart from a declared graph parent. The derived tree
+  is unchanged (the origin ranks as a graph parent does). When the span also links to the parent
+  that was picked, the link declares the edge: it stays `graph_parent` and is not counted under
+  `otlp.graph_parent_by_timing`, so a trace whose every timed choice is linked no longer carries
+  that code or its warnings. The `otlp.graph_parent_by_timing` gap is otherwise recorded as
+  before.
+- **Artifact schema 8.** An artifact with a `graph_parent_heuristic` edge declares
+  `schema_version` 8, so 0.8.0 and earlier refuse it by version instead of failing on the new
+  origin value; every other artifact keeps the version and bytes it had. Artifacts written by
+  earlier releases are read as before: their timed edges say `graph_parent`, so `analyze`
+  classifies them as it did, and the memo keeps qualifying every graph parent in a trace with
+  `otlp.graph_parent_by_timing`.
+
 ## 0.8.0 - 2026-10-20
 
 ### Changed

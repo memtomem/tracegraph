@@ -22,7 +22,8 @@ from tracegraph.normalize import normalize
 runner = CliRunner()
 DIGEST = "sha256:" + "0" * 64
 WARNING_CLAUSE = HEURISTIC_PARENT_FIDELITY_WARNING[:1].lower() + HEURISTIC_PARENT_FIDELITY_WARNING[1:]
-QUALIFIED = "preceded by (graph parent, possibly chosen heuristically)"
+# Either wording: per edge, or trace-wide for an artifact that predates the per-edge origin.
+QUALIFIED = "chosen heuristically)"
 
 
 def _span(sid, start, *, parent="r", attrs=(), error=False, links=()):
@@ -103,15 +104,15 @@ def _ancestry(memo):
     return section.splitlines()
 
 
-def test_the_memo_qualifies_graph_parents_only_where_one_was_timed():
+def test_the_memo_qualifies_the_graph_parent_that_was_timed():
     memo = build_incident_memo(_by_timing(), DIGEST)
     assert memo.count(f"- {HEURISTIC_PARENT_FIDELITY_WARNING}") == 1
     lines = _ancestry(memo)
-    graph = [line for line in lines if "[origin: graph_parent]" in line]
+    timed = [line for line in lines if "[origin: graph_parent_heuristic]" in line]
     links = [line for line in lines if "[origin: span_link]" in line]
-    assert graph and all(QUALIFIED in line for line in graph)
+    assert timed and all(" preceded by (graph parent, chosen heuristically) " in line for line in timed)
     assert links and all(" caused by " in line for line in links)
-    assert not any("graph_parent]" in line and " caused by " in line for line in lines)
+    assert not any("graph_parent" in line and " caused by " in line for line in lines)
 
 
 def test_a_fallback_alone_discloses_but_leaves_graph_parents_as_causes():

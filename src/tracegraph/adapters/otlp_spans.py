@@ -747,7 +747,8 @@ class OTLPSpanAdapter:
 
         A logical parent chosen by start time among several candidates, or not honored at all,
         is a heuristic edge; each is counted as a capture gap, since a comparison of two traces
-        cannot tell such an edge from a declared one.
+        cannot tell such an edge from a declared one. A chosen parent that the span also links to
+        is declared after all: it keeps ``GRAPH_PARENT`` and is not counted.
         """
         node_index: dict[str, list[str]] = {}
         if self._prefer_graph_parent:
@@ -761,21 +762,29 @@ class OTLPSpanAdapter:
         origins: dict[tuple[str, str], EdgeOrigin] = {}
         dropped: Counter[str] = Counter()  # links not recorded as causes, by capture gap code
 
+        heuristic = EdgeOrigin.GRAPH_PARENT_HEURISTIC
+
         def add(effect: str, cause: str, origin: EdgeOrigin) -> None:
-            if cause == effect or (effect, cause) in seen:
-                return  # self-edges and duplicates would both break validate_raw
+            if cause == effect:
+                return  # a self-edge would break validate_raw
+            if (effect, cause) in seen:
+                # A duplicate would break validate_raw too, but a declared link to the parent
+                # chosen by start order corroborates that choice. GRAPH_PARENT keeps the rank
+                # (a SPAN_LINK origin would rank below other causes and move the tree parent).
+                if origin is EdgeOrigin.SPAN_LINK and origins[(effect, cause)] is heuristic:
+                    origins[(effect, cause)] = EdgeOrigin.GRAPH_PARENT
+                return
             seen.add((effect, cause))
             causes[effect].append(cause)
             origins[(effect, cause)] = origin
 
-        by_timing = by_order = fallback = 0
+        resolutions: dict[str, str] = {}
         for sid in by_id:
             parent, parent_origin, resolution = self._resolve_parent(
                 sid, attrs, node_index, prerank, parent_span, untimed, order_key
             )
-            by_timing += resolution == "by_timing"
-            by_order += resolution == "by_order"
-            fallback += resolution == "fallback"
+            if resolution is not None:
+                resolutions[sid] = resolution
             if parent is not None:
                 add(sid, parent, parent_origin)
             if self._links_as_causes:
@@ -799,6 +808,11 @@ class OTLPSpanAdapter:
                         add(sid, lsid, EdgeOrigin.SPAN_LINK)
                     else:
                         dropped["otlp.unresolved_span_link"] += 1
+        # Counted after the links, which may have corroborated a choice made by start order.
+        still_heuristic = {effect for (effect, _), origin in origins.items() if origin is heuristic}
+        by_timing = sum(r == "by_timing" and s in still_heuristic for s, r in resolutions.items())
+        by_order = sum(r == "by_order" and s in still_heuristic for s, r in resolutions.items())
+        fallback = sum(r == "fallback" for r in resolutions.values())
         if by_timing:
             disclosures.add(
                 "otlp.graph_parent_by_timing",
@@ -878,6 +892,7 @@ class OTLPSpanAdapter:
         unambiguous: ``"by_timing"``, ``"by_order"`` or ``"fallback"``; otherwise ``None``.
         """
         pid = parent_span.get(sid)
+        heuristic = EdgeOrigin.GRAPH_PARENT_HEURISTIC
         if self._prefer_graph_parent:
             pnode = attrs[sid].get(_GRAPH_NODE_PARENT_ID)
             if pnode is not None:
@@ -887,11 +902,11 @@ class OTLPSpanAdapter:
                 timed = sid not in untimed and not any(c in untimed for c in candidates)
                 preceding = [c for c in candidates if timed and prerank[c] < prerank[sid]]
                 if preceding:
-                    return max(preceding, key=lambda c: prerank[c]), EdgeOrigin.GRAPH_PARENT, "by_timing"
+                    return max(preceding, key=lambda c: prerank[c]), heuristic, "by_timing"
                 ordered = not timed and all(s in order_key for s in (sid, *candidates))
                 preceding = [c for c in candidates if ordered and order_key[c] < order_key[sid]]
                 if preceding:
-                    return max(preceding, key=lambda c: order_key[c]), EdgeOrigin.GRAPH_PARENT, "by_order"
+                    return max(preceding, key=lambda c: order_key[c]), heuristic, "by_order"
                 if pid is None:
                     detail = "no in-trace span" if not candidates else "multiple ambiguous spans"
                     raise ValueError(

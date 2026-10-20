@@ -509,7 +509,11 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
   경우에도 gap으로 남고, stderr 경고가 새로 한 줄 나옵니다. Phoenix export에서 그 span과 후보가 모두
   10^17보다 작은 숫자로 시작하면(단위를 알 수 없어 시각으로는 읽지 않는 값), 그 숫자의 순서로 가장
   가까운 앞 후보를 고르고 같은 `otlp.graph_parent_by_timing` gap에 셉니다. export 전체가 한 단위를
-  쓴다고 가정한다는 경고가 따로 한 줄 나옵니다.
+  쓴다고 가정한다는 경고가 따로 한 줄 나옵니다. 이렇게 고른 edge의 origin은 `graph_parent`가 아니라
+  `graph_parent_heuristic`이고(그 artifact는 `schema_version` 8), `analyze`는 primary/propagated를
+  나눌 때 이 edge를 선언된 원인으로 보지 않습니다. 그 span이 고른 부모를 link로도 가리키면 선언된
+  것으로 보아 `graph_parent`로 남기고 gap에 세지 않습니다. 이전 릴리스가 만든 artifact는 어느
+  edge를 골랐는지 기록이 없으므로 지금까지처럼 읽습니다.
 - LangGraph 오류 채널이 이미 오류를 담고 있는데 노드가 그 채널을 다시 쓰면
   `langgraph.rewritten_error_channel` gap이 됩니다. 다시 실패한 것인지, state 전체를 돌려주는 노드가
   값을 넘긴 것인지(reducer가 있으면 이때도 값이 바뀝니다) checkpoint만으로는 구분할 수 없어서

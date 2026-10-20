@@ -48,7 +48,7 @@ def _parent(raw, sid="c"):
 def test_the_issue_reproduction_is_accepted_with_the_parent_numbers_order():
     # 0.6.1 read these as nanoseconds and took b; 0.7.0 refused the export.
     raw = _ingest(_loop([1783987200, 1783987201], 1783987202))
-    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT)
+    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
     assert gap_counts(raw) == {"otlp.graph_parent_by_timing": 1, "otlp.unreadable_timestamp": 3}
     assert sum(ORDER_WARNING in w for w in raw.ingest_warnings) == 1
     assert all(s.ts is None for s in raw.steps), "the numbers are still no time"
@@ -56,7 +56,7 @@ def test_the_issue_reproduction_is_accepted_with_the_parent_numbers_order():
 
 def test_the_order_wins_over_a_parent_id_fallback():
     raw = _ingest(_loop([1783987200, 1783987201], 1783987202, child_parent="a"))
-    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT)
+    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
     assert "otlp.graph_parent_fallback" not in gap_counts(raw)
 
 
@@ -67,8 +67,8 @@ def test_a_fallback_that_would_close_a_cycle_is_no_longer_needed():
     export["spans"][-1]["attributes"]["graph.node.id"] = "cn"
     export["spans"].append(_span("p", 1783987202, {"graph.node.id": "pn", "graph.node.parent_id": "cn"}))
     raw = _ingest(export)
-    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT)
-    assert _parent(raw, "p") == ("c", EdgeOrigin.GRAPH_PARENT)
+    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
+    assert _parent(raw, "p") == ("c", EdgeOrigin.GRAPH_PARENT)  # one candidate: declared
 
 
 def test_a_changed_parent_can_change_the_step_order(monkeypatch):
@@ -100,17 +100,17 @@ def test_a_changed_parent_can_change_the_step_order(monkeypatch):
 ])
 def test_unit_unknown_numbers_order_the_candidates(starts, child, expected):
     raw = _ingest(_loop(starts, child))
-    assert _parent(raw) == (expected, EdgeOrigin.GRAPH_PARENT)
+    assert _parent(raw) == (expected, EdgeOrigin.GRAPH_PARENT_HEURISTIC)
 
 
 def test_equal_numbers_tie_by_depth_then_span_id_as_prerank_does():
     raw = _ingest(_loop([1783987200, 1783987200], 1783987201))
-    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT)  # same depth: the later id
+    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT_HEURISTIC)  # same depth: the later id
     # a is one level deeper than b, so depth decides before the id does.
     export = _loop([1783987200, 1783987200], 1783987201)
     export["spans"][0]["parent_id"] = "r"
     export["spans"].append(_span("r", None))
-    assert _parent(_ingest(export)) == ("a", EdgeOrigin.GRAPH_PARENT)
+    assert _parent(_ingest(export)) == ("a", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
 
 
 def test_the_export_order_does_not_matter():
@@ -120,7 +120,7 @@ def test_the_export_order_does_not_matter():
     for seed in range(5):
         shuffled = dict(export, spans=list(export["spans"]))
         random.Random(seed).shuffle(shuffled["spans"])
-        assert _parent(_ingest(shuffled)) == expected == ("b", EdgeOrigin.GRAPH_PARENT)
+        assert _parent(_ingest(shuffled)) == expected == ("b", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
 
 
 @pytest.mark.parametrize("starts, child", [
@@ -147,8 +147,8 @@ def test_timed_and_numbered_choices_are_counted_once_each():
         else:
             span["attributes"]["graph.node.parent_id"] = "nloop"
     raw = _ingest({"traceId": "tr", "spans": timed["spans"] + numbered["spans"]})
-    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT)
-    assert _parent(raw, "nc") == ("nb", EdgeOrigin.GRAPH_PARENT)
+    assert _parent(raw) == ("b", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
+    assert _parent(raw, "nc") == ("nb", EdgeOrigin.GRAPH_PARENT_HEURISTIC)
     assert gap_counts(raw)["otlp.graph_parent_by_timing"] == 2
     assert sum(ORDER_WARNING in w for w in raw.ingest_warnings) == 1
     assert sum("by start time was taken" in w for w in raw.ingest_warnings) == 1
