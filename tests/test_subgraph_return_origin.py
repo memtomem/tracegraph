@@ -384,6 +384,38 @@ def test_a_loop_continuation_returns_whatever_its_versions_seen_says():
     assert _causes(raw, continuation) == {_sid(_sub(saver)[-1]): RETURN}
 
 
+def test_an_edit_of_a_launcher_inside_a_subgraph_keeps_its_declared_parent():
+    # The launcher is itself in a subgraph namespace (`outer:<task_id>`), so the inner subgraph's
+    # namespace is judged by its segment below the launcher's.
+    mid = StateGraph(_State)
+    mid.add_node("o_before", _log("o_before"))
+    mid.add_node("w", _subgraph())
+    mid.add_node("o_after", _log("o_after"))
+    mid.add_edge(START, "o_before")
+    mid.add_edge("o_before", "w")
+    mid.add_edge("w", "o_after")
+    mid.add_edge("o_after", END)
+    app, saver = _app(mid.compile())
+    app.invoke({"log": [], "error": None}, CFG)
+    outer = [t for t in _history(saver) if t.config["configurable"].get("checkpoint_ns", "").count(":") == 1
+             and t.config["configurable"]["checkpoint_ns"].startswith("w:")]
+    launch = next(t for t in outer if t.checkpoint["channel_values"].get("log", [])[-1:] == ["o_before"]
+                  and t.metadata["source"] == "loop")
+    continuation = next(t for t in outer if t.parent_config
+                        and t.parent_config["configurable"]["checkpoint_id"] == launch.checkpoint["id"]
+                        and t.metadata["source"] == "loop")
+    app.update_state(launch.config, {"log": ["edited"]}, as_node="o_before")
+    app.update_state(continuation.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, update) == {_sid(launch): DECLARED}
+    returns = _causes(raw, continuation)
+    assert set(returns.values()) == {RETURN}
+    assert _causes(raw, fork) == returns
+
+
 def test_a_copy_of_a_continuation_resumed_without_persisted_writes_returns_through_the_subgraph():
     # With `durability="exit"` the launching checkpoint never stores the subgraph task's writes, so
     # only `versions_seen` shows that the copy holds the subgraph's output.
