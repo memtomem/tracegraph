@@ -1,8 +1,8 @@
 """`explain`, `query --explain` and `inspect` say when a causal parent was chosen heuristically (#140).
 
 The capture record says such a choice happened somewhere in the trace, not which edge, so the
-caveat is trace-wide. Where it applies, the fan-in line stops calling the chain's causes real or
-telling the reader to trust it; traces without the codes print what they printed before.
+caveat is trace-wide. The fan-in line never calls the chain's causes real or tells the reader to
+trust it, with or without the codes (#143): an adapter may reconstruct a cause unmarked.
 """
 
 import re
@@ -120,13 +120,13 @@ def test_explain_of_a_root_step_shows_no_caveat(tmp_path):
     assert "no causes" in flat and HEURISTIC_PARENT_FIDELITY_WARNING not in flat
 
 
-def test_explain_without_the_codes_reads_as_before(tmp_path):
+def test_explain_without_the_codes_says_recorded_and_no_caveat(tmp_path):
     lossy = _plain_lossy()
     assert any(s.projection_lossy for s in lossy.steps)
     result, flat = _run("explain", _save(tmp_path, "lossy", lossy), "c")
     assert result.exit_code == 0, result.output
-    assert flat.count(OLD_EXPLAIN_LOSSY) == 1
-    assert "recorded" not in flat and HEURISTIC_PARENT_FIDELITY_WARNING not in flat
+    assert flat.count(EXPLAIN_LOSSY) == 1 and OLD_EXPLAIN_LOSSY not in flat
+    assert "real causes" not in flat and HEURISTIC_PARENT_FIDELITY_WARNING not in flat
     result, flat = _run("explain", _save(tmp_path, "plain", _plain()), "c")
     assert result.exit_code == 0, result.output
     assert HEURISTIC_PARENT_FIDELITY_WARNING not in flat and "cause" not in flat
@@ -164,7 +164,8 @@ def test_query_explain_qualifies_only_the_trace_that_carries_the_code(tmp_path):
     plain = [b for b in blocks if CAVEAT not in b]
     assert len(qualified) == 1 and qualified[0].count(QUERY_LOSSY) == 1
     assert "real causes" not in qualified[0]
-    assert len(plain) == 1 and plain[0].count(OLD_QUERY_LOSSY) == 1 and "recorded" not in plain[0]
+    assert len(plain) == 1 and plain[0].count(QUERY_LOSSY) == 1
+    assert OLD_QUERY_LOSSY not in plain[0] and "real causes" not in plain[0]
 
 
 @pytest.mark.parametrize("backend", ["memory", "ladybug"])

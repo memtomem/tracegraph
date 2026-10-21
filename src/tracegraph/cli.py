@@ -1658,17 +1658,12 @@ def explain(
     for s in result.chain:
         flag = " [yellow]⚠ projection-lossy[/]" if s.projection_lossy else ""
         console.print(f"  ← {escape(s.name or s.kind.value)} (step {s.seq}){flag}")
-    # Where the capture record says a parent may have been chosen heuristically, the chain is
-    # not called real or trustworthy; elsewhere the wording is unchanged.
-    if result.is_lossy and heuristic:
+    # "Recorded", not "real": an adapter may have reconstructed a cause, and the capture record
+    # does not always say which.
+    if result.is_lossy:
         console.print(
             "\n[yellow]Some steps had more than one recorded cause; the single-parent tree view "
             "drops some of them, and this raw chain lists every recorded ancestor.[/]"
-        )
-    elif result.is_lossy:
-        console.print(
-            "\n[yellow]Some steps had multiple real causes; the single-parent tree view "
-            "is lossy for them — trust this raw chain, not the tree.[/]"
         )
     if heuristic and result.chain:
         console.print(f"\n[yellow]⚠ {HEURISTIC_PARENT_FIDELITY_WARNING}[/]")
@@ -1808,18 +1803,13 @@ def query(
                 # (target lossiness doesn't show up in the per-step ⚠ flags above, since
                 # we only flag chain ancestors there).
                 # A lossy step can be an ancestor outside the matched path, hence "chain".
-                heuristic = has_heuristic_edges(traces_by_id[m.trace_id])
-                if result.is_lossy and heuristic:
+                if result.is_lossy:
                     console.print(
                         "    [yellow]⚠ some steps in this chain had more than one recorded cause — "
                         "the single-parent tree drops some of them; this raw chain lists every "
                         "recorded ancestor.[/]"
                     )
-                elif result.is_lossy:
-                    console.print(
-                        "    [yellow]⚠ some steps in this match had multiple real causes — "
-                        "trust this raw chain, not the tree.[/]"
-                    )
+                heuristic = has_heuristic_edges(traces_by_id[m.trace_id])
                 if heuristic and result.chain:
                     console.print(f"    [yellow]⚠ {HEURISTIC_PARENT_FIDELITY_WARNING}[/]")
 

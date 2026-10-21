@@ -96,7 +96,8 @@ def test_explain_raw_compete_fan_in_timeout_and_gate_rejection(tmp_path):
         assert expected in result.output
         if index == 0:
             compete_explain = result.output
-    assert "raw chain" in compete_explain and "lossy" in compete_explain
+    flat = " ".join(compete_explain.split())
+    assert "more than one recorded cause" in flat and "this raw chain lists every recorded ancestor" in flat
 
 
 def test_diff_controlled_rerun_identical_and_route_diverges(tmp_path):
