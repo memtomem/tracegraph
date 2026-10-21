@@ -1157,9 +1157,14 @@ class LangGraphCheckpointAdapter:
             for ref in refs:
                 exit_ids: list[str] = []
                 if ref[0] == step_ns:
+                    # A launcher missing from the history cannot be judged; the subgraph's entry
+                    # declares it too, and the caller reports it as partial history.
+                    launcher_id = step_id_by_key.get(ref)
                     for ns, ranks, members in exits_by_entry_parent.get(ref, []):
                         before = bisect_left(ranks, rank)
-                        if before and applied(step_id, step_id_by_key[ref], ns):
+                        if before and (
+                            launcher_id is None or applied(step_id, launcher_id, ns)
+                        ):
                             exit_ids.append(members[before - 1])
                 exit_ids.sort(key=chrono_rank.__getitem__)
                 returns.update((step_id, exit_id) for exit_id in exit_ids)

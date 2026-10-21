@@ -360,6 +360,20 @@ def test_a_node_calling_its_subgraph_twice_is_judged_by_its_own_task():
     assert _causes(raw, replay) == {_sid(launch): DECLARED}
 
 
+def test_a_history_missing_the_launcher_is_reported_as_partial():
+    app, saver = _app(_subgraph())
+    app.invoke({"log": [], "error": None}, CFG)
+    launch = _pre_subgraph(saver).checkpoint["id"]
+    tuples = [t for t in _history(saver) if t.checkpoint["id"] != launch]
+
+    class Stub:
+        def list(self, config):  # noqa: ARG002 - one thread
+            return iter(tuples)
+
+    with pytest.raises(ValueError, match="declares missing parent checkpoint .* partial/corrupt"):
+        LangGraphCheckpointAdapter(Stub()).ingest("t")
+
+
 def test_a_loop_continuation_returns_whatever_its_versions_seen_says():
     # The loop applies the tasks of the step it continues from, so its `versions_seen` is never
     # consulted: a saver that did not carry the entry over still gets the return.
