@@ -401,14 +401,19 @@ adapter reconstructs when the parent namespace continues after a subgraph invoca
 runs through the last checkpoint the invocation wrote before the continuation (a resumed
 subgraph continues from, and returns, its namespace's latest checkpoint) and has origin
 `checkpoint_subgraph_return`, which `analyze` counts as explicit ancestry and the derived tree
-ranks as a declared checkpoint parent. Checkpoints do not record where a caller's checkpoint
-took its state from, which leaves two known cases where the edge can be wrong. An
-`update_state` or a replay fork of the checkpoint that launched the subgraph is linked the same
-way, although its state may predate the subgraph (an `update_state(..., as_node=END)` there can
-instead apply the finished subgraph's output, which the return edge does record). And a
-subgraph checkpoint written after the subgraph finished but before the parent graph continued —
-a node editing its own subgraph while it is still running, or an outside `update_state` of a
-finished subgraph while a sibling task is interrupted — is taken as what the subgraph returned.
+ranks as a declared checkpoint parent. A checkpoint a caller wrote from the checkpoint that
+launched the subgraph (`update_state`, a replay's fork) is linked this way only if its
+`versions_seen` shows it applied the subgraph node's task, so an edit as another node or a
+replay keeps its declared parent, while `update_state(..., as_node=END)` applying the finished
+subgraph's output, or a copy of the continuation, returns through the subgraph. Checkpoints do
+not show everything, so the edge can still be wrong where they cannot: an `update_state` as the
+subgraph node itself (metadata does not record `as_node`), clearing tasks with
+`as_node=END` while the subgraph itself is interrupted, fresh input on that launcher, time
+travel around a `Send` or a node whose task id the adapter cannot recompute (one triggered by a
+plain channel, some barrier configurations), and a subgraph checkpoint written
+after the subgraph finished but before the parent graph continued (a node editing its own
+subgraph while it is still running, or an outside `update_state` of a finished subgraph while a
+sibling task is interrupted).
 
 ## Develop
 

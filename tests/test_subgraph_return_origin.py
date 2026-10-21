@@ -1,4 +1,4 @@
-"""A LangGraph subgraph return is recorded per edge (#150).
+"""A LangGraph subgraph return is recorded per edge (#150), and only where it was applied (#155).
 
 LangGraph records the parent graph's continuation after a subgraph as a child of the checkpoint
 that launched it. The adapter replaces that parent with the subgraph checkpoint the continuation
@@ -7,10 +7,11 @@ continues from its namespace's latest checkpoint. That choice is made by the ada
 edge has origin ``checkpoint_subgraph_return`` and the artifact is stamped schema 9. It stays an
 explicit cause for ``analyze``, and has a declared parent's rank in the derived tree.
 
-Checkpoints do not record where a caller's checkpoint took its state from, so one written from
-the launching checkpoint (``update_state``, a replay's fork) is linked the same way, although its
-state may predate the subgraph. That is a documented limitation, pinned here so a change to it is
-a decision; the edge carries the return origin, so it is not presented as declared.
+A checkpoint a caller writes from the launching checkpoint (``update_state``, a replay's fork, a
+copy) is linked through the subgraph only if its ``versions_seen`` shows it applied the subgraph
+node's task. What checkpoints cannot show (an update as the subgraph node itself, time travel
+around a ``Send``) is still linked; those documented limitations are pinned here so a change to
+them is a decision.
 """
 
 import json
@@ -142,20 +143,36 @@ def test_each_invocation_of_a_fan_out_returns_through_its_own_terminal():
     assert _causes(raw, _root(saver, "loop", 2)) == dict.fromkeys(terminals, RETURN)
 
 
-@pytest.mark.parametrize("as_node", ["before", "w"])
-def test_an_update_of_the_launching_checkpoint_is_linked_as_a_return(as_node):
-    # The documented limitation: the update's state predates the subgraph, but nothing in the
-    # checkpoint says so, and an update can also consume the subgraph's pending output
-    # (`as_node=END`), which only the return edge records.
+def test_an_update_of_the_launching_checkpoint_as_another_node_keeps_its_declared_parent():
     app, saver = _app(_subgraph())
     app.invoke({"log": [], "error": None}, CFG)
     launch = _pre_subgraph(saver)
-    app.update_state(launch.config, {"log": ["edited"]}, as_node=as_node)
+    app.update_state(launch.config, {"log": ["edited"]}, as_node="before")
+    app.invoke(None, CFG)
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
 
     [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
-    terminal = _sub(saver)[-1]
-    assert _causes(raw, update) == _causes(raw, _root(saver, "loop", 2)) == {_sid(terminal): RETURN}
+    assert _causes(raw, update) == {_sid(launch): DECLARED}
+    # The run resumed from the update launches its own subgraph and returns through it.
+    resumed = _sub(saver)[4:]
+    [continuation] = [
+        t for t in _history(saver)
+        if t.parent_config and t.parent_config["configurable"]["checkpoint_id"] == update.checkpoint["id"]
+        and not t.config["configurable"].get("checkpoint_ns")
+    ]
+    assert _causes(raw, continuation) == {_sid(resumed[-1]): RETURN}
+
+
+def test_an_update_as_the_subgraph_node_itself_is_the_documented_limitation():
+    # It applies the subgraph node's writers with the caller's values, so its `versions_seen` moves
+    # exactly as when the subgraph's own output is applied, and metadata does not record `as_node`.
+    app, saver = _app(_subgraph())
+    app.invoke({"log": [], "error": None}, CFG)
+    app.update_state(_pre_subgraph(saver).config, {"log": ["edited"]}, as_node="w")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    assert _causes(raw, update) == {_sid(_sub(saver)[-1]): RETURN}
 
 
 def test_an_update_that_consumes_a_finished_subgraphs_output_returns_through_it():
@@ -187,7 +204,63 @@ def test_an_update_that_consumes_a_finished_subgraphs_output_returns_through_it(
     assert [f.step.name for f in report.primary_failures] == ["i"]
 
 
-def test_a_replay_runs_its_own_subgraph_and_returns_through_it():
+def test_clearing_tasks_while_the_subgraph_is_interrupted_is_the_documented_limitation():
+    # `update_state(..., as_node=END)` clears the interrupted subgraph task without output, but it
+    # applies that task all the same, so its `versions_seen` moves as if the output were applied.
+    sub = StateGraph(_State)
+    sub.add_node("i", _ask)
+    sub.add_edge(START, "i")
+    sub.add_edge("i", END)
+    root = StateGraph(_State)
+    root.add_node("before", _log("before"))
+    root.add_node("w", sub.compile())
+    root.add_edge(START, "before")
+    root.add_edge("before", "w")
+    root.add_edge("w", END)
+    saver = InMemorySaver()
+    app = root.compile(checkpointer=saver)
+    app.invoke({"log": [], "error": None}, CFG)
+    app.update_state(app.get_state(CFG).config, None, as_node=END)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    assert update.checkpoint["channel_values"]["log"] == ["before"]
+    assert set(_causes(raw, update).values()) == {RETURN}
+
+
+def test_a_replay_of_a_plain_pregel_launcher_is_linked_as_before():
+    # A node subscribed to a plain channel has a task id this adapter does not recognise as pull,
+    # so `versions_seen` is not consulted and the replay's fork is linked as in 0.8.0.
+    from langgraph.channels import LastValue
+    from langgraph.pregel import NodeBuilder, Pregel
+
+    inner = Pregel(
+        nodes={"i": NodeBuilder().subscribe_only("x").do(lambda x: x + 1).write_to("out")},
+        channels={"x": LastValue(int), "out": LastValue(int)},
+        input_channels="x",
+        output_channels="out",
+    )
+    saver = InMemorySaver()
+    app = Pregel(
+        nodes={
+            "before": NodeBuilder().subscribe_only("x").do(lambda x: x).write_to("y"),
+            "w": NodeBuilder().subscribe_only("y").do(inner),
+        },
+        channels={"x": LastValue(int), "y": LastValue(int)},
+        input_channels="x",
+        output_channels="y",
+        checkpointer=saver,
+    )
+    app.invoke(1, CFG)
+    launch = _root(saver, "loop", 0)
+    app.invoke(None, launch.config)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert set(_causes(raw, fork).values()) == {RETURN}
+
+
+def test_a_replay_keeps_its_declared_parent_and_returns_through_its_own_subgraph():
     app, saver = _app(_subgraph())
     app.invoke({"log": [], "error": None}, CFG)
     launch = _pre_subgraph(saver)
@@ -196,8 +269,8 @@ def test_a_replay_runs_its_own_subgraph_and_returns_through_it():
 
     first, second = _sub(saver)[:4], _sub(saver)[4:]
     [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
-    # The documented limitation again: the fork copies the launching checkpoint.
-    assert _causes(raw, fork) == {_sid(first[-1]): RETURN}
+    # The fork copies the launching checkpoint, from before the subgraph ran.
+    assert _causes(raw, fork) == {_sid(launch): DECLARED}
     continuations = [
         t for t in _history(saver)
         if not t.config["configurable"].get("checkpoint_ns")
@@ -223,6 +296,107 @@ def test_a_copy_of_the_continuation_returns_through_the_subgraph():
         _pre_subgraph(saver).checkpoint["id"]
     )
     assert _causes(raw, fork) == _causes(raw, continuation) == {_sid(_sub(saver)[-1]): RETURN}
+
+
+def test_a_copy_of_a_repeated_fan_out_continuation_returns_through_every_invocation():
+    # `Send` tasks are push tasks: a second fan-out leaves the subgraph node's `versions_seen` as
+    # the first one left it, so that entry is no evidence for them and they are linked as before.
+    class Looped(TypedDict):
+        log: Annotated[list, operator.add]
+        error: str | None
+        round: int
+
+    fan = lambda state: [Send("w", {"log": []})] * 2  # noqa: E731
+    root = StateGraph(Looped)
+    root.add_node("before", lambda state: {"round": 0})
+    root.add_node("w", _subgraph())
+    root.add_node("gate", lambda state: {"round": state["round"] + 1})
+    root.add_edge(START, "before")
+    root.add_conditional_edges("before", fan, ["w"])
+    root.add_edge("w", "gate")
+    root.add_conditional_edges("gate", lambda state: fan(state) if state["round"] < 2 else END, ["w", END])
+    saver = InMemorySaver()
+    app = root.compile(checkpointer=saver)
+    app.invoke({"log": [], "error": None, "round": 0}, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    second = max(
+        (t for t in _history(saver) if not t.config["configurable"].get("checkpoint_ns")
+         and len(_causes(raw, t)) == 2),
+        key=lambda t: t.checkpoint["id"],
+    )
+    app.update_state(second.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    returns = _causes(raw, second)
+    assert len(returns) == 2 and set(returns.values()) == {RETURN}
+    assert _causes(raw, fork) == returns
+
+
+def test_a_node_calling_its_subgraph_twice_is_judged_by_its_own_task():
+    # The second call's namespace carries a counter segment (`w:<task_id>|1`); the task is still
+    # the launcher's pull task for `w`, so a copy returns through both calls and a replay neither.
+    sub = _subgraph()
+
+    def w(state, config):
+        sub.invoke(state, config)
+        return sub.invoke(state, config)
+
+    app, saver = _app(w)
+    app.invoke({"log": [], "error": None}, CFG)
+    continuation = _root(saver, "loop", 2)
+    launch = _pre_subgraph(saver)
+    app.update_state(continuation.config, None, as_node="__copy__")
+    app.invoke(None, launch.config)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    returns = _causes(raw, continuation)
+    assert len(returns) == 2 and set(returns.values()) == {RETURN}
+    copy, replay = sorted(
+        (t for t in _history(saver) if t.metadata["source"] == "fork"),
+        key=lambda t: t.checkpoint["id"],
+    )
+    assert _causes(raw, copy) == returns
+    assert _causes(raw, replay) == {_sid(launch): DECLARED}
+
+
+def test_a_loop_continuation_returns_whatever_its_versions_seen_says():
+    # The loop applies the tasks of the step it continues from, so its `versions_seen` is never
+    # consulted: a saver that did not carry the entry over still gets the return.
+    import copy
+
+    app, saver = _app(_subgraph())
+    app.invoke({"log": [], "error": None}, CFG)
+    launch, continuation = _pre_subgraph(saver), _root(saver, "loop", 2)
+    tuples = [copy.deepcopy(t) for t in _history(saver)]
+    [edited] = [t for t in tuples if t.checkpoint["id"] == continuation.checkpoint["id"]]
+    if "w" in launch.checkpoint["versions_seen"]:
+        edited.checkpoint["versions_seen"]["w"] = dict(launch.checkpoint["versions_seen"]["w"])
+    else:
+        del edited.checkpoint["versions_seen"]["w"]
+    assert edited.checkpoint["versions_seen"].get("w") == launch.checkpoint["versions_seen"].get("w")
+
+    class Stub:
+        def list(self, config):  # noqa: ARG002 - one thread
+            return iter(tuples)
+
+    raw = LangGraphCheckpointAdapter(Stub()).ingest("t")
+    assert _causes(raw, continuation) == {_sid(_sub(saver)[-1]): RETURN}
+
+
+def test_a_copy_of_a_continuation_resumed_without_persisted_writes_returns_through_the_subgraph():
+    # With `durability="exit"` the launching checkpoint never stores the subgraph task's writes, so
+    # only `versions_seen` shows that the copy holds the subgraph's output.
+    app, saver = _app(_subgraph(i2=_ask))
+    app.invoke({"log": [], "error": None}, CFG)
+    app.invoke(Command(resume="yes"), CFG, durability="exit")
+    finished = [t for t in _history(saver) if not t.config["configurable"].get("checkpoint_ns")][-1]
+    app.update_state(finished.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert "answer=yes" in fork.checkpoint["channel_values"]["log"]
+    assert set(_causes(raw, fork).values()) == {RETURN}
 
 
 def test_a_copy_of_the_launching_checkpoint_keeps_its_declared_parent():

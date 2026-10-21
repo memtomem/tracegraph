@@ -16,12 +16,14 @@ closest LangGraph-declared ``metadata.parents`` entry when there is no direct
 the parent namespace checkpoint as its ``parent_config``; this adapter expands that
 namespace-level shortcut through the terminal checkpoint inside the subgraph namespace: the
 latest one written before the continuation, since a resumed subgraph continues from (and
-returns) its namespace's latest checkpoint. Checkpoints do not record where a caller's
-checkpoint took its state from, so an ``update_state`` or replay fork of the launching
-checkpoint is expanded the same way, although its state may predate the subgraph; and a
-subgraph checkpoint written after the subgraph finished but before the parent continued (a node
-editing its own subgraph while still running, an outside edit while a sibling task is
-interrupted) cannot be told apart from what the subgraph returned, and is taken.
+returns) its namespace's latest checkpoint. A checkpoint a caller wrote from the launching
+checkpoint is expanded only if its ``versions_seen`` shows it applied the subgraph node's task
+(see ``_applied_subgraph_task``), so an edit as another node or a replay keeps its declared
+parent. What checkpoints cannot show is still taken as a return: an ``update_state`` as the
+subgraph node itself (metadata does not record ``as_node``), time travel around a ``Send`` or a
+node whose task id this adapter cannot recompute, and a subgraph checkpoint written after the
+subgraph finished but before the parent continued (a node editing its own subgraph while still
+running, an outside edit while a sibling task is interrupted).
 
 A few facts about the checkpoint stream this relies on (verified against
 langgraph-checkpoint 4.x):
@@ -102,7 +104,7 @@ from bisect import bisect_left
 from hashlib import sha1
 import heapq
 import re
-from typing import Any, Iterable, Iterator, get_type_hints
+from typing import Any, Callable, Iterable, Iterator, get_type_hints
 
 from langgraph.checkpoint.base import Checkpoint, CheckpointMetadata
 from pydantic import TypeAdapter, ValidationError
@@ -316,6 +318,14 @@ class LangGraphCheckpointAdapter:
             key_by_step_id,
             step_id_by_key,
             chrono_rank,
+            lambda step_id, launcher_id, invocation_ns: self._applied_subgraph_task(
+                steps[step_id],
+                checkpoints[step_id],
+                checkpoints[launcher_id],
+                key_by_step_id[launcher_id][0],
+                original_seq[launcher_id],
+                invocation_ns,
+            ),
         )
 
         parents_by_step: dict[str, list[str]] = {}
@@ -1032,18 +1042,54 @@ class LangGraphCheckpointAdapter:
             )
         }
 
+    @classmethod
+    def _applied_subgraph_task(
+        cls,
+        step: Step,
+        cp: dict,
+        launcher_cp: dict,
+        launcher_ns: str,
+        launcher_md_step: int,
+        invocation_ns: str,
+    ) -> bool:
+        """Whether a step can hold the output of the subgraph invocation its parent launched.
+
+        The loop applies the tasks of the step it continues from, so a loop step always can. A
+        checkpoint a caller wrote (``update_state``, a replay's fork, a copy) holds its parent's
+        state plus whatever it applied, and LangGraph records every pull task it applies in
+        ``versions_seen``: one whose entry for the subgraph's node still equals the launcher's
+        did not apply that task, as when a caller edits the launching checkpoint as another node
+        or replays it. A ``Send`` is a push task and never enters ``versions_seen``, and a node
+        on a plain channel trigger has a task id this adapter does not recognise as pull; both
+        count as applied, so they are linked as before.
+        """
+        if step.source is StepSource.LOOP:
+            return True
+        # The launcher's task is the first segment below the launcher's namespace; a node that
+        # calls its subgraph again gets a counter segment after it (`w:<task_id>|1`).
+        relative = invocation_ns[len(launcher_ns) + 1 :] if launcher_ns else invocation_ns
+        node, _, task_id = relative.split("|", 1)[0].partition(":")
+        if not task_id or task_id not in cls._pull_task_ids(
+            launcher_cp, launcher_ns, launcher_md_step, node
+        ):
+            return True
+        return cp.get("versions_seen", {}).get(node) != launcher_cp.get("versions_seen", {}).get(
+            node
+        )
+
     @staticmethod
     def _with_subgraph_exit_edges(
         parent_keys: dict[str, list[_CheckpointKey]],
         key_by_step_id: dict[str, _CheckpointKey],
         step_id_by_key: dict[_CheckpointKey, str],
         chrono_rank: dict[str, int],
+        applied: Callable[[str, str, str], bool],
     ) -> tuple[dict[str, list[_CheckpointKey]], set[tuple[str, str]]]:
         """Each step's causal parents, and the ``(step_id, parent_id)`` pairs that are returns.
 
         A return replaces a step's declared parent, when that parent launched a subgraph
-        invocation in the step's namespace, with the invocation's last checkpoint written before
-        the step.
+        invocation in the step's namespace and ``applied(step_id, parent_id, invocation_ns)``
+        holds, with the invocation's last checkpoint written before the step.
         """
         # Group each namespace's checkpoints into *invocations*, in chronological order.
         #
@@ -1068,8 +1114,9 @@ class LangGraphCheckpointAdapter:
             if ns != _ROOT_NS:
                 members_by_ns.setdefault(ns, []).append(step_id)
 
-        # Per entry parent, each invocation's members and their ranks, both in chronological order.
-        exits_by_entry_parent: dict[_CheckpointKey, list[tuple[list[int], list[str]]]] = {}
+        # Per entry parent, each invocation's namespace, and its members and their ranks, both in
+        # chronological order.
+        exits_by_entry_parent: dict[_CheckpointKey, list[tuple[str, list[int], list[str]]]] = {}
         for ns, member_ids in members_by_ns.items():
             invocations: list[tuple[_CheckpointKey, list[str]]] = []
             pending: list[str] = []
@@ -1097,7 +1144,7 @@ class LangGraphCheckpointAdapter:
                     pending = []
             for entry_parent, members in invocations:
                 exits_by_entry_parent.setdefault(entry_parent, []).append(
-                    ([chrono_rank[sid] for sid in members], members)
+                    (ns, [chrono_rank[sid] for sid in members], members)
                 )
 
         out: dict[str, list[_CheckpointKey]] = {}
@@ -1110,9 +1157,9 @@ class LangGraphCheckpointAdapter:
             for ref in refs:
                 exit_ids: list[str] = []
                 if ref[0] == step_ns:
-                    for ranks, members in exits_by_entry_parent.get(ref, []):
+                    for ns, ranks, members in exits_by_entry_parent.get(ref, []):
                         before = bisect_left(ranks, rank)
-                        if before:
+                        if before and applied(step_id, step_id_by_key[ref], ns):
                             exit_ids.append(members[before - 1])
                 exit_ids.sort(key=chrono_rank.__getitem__)
                 returns.update((step_id, exit_id) for exit_id in exit_ids)

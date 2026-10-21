@@ -54,6 +54,17 @@ explicitly.
 
 ### Fixed
 
+- **LangGraph time travel from a subgraph's launching checkpoint no longer gains the subgraph**
+  (#155). An `update_state` of the checkpoint that launched a subgraph as another node, or the
+  fork a replay from it writes, holds the state from before the subgraph ran, but ingest linked
+  it to the subgraph's last checkpoint. Such a checkpoint now returns through the subgraph only
+  if its `versions_seen` shows it applied the subgraph node's task, as an
+  `update_state(..., as_node=END)` applying the finished subgraph's output or a copy of the
+  continuation does; otherwise it keeps its declared parent. An `update_state` there that writes
+  the error channel is therefore recorded as introducing the error even when the subgraph had
+  failed, and an artifact whose only return edges were these declares its earlier schema
+  version instead of 9. `Send`-launched invocations, and nodes whose task id the adapter cannot
+  recompute (a plain-channel trigger, some barrier configurations), are linked as before.
 - **A later edit of a subgraph checkpoint no longer rewrites an earlier return** (#150). The
   return used to go through the subgraph invocation's last checkpoint overall, so an
   `update_state` of one of its checkpoints after the run made the original continuation lose
