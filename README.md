@@ -50,13 +50,13 @@ silently presents the tree's single parent as "the" cause.
 
 Recorded is not the same as declared by the source. Adapters reconstruct some edges: OTLP and
 Phoenix pick which run of a looped node is the parent by start time or start order, or fall back
-to `parentSpanId`; LangGraph routes a subgraph's return through that subgraph invocation's
-chronologically last checkpoint. Some sources lose edges: OTLP span links that resolve to no span in the trace,
+to `parentSpanId`; LangGraph routes a subgraph's return through the last checkpoint that
+subgraph invocation wrote before the parent graph continued. Some sources lose edges: OTLP span links that resolve to no span in the trace,
 and every link in a Phoenix export, which is ingested parents only. `projection_lossy` measures
 projection loss (more than one recorded parent), not capture fidelity. Some known limitations are
 disclosed per trace (`trace.capture` gaps, `causal_fidelity`, `links_preserved`) or per edge (its
-`origin`); the LangGraph return edge is not marked, and an empty gap list does not mean the
-capture is complete.
+`origin`, such as `checkpoint_subgraph_return` for the LangGraph return edge), and an empty gap
+list does not mean the capture is complete.
 
 | analysis | reads |
 |---|---|
@@ -397,8 +397,18 @@ Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node p
 super-step), and node names/kinds are best-effort metadata. Phoenix/OTLP adapters are
 span-level. Subgraph checkpoints are namespaced, but cross-namespace causality remains
 limited to parent links declared by LangGraph checkpoint metadata, plus the return edge the
-adapter reconstructs when the parent namespace continues after a subgraph invocation (through
-that invocation's chronologically last checkpoint).
+adapter reconstructs when the parent namespace continues after a subgraph invocation. That edge
+runs through the last checkpoint the invocation wrote before the continuation (a resumed
+subgraph continues from, and returns, its namespace's latest checkpoint) and has origin
+`checkpoint_subgraph_return`, which `analyze` counts as explicit ancestry and the derived tree
+ranks as a declared checkpoint parent. Checkpoints do not record where a caller's checkpoint
+took its state from, which leaves two known cases where the edge can be wrong. An
+`update_state` or a replay fork of the checkpoint that launched the subgraph is linked the same
+way, although its state may predate the subgraph (an `update_state(..., as_node=END)` there can
+instead apply the finished subgraph's output, which the return edge does record). And a
+subgraph checkpoint written after the subgraph finished but before the parent graph continued —
+a node editing its own subgraph while it is still running, or an outside `update_state` of a
+finished subgraph while a sibling task is interrupted — is taken as what the subgraph returned.
 
 ## Develop
 
@@ -532,8 +542,9 @@ managed values, cache-key functions — though no node runs. It is never inferre
 Every ingest records what the adapter could not observe: `trace.capture` is an object whose
 `gaps` list holds a fixed code and count per ingest disclosure (empty when there was none),
 and a step's `unknown_fields` names a kind, name or error message the adapter substituted. That
-record makes a fresh artifact declare `schema_version` 7, or 8 when a causal edge has origin
-`graph_parent_heuristic`. The envelope otherwise follows
+record makes a fresh artifact declare `schema_version` 7, 8 when a causal edge has origin
+`graph_parent_heuristic`, or 9 when one has origin `checkpoint_subgraph_return`. The envelope
+otherwise follows
 content, which is what an artifact written by an earlier release keeps when it is loaded and
 saved again: a graph read (`--graph`) needs 6, interrupt steps 5, a derived tree that relies on
 EdgeOrigin precedence 4, derived task steps 3, and anything else 2, byte for byte (a v1 file is

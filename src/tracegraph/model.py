@@ -104,6 +104,10 @@ class EdgeOrigin(str, Enum):
     """Evidence behind a raw causal edge: declared by the source, or chosen by the adapter."""
 
     CHECKPOINT_PARENT = "checkpoint_parent"
+    #: A LangGraph parent-namespace checkpoint linked to the last checkpoint written before it by
+    #: the subgraph invocation its declared parent launched. LangGraph declares the launching
+    #: checkpoint; the adapter picks the subgraph checkpoint by when it was written.
+    CHECKPOINT_SUBGRAPH_RETURN = "checkpoint_subgraph_return"
     GRAPH_PARENT = "graph_parent"
     #: A graph parent the adapter chose among several candidate spans by start order. Not a
     #: declared cause: the producer named a node, not which run of it.
@@ -183,7 +187,12 @@ class DecisionEvidence(BaseModel):
 #: Edge origins that record a declared cause, as opposed to containment (span nesting) or an
 #: origin nobody recorded. Only these are ever rendered as "caused by".
 EXPLICIT_ORIGINS = frozenset(
-    {EdgeOrigin.CHECKPOINT_PARENT, EdgeOrigin.GRAPH_PARENT, EdgeOrigin.SPAN_LINK}
+    {
+        EdgeOrigin.CHECKPOINT_PARENT,
+        EdgeOrigin.CHECKPOINT_SUBGRAPH_RETURN,
+        EdgeOrigin.GRAPH_PARENT,
+        EdgeOrigin.SPAN_LINK,
+    }
 )
 
 #: A content digest as tracegraph writes and accepts it.

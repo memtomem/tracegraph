@@ -439,11 +439,20 @@ SHA-256이 함께 기록됩니다.
 "기록된"은 ingest adapter가 만든 edge라는 뜻이고, 원본이 직접 선언한 관계와 항상 같지는
 않습니다. adapter가 재구성하는 edge가 있습니다. OTLP와 Phoenix는 같은 node가 여러 번 실행되면
 시작 시각이나 시작 순서로 그중 하나를 부모로 고르고, 고르지 못하면 `parentSpanId`를 씁니다.
-LangGraph는 subgraph에서 돌아오는 edge를 그 subgraph 호출의 시간상 마지막 checkpoint로 잇습니다.
+LangGraph는 subgraph에서 돌아오는 edge를, 부모 그래프가 이어지기 전에 그 subgraph 호출이 쓴 마지막
+checkpoint로 잇습니다.
 빠지는 edge도 있습니다. trace 안의 span을 가리키지 못하는 OTLP span link, 그리고 부모만 읽는
 Phoenix export의 link 전부입니다. 알려진 한계 일부는 trace 단위(`trace.capture`의 gap,
-`causal_fidelity`, `links_preserved`)나 edge 단위(`origin`)로 기록됩니다. LangGraph의 복귀 edge는
-표시되지 않으며, gap 목록이 비어 있다고 수집이 완전하다는 뜻은 아닙니다.
+`causal_fidelity`, `links_preserved`)나 edge 단위(`origin`, 예: LangGraph 복귀 edge의
+`checkpoint_subgraph_return`)로 기록되며, gap 목록이 비어 있다고 수집이 완전하다는 뜻은 아닙니다.
+`analyze`는 이 edge를 선언된 원인으로 보고, derived tree에서도 선언된 checkpoint 부모와 같은 순위입니다.
+checkpoint는 호출자가 쓴 checkpoint의 state가 어디서 왔는지 기록하지 않아서, 이 edge가 틀릴 수 있는
+경우가 둘 알려져 있습니다. subgraph를 시작한 checkpoint에서 갈라진 `update_state`나 replay fork도 같은
+방식으로 이어지지만, 그 state는 subgraph가 돌기 전의 것일 수 있습니다(거기서
+`update_state(..., as_node=END)`를 하면 끝난 subgraph의 출력을 적용하기도 하는데, 이 경우는 복귀
+edge가 맞습니다). 그리고 subgraph가 끝난 뒤 부모 그래프가 이어지기 전에 쓰인 subgraph
+checkpoint(실행 중인 노드가 자기 subgraph를 고친 경우, 형제 task가 interrupt된 동안 밖에서 끝난
+subgraph를 `update_state`한 경우)는 subgraph가 돌려준 것으로 잡힙니다.
 
 ### derived tree
 
@@ -497,7 +506,8 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
 ### 수집 provenance (capture)
 
 새로 ingest한 artifact는 adapter가 관측하지 못한 것을 함께 기록하고 `schema_version` 7을
-선언합니다(origin이 `graph_parent_heuristic`인 edge가 있으면 8, 아래 참조). 그 이전 릴리스가 만든 artifact는 읽고 다시 저장해도 이전 릴리스가 쓰던 그대로입니다
+선언합니다(origin이 `graph_parent_heuristic`인 edge가 있으면 8, `checkpoint_subgraph_return`인 edge가
+있으면 9, 아래 참조). 그 이전 릴리스가 만든 artifact는 읽고 다시 저장해도 이전 릴리스가 쓰던 그대로입니다
 (v2–v6은 바이트까지 같고, v1은 지금처럼 v2로 migration됩니다). provenance가 새로 붙지는 않습니다.
 
 - `trace.capture.gaps`: ingest 경고 하나마다 고정 코드와 개수가 남습니다. 읽을 때는 형식에 맞는
