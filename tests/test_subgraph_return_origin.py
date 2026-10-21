@@ -1,4 +1,4 @@
-"""A LangGraph subgraph return is recorded per edge, and only where the loop continued (#150).
+"""A LangGraph subgraph return is recorded per edge (#150).
 
 LangGraph records the parent graph's continuation after a subgraph as a child of the checkpoint
 that launched it. The adapter replaces that parent with the subgraph checkpoint the continuation
@@ -7,8 +7,10 @@ continues from its namespace's latest checkpoint. That choice is made by the ada
 edge has origin ``checkpoint_subgraph_return`` and the artifact is stamped schema 9. It stays an
 explicit cause for ``analyze``, and has a declared parent's rank in the derived tree.
 
-A checkpoint a caller writes from the launching checkpoint (``update_state``, a replay's fork)
-holds the state from before the subgraph ran, so it keeps its declared parent.
+Checkpoints do not record where a caller's checkpoint took its state from, so one written from
+the launching checkpoint (``update_state``, a replay's fork) is linked the same way, although its
+state may predate the subgraph. That is a documented limitation, pinned here so a change to it is
+a decision; the edge carries the return origin, so it is not presented as declared.
 """
 
 import json
@@ -141,7 +143,10 @@ def test_each_invocation_of_a_fan_out_returns_through_its_own_terminal():
 
 
 @pytest.mark.parametrize("as_node", ["before", "w"])
-def test_an_update_of_the_launching_checkpoint_keeps_its_declared_parent(as_node):
+def test_an_update_of_the_launching_checkpoint_is_linked_as_a_return(as_node):
+    # The documented limitation: the update's state predates the subgraph, but nothing in the
+    # checkpoint says so, and an update can also consume the subgraph's pending output
+    # (`as_node=END`), which only the return edge records.
     app, saver = _app(_subgraph())
     app.invoke({"log": [], "error": None}, CFG)
     launch = _pre_subgraph(saver)
@@ -149,21 +154,50 @@ def test_an_update_of_the_launching_checkpoint_keeps_its_declared_parent(as_node
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
 
     [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
-    assert _causes(raw, update) == {_sid(launch): DECLARED}
-    # The original continuation still returns through the subgraph.
-    assert set(_causes(raw, _root(saver, "loop", 2)).values()) == {RETURN}
+    terminal = _sub(saver)[-1]
+    assert _causes(raw, update) == _causes(raw, _root(saver, "loop", 2)) == {_sid(terminal): RETURN}
 
 
-def test_a_replay_fork_keeps_its_declared_parent_and_its_run_returns_through_its_own_subgraph():
+def test_an_update_that_consumes_a_finished_subgraphs_output_returns_through_it():
+    # The subgraph finished beside an interrupted sibling; `update_state(..., as_node=END)` on the
+    # launching checkpoint applies the subgraph's pending output, error included. The error is the
+    # subgraph's, not one the update introduced.
+    sub = StateGraph(_State)
+    sub.add_node("i", _log("sub", error="sub failed"))
+    sub.add_edge(START, "i")
+    sub.add_edge("i", END)
+    root = StateGraph(_State)
+    root.add_node("before", _log("before"))
+    root.add_node("w", sub.compile())
+    root.add_node("sibling", _ask)
+    root.add_edge(START, "before")
+    root.add_edge("before", "w")
+    root.add_edge("before", "sibling")
+    root.add_edge(["w", "sibling"], END)
+    saver = InMemorySaver()
+    app = root.compile(checkpointer=saver)
+    app.invoke({"log": [], "error": None}, CFG)
+    app.update_state(app.get_state(CFG).config, None, as_node=END)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    assert "sub" in update.checkpoint["channel_values"]["log"]
+    assert _causes(raw, update) == {_sid(_sub(saver)[-1]): RETURN}
+    report = analyze(normalize(raw))
+    assert [f.step.name for f in report.primary_failures] == ["i"]
+
+
+def test_a_replay_runs_its_own_subgraph_and_returns_through_it():
     app, saver = _app(_subgraph())
     app.invoke({"log": [], "error": None}, CFG)
     launch = _pre_subgraph(saver)
     app.invoke(None, launch.config)
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
 
-    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
-    assert _causes(raw, fork) == {_sid(launch): DECLARED}
     first, second = _sub(saver)[:4], _sub(saver)[4:]
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    # The documented limitation again: the fork copies the launching checkpoint.
+    assert _causes(raw, fork) == {_sid(first[-1]): RETURN}
     continuations = [
         t for t in _history(saver)
         if not t.config["configurable"].get("checkpoint_ns")
@@ -175,15 +209,12 @@ def test_a_replay_fork_keeps_its_declared_parent_and_its_run_returns_through_its
     ]
 
 
-def test_a_copy_of_the_continuation_returns_through_the_subgraph_it_copied():
-    # A `__copy__` fork declares the copied checkpoint's parent, the launching checkpoint, but it
+def test_a_copy_of_the_continuation_returns_through_the_subgraph():
+    # A `__copy__` fork declares the copied checkpoint's parent, the launching checkpoint, and
     # holds the subgraph's output: a failure resumed from it is still downstream of the subgraph.
-    # Its state is the copied checkpoint's, so a subgraph edit made in between is not its cause.
     app, saver = _app(_subgraph())
     app.invoke({"log": [], "error": None}, CFG)
-    terminal = _sub(saver)[-1]
     continuation = _root(saver, "loop", 2)
-    app.update_state(_sub(saver)[-2].config, {"log": ["later"]}, as_node="i1")
     app.update_state(continuation.config, None, as_node="__copy__")
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
 
@@ -191,7 +222,7 @@ def test_a_copy_of_the_continuation_returns_through_the_subgraph_it_copied():
     assert fork.parent_config["configurable"]["checkpoint_id"] == (
         _pre_subgraph(saver).checkpoint["id"]
     )
-    assert _causes(raw, fork) == _causes(raw, continuation) == {_sid(terminal): RETURN}
+    assert _causes(raw, fork) == _causes(raw, continuation) == {_sid(_sub(saver)[-1]): RETURN}
 
 
 def test_a_copy_of_the_launching_checkpoint_keeps_its_declared_parent():

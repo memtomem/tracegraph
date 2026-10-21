@@ -401,13 +401,14 @@ adapter reconstructs when the parent namespace continues after a subgraph invoca
 runs through the last checkpoint the invocation wrote before the continuation (a resumed
 subgraph continues from, and returns, its namespace's latest checkpoint) and has origin
 `checkpoint_subgraph_return`, which `analyze` counts as explicit ancestry and the derived tree
-ranks as a declared checkpoint parent. Only a checkpoint the graph loop wrote is linked this
-way, or a fork copying one: an `update_state` or a replay fork of the checkpoint that launched
-the subgraph holds the state from before it ran, and keeps its declared parent. A subgraph
-checkpoint written after the subgraph finished but before the parent graph continued — a node
-editing its own subgraph while it is still running, or an outside `update_state` of a finished
-subgraph while a sibling task is interrupted — cannot be told apart from what the subgraph
-returned, and is taken as the return.
+ranks as a declared checkpoint parent. Checkpoints do not record where a caller's checkpoint
+took its state from, which leaves two known cases where the edge can be wrong. An
+`update_state` or a replay fork of the checkpoint that launched the subgraph is linked the same
+way, although its state may predate the subgraph (an `update_state(..., as_node=END)` there can
+instead apply the finished subgraph's output, which the return edge does record). And a
+subgraph checkpoint written after the subgraph finished but before the parent graph continued —
+a node editing its own subgraph while it is still running, or an outside `update_state` of a
+finished subgraph while a sibling task is interrupted — is taken as what the subgraph returned.
 
 ## Develop
 
