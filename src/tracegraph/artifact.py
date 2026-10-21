@@ -20,7 +20,7 @@ from tracegraph.model import EdgeOrigin, EdgeType, NormalizedTrace, StepSource, 
 from tracegraph.normalize import validate_normalized
 
 #: Bump when the on-disk shape changes incompatibly.
-ARTIFACT_SCHEMA_VERSION = 8
+ARTIFACT_SCHEMA_VERSION = 9
 
 #: Versions this build can read. 1 needs a migration (see ``_migrate_v1``); 2 -> 3 is the
 #: identity, because 3 adds only a new ``Step.source`` value and changes nothing existing.
@@ -28,8 +28,8 @@ ARTIFACT_SCHEMA_VERSION = 8
 #: legacy temporal-only selection. 5 adds only the ``interrupt`` ``Step.source`` value. 6 adds
 #: the ``scheduled`` ``Step.source`` value and the optional ``schedule_graph`` trace header. 7 adds
 #: the optional ``capture`` trace header and ``Step.unknown_fields``. 8 adds only the
-#: ``graph_parent_heuristic`` ``EdgeOrigin`` value.
-_READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, ARTIFACT_SCHEMA_VERSION)
+#: ``graph_parent_heuristic`` ``EdgeOrigin`` value, 9 only ``checkpoint_subgraph_return``.
+_READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8, ARTIFACT_SCHEMA_VERSION)
 
 
 def _required_version(nt: NormalizedTrace) -> int:
@@ -42,8 +42,8 @@ def _required_version(nt: NormalizedTrace) -> int:
     bump would invalidate digests already exported in review-candidate reports for artifacts
     whose content did not change at all.
 
-    * An artifact with a causal edge whose origin is ``graph_parent_heuristic`` is stamped 8,
-      for the same reason as 5 below.
+    * An artifact with a causal edge whose origin is ``checkpoint_subgraph_return`` is stamped
+      9, and one whose origin is ``graph_parent_heuristic`` 8, for the same reason as 5 below.
     * An artifact that records capture provenance — a ``capture`` header, or a step with
       ``unknown_fields`` — is stamped 7. Only adapters write it, so loading and re-saving an
       older artifact never adds it and its bytes stay as they were.
@@ -62,8 +62,10 @@ def _required_version(nt: NormalizedTrace) -> int:
     """
     from tracegraph.normalize import requires_origin_priority_projection
 
-    heuristic = EdgeOrigin.GRAPH_PARENT_HEURISTIC
-    if any(edge.origin is heuristic for edge in nt.edges_of(EdgeType.CAUSED_BY)):
+    origins = {edge.origin for edge in nt.edges_of(EdgeType.CAUSED_BY)}
+    if EdgeOrigin.CHECKPOINT_SUBGRAPH_RETURN in origins:
+        return 9
+    if EdgeOrigin.GRAPH_PARENT_HEURISTIC in origins:
         return 8
     if nt.trace.capture is not None or any(step.unknown_fields for step in nt.steps):
         return 7

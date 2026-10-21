@@ -10,6 +10,18 @@ explicitly.
 
 ### Changed
 
+- **A LangGraph subgraph return is recorded on its edge** (#150). When the parent graph continues
+  after a subgraph, LangGraph declares the checkpoint that launched the subgraph as the
+  continuation's parent, and ingest links the continuation to a subgraph checkpoint instead. That
+  edge used to say `checkpoint_parent`, like a parent LangGraph declared. It now has origin
+  `checkpoint_subgraph_return`. `analyze` still counts it as explicit ancestry and the derived
+  tree ranks it as a declared checkpoint parent, so classification and the tree are unchanged;
+  the memo prints the new origin, and `summarize` groups it apart from a declared checkpoint
+  parent.
+- **Artifact schema 9.** An artifact with a `checkpoint_subgraph_return` edge declares
+  `schema_version` 9, so 0.8.0 and earlier refuse it by version instead of failing on the new
+  origin value. Every other artifact keeps the version and bytes it had. Artifacts written by
+  earlier releases are read as before; their return edges still say `checkpoint_parent`.
 - **`explain` and `query --explain` describe fan-in as "more than one recorded cause" for every
   lossy chain** (#143). A trace without a heuristic-parent disclosure used to print "multiple real
   causes … trust this raw chain, not the tree", and `query --explain` said the lossy step was "in
@@ -38,6 +50,21 @@ explicitly.
   earlier releases are read as before: their timed edges say `graph_parent`, so `analyze`
   classifies them as it did, and the memo keeps qualifying every graph parent in a trace with
   `otlp.graph_parent_by_timing`.
+
+### Fixed
+
+- **LangGraph time travel no longer gains a subgraph it never ran** (#150). An `update_state` of
+  the checkpoint that launched a subgraph, or the fork a replay from it writes, holds the state
+  from before the subgraph ran, but ingest linked it to the subgraph's last checkpoint from the
+  original run. It now keeps the parent it declares. An `update_state` there that writes the
+  error channel is therefore recorded as introducing the error even when the original subgraph
+  had failed.
+- **A later edit of a subgraph checkpoint no longer rewrites an earlier return** (#150). The
+  return used to go through the subgraph invocation's last checkpoint overall, so an
+  `update_state` of one of its checkpoints after the run made the original continuation lose
+  the subgraph from its ancestry on the next ingest. Each continuation now returns through the
+  last subgraph checkpoint written before it, which is also what LangGraph resumes from after an
+  interrupted subgraph is edited.
 
 ## 0.8.0 - 2026-10-20
 

@@ -4,7 +4,8 @@ Reads any ``BaseCheckpointSaver`` via ``.list()`` and reconstructs the causal ch
 each checkpoint's declared parentage. One checkpoint (super-step) becomes one ``Step``;
 the parent-checkpoint links become ``CAUSED_BY`` edges (effect → cause). One kind of edge is
 reconstructed rather than declared: the return from a subgraph (below), which runs through the
-subgraph invocation's chronologically last checkpoint and is not marked as such.
+last checkpoint the subgraph invocation wrote before the parent continued, and has origin
+``checkpoint_subgraph_return``.
 
 All checkpoint namespaces for the requested thread are ingested. Root-namespace
 checkpoints keep their checkpoint id as ``step_id``; non-root checkpoints use
@@ -13,7 +14,12 @@ ids. Causality comes from ``parent_config`` first; subgraph namespace roots also
 closest LangGraph-declared ``metadata.parents`` entry when there is no direct
 ``parent_config``. When a parent namespace continues after a subgraph, LangGraph records
 the parent namespace checkpoint as its ``parent_config``; this adapter expands that
-namespace-level shortcut through the terminal checkpoint inside the subgraph namespace.
+namespace-level shortcut through the terminal checkpoint inside the subgraph namespace: the
+latest one written before the continuation, since a resumed subgraph continues from (and
+returns) its namespace's latest checkpoint. Only a checkpoint the loop wrote is expanded; an
+``update_state`` or replay fork of the launching checkpoint keeps its declared parent. A node
+that edits its own subgraph's checkpoints while it is still running leaves two candidates the
+checkpoints cannot tell apart, and the later one is taken.
 
 A few facts about the checkpoint stream this relies on (verified against
 langgraph-checkpoint 4.x):
@@ -90,6 +96,7 @@ applying such writes), and ``Send`` packets addressed to a node the graph does n
 from __future__ import annotations
 
 from binascii import Error as BinasciiError, unhexlify
+from bisect import bisect_left
 from hashlib import sha1
 import heapq
 import re
@@ -302,11 +309,12 @@ class LangGraphCheckpointAdapter:
             )
 
         chrono_rank = self._chrono_rank(checkpoints)
-        causal_parent_keys = self._with_subgraph_exit_edges(
+        causal_parent_keys, subgraph_returns = self._with_subgraph_exit_edges(
             parent_keys,
             key_by_step_id,
             step_id_by_key,
             chrono_rank,
+            {step_id for step_id, step in steps.items() if step.source is StepSource.LOOP},
         )
 
         parents_by_step: dict[str, list[str]] = {}
@@ -340,7 +348,11 @@ class LangGraphCheckpointAdapter:
                 type=EdgeType.CAUSED_BY,
                 src=step_id,
                 dst=parent_id,
-                origin=EdgeOrigin.CHECKPOINT_PARENT,
+                origin=(
+                    EdgeOrigin.CHECKPOINT_SUBGRAPH_RETURN
+                    if (step_id, parent_id) in subgraph_returns
+                    else EdgeOrigin.CHECKPOINT_PARENT
+                ),
             )
             for step_id, parents in parents_by_step.items()
             for parent_id in parents
@@ -1025,7 +1037,13 @@ class LangGraphCheckpointAdapter:
         key_by_step_id: dict[str, _CheckpointKey],
         step_id_by_key: dict[_CheckpointKey, str],
         chrono_rank: dict[str, int],
-    ) -> dict[str, list[_CheckpointKey]]:
+        loop_steps: set[str],
+    ) -> tuple[dict[str, list[_CheckpointKey]], set[tuple[str, str]]]:
+        """Each step's causal parents, and the ``(step_id, parent_id)`` pairs that are returns.
+
+        A return replaces a loop step's declared parent, when that parent launched a subgraph
+        invocation, with the invocation's last checkpoint written before the step.
+        """
         # Group each namespace's checkpoints into *invocations*, in chronological order.
         #
         # A namespace can be entered more than once (a loop re-running the same subgraph
@@ -1037,7 +1055,10 @@ class LangGraphCheckpointAdapter:
         # must come from the same invocation.
         #
         # A step whose parent lies outside the namespace *is* an entry, and so begins a new
-        # invocation; the invocation's terminal is its chronologically last member.
+        # invocation. Its terminal, for a given continuation, is the last member written before
+        # that continuation: a resumed subgraph continues from its namespace's latest checkpoint,
+        # which may be a caller's `update_state` (a human finishing an interrupted subgraph),
+        # and a member written after the continuation (a later edit) cannot have fed it.
         members_by_ns: dict[str, list[str]] = {}
         for step_id, key in sorted(
             key_by_step_id.items(), key=lambda item: (chrono_rank[item[0]], item[0])
@@ -1046,7 +1067,8 @@ class LangGraphCheckpointAdapter:
             if ns != _ROOT_NS:
                 members_by_ns.setdefault(ns, []).append(step_id)
 
-        exits_by_entry_parent: dict[_CheckpointKey, list[_CheckpointKey]] = {}
+        # Per entry parent, each invocation's members and their ranks, both in chronological order.
+        exits_by_entry_parent: dict[_CheckpointKey, list[tuple[list[int], list[str]]]] = {}
         for ns, member_ids in members_by_ns.items():
             invocations: list[tuple[_CheckpointKey, list[str]]] = []
             pending: list[str] = []
@@ -1073,33 +1095,36 @@ class LangGraphCheckpointAdapter:
                     invocations.append((entry_parent, [*pending, step_id]))
                     pending = []
             for entry_parent, members in invocations:
-                terminal = max(members, key=lambda sid: (chrono_rank[sid], sid))
                 exits_by_entry_parent.setdefault(entry_parent, []).append(
-                    key_by_step_id[terminal]
+                    ([chrono_rank[sid] for sid in members], members)
                 )
 
         out: dict[str, list[_CheckpointKey]] = {}
+        returns: set[tuple[str, str]] = set()
         for step_id, refs in parent_keys.items():
             step_ns, _ = key_by_step_id[step_id]
+            rank = chrono_rank[step_id]
             expanded: list[_CheckpointKey] = []
             seen: set[_CheckpointKey] = set()
             for ref in refs:
-                exit_refs = [
-                    exit_ref
-                    for exit_ref in exits_by_entry_parent.get(ref, [])
-                    if ref[0] == step_ns
-                    and chrono_rank[step_id_by_key[exit_ref]] < chrono_rank[step_id]
-                ]
-                replacements = sorted(
-                    exit_refs,
-                    key=lambda exit_ref: chrono_rank[step_id_by_key[exit_ref]],
-                ) or [ref]
+                # Only the loop continues after a subgraph. A checkpoint a caller wrote from the
+                # launching checkpoint (`update_state`, a replay's fork) holds the state from
+                # before the subgraph ran, so it keeps the parent it declares.
+                exit_ids: list[str] = []
+                if ref[0] == step_ns and step_id in loop_steps:
+                    for ranks, members in exits_by_entry_parent.get(ref, []):
+                        before = bisect_left(ranks, rank)
+                        if before:
+                            exit_ids.append(members[before - 1])
+                exit_ids.sort(key=chrono_rank.__getitem__)
+                returns.update((step_id, exit_id) for exit_id in exit_ids)
+                replacements = [key_by_step_id[exit_id] for exit_id in exit_ids] or [ref]
                 for replacement in replacements:
                     if replacement not in seen:
                         seen.add(replacement)
                         expanded.append(replacement)
             out[step_id] = expanded
-        return out
+        return out, returns
 
     @staticmethod
     def _metadata_seq_is_valid(
