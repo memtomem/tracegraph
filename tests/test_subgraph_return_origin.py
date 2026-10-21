@@ -1,4 +1,5 @@
-"""A LangGraph subgraph return is recorded per edge (#150), and only where it was applied (#155).
+"""A LangGraph subgraph return is recorded per edge (#150), only where it was applied (#155), and
+for every run of a persistent subgraph (#154).
 
 LangGraph records the parent graph's continuation after a subgraph as a child of the checkpoint
 that launched it. The adapter replaces that parent with the subgraph checkpoint the continuation
@@ -12,6 +13,9 @@ copy) is linked through the subgraph only if its ``versions_seen`` shows it appl
 node's task. What checkpoints cannot show (an update as the subgraph node itself, time travel
 around a ``Send``) is still linked; those documented limitations are pinned here so a change to
 them is a decision.
+
+A persistent subgraph keeps one namespace across the parent's runs; a run is told apart by the
+launcher its checkpoints record in ``metadata.parents``.
 """
 
 import json
@@ -34,6 +38,7 @@ from tracegraph.model import (
     Step,
     StepKind,
     StepSource,
+    StepStatus,
     Trace,
 )
 from tracegraph.normalize import normalize
@@ -56,14 +61,14 @@ def _ask(state):
     return {"log": [f"answer={interrupt('q')}"]}
 
 
-def _subgraph(*, i1=None, i2=None):
+def _subgraph(*, i1=None, i2=None, checkpointer=None):
     sub = StateGraph(_State)
     sub.add_node("i1", i1 or _log("i1"))
     sub.add_node("i2", i2 or _log("i2"))
     sub.add_edge(START, "i1")
     sub.add_edge("i1", "i2")
     sub.add_edge("i2", END)
-    return sub.compile()
+    return sub.compile(checkpointer=checkpointer)
 
 
 def _app(w, *, after=None, fan_out=False):
@@ -520,6 +525,297 @@ def test_a_node_editing_its_own_subgraph_while_running_is_the_documented_limitat
 
     [unused] = [t for t in _sub(holder["saver"]) if t.metadata["source"] == "update"]
     assert _causes(raw, _root(holder["saver"], "loop", 2)) == {_sid(unused): RETURN}
+
+
+# --- a persistent subgraph used more than once --------------------------------------------------
+#
+# `compile(checkpointer=True)` keeps one namespace (`w`) across the parent's invocations, so a later
+# run's input checkpoint declares the previous run's last checkpoint as its parent; only
+# `metadata.parents` names the checkpoint that launched it.
+
+START_STATE = {"log": [], "error": None}
+
+
+def _persistent(**nodes):
+    return _subgraph(checkpointer=True, **nodes)
+
+
+def _runs(saver):
+    """The persistent subgraph's checkpoints, grouped by the root checkpoint that launched them."""
+    runs: dict[str, list] = {}
+    for t in _sub(saver):
+        runs.setdefault(t.metadata["parents"][""], []).append(t)
+    return list(runs.values())
+
+
+def _launcher(saver, run):
+    [t] = [t for t in _history(saver) if not t.config["configurable"].get("checkpoint_ns")
+           and t.checkpoint["id"] == run[0].metadata["parents"][""]]
+    return t
+
+
+def _continuation(saver, launcher):
+    [t] = [t for t in _history(saver) if not t.config["configurable"].get("checkpoint_ns")
+           and t.metadata["source"] == "loop" and t.parent_config
+           and t.parent_config["configurable"]["checkpoint_id"] == launcher.checkpoint["id"]]
+    return t
+
+
+def _ancestors(raw, step_id):
+    parents: dict[str, list[str]] = {}
+    for e in raw.causal_edges:
+        parents.setdefault(e.src, []).append(e.dst)
+    seen, todo = set(), [step_id]
+    while todo:
+        for parent in parents.get(todo.pop(), []):
+            if parent not in seen:
+                seen.add(parent)
+                todo.append(parent)
+    return seen
+
+
+def test_each_invocation_of_a_persistent_subgraph_returns_through_its_own_run():
+    app, saver = _app(_persistent())
+    for _ in range(3):
+        app.invoke(START_STATE, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    runs = _runs(saver)
+    assert len(runs) == 3
+    for previous, run in zip([None, *runs[:-1]], runs, strict=True):
+        launcher = _launcher(saver, run)
+        assert _causes(raw, _continuation(saver, launcher)) == {_sid(run[-1]): RETURN}
+        entry = {_sid(launcher): DECLARED}
+        if previous is not None:
+            # The declared parent is the previous run; the launcher, from `metadata.parents`, too.
+            entry = {_sid(previous[-1]): DECLARED, **entry}
+        assert _causes(raw, run[0]) == entry
+    # Every input and every subgraph checkpoint is an ancestor of the final checkpoint.
+    final = _history(saver)[-1]
+    expected = {_sid(t) for t in _history(saver) if t.metadata["source"] == "input"} | {
+        _sid(t) for t in _sub(saver)
+    }
+    assert expected <= _ancestors(raw, _sid(final))
+
+
+def test_a_loop_calling_a_persistent_subgraph_again_returns_through_each_call():
+    root = StateGraph(_State)
+    root.add_node("before", _log("before"))
+    root.add_node("w", _persistent())
+    root.add_node("after", _log("after"))
+    root.add_edge(START, "before")
+    root.add_edge("before", "w")
+    root.add_conditional_edges(
+        "w", lambda state: "w" if state["log"].count("i2") < 2 else "after", ["w", "after"]
+    )
+    root.add_edge("after", END)
+    saver = InMemorySaver()
+    app = root.compile(checkpointer=saver)
+    app.invoke(START_STATE, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    runs = _runs(saver)
+    assert len(runs) == 2
+    for run in runs:
+        assert _causes(raw, _continuation(saver, _launcher(saver, run))) == {_sid(run[-1]): RETURN}
+
+
+@pytest.mark.parametrize("which", [0, 1])
+def test_a_replay_of_a_persistent_subgraphs_launcher_keeps_its_declared_parent(which):
+    # The replay's fork copies the launcher, from before the subgraph ran; the subgraph then runs
+    # again from it. The namespace carries no task id, so the launcher's pull task for `w` is found
+    # among the tasks it holds writes from.
+    app, saver = _app(_persistent())
+    app.invoke(START_STATE, CFG)
+    app.invoke(START_STATE, CFG)
+    launcher = _launcher(saver, _runs(saver)[which])
+    app.invoke(None, launcher.config)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, fork) == {_sid(launcher): DECLARED}
+    replayed = _runs(saver)[-1]
+    assert _launcher(saver, replayed).checkpoint["id"] == fork.checkpoint["id"]
+    assert _causes(raw, _continuation(saver, fork)) == {_sid(replayed[-1]): RETURN}
+
+
+def test_an_update_of_the_first_launcher_is_not_linked_through_a_later_run():
+    app, saver = _app(_persistent())
+    app.invoke(START_STATE, CFG)
+    app.invoke(START_STATE, CFG)
+    launcher = _launcher(saver, _runs(saver)[0])
+    app.update_state(launcher.config, {"log": ["edited"]}, as_node="before")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    assert _causes(raw, update) == {_sid(launcher): DECLARED}
+
+
+def test_a_copy_of_a_later_continuation_returns_through_that_run():
+    app, saver = _app(_persistent())
+    app.invoke(START_STATE, CFG)
+    app.invoke(START_STATE, CFG)
+    continuation = _continuation(saver, _launcher(saver, _runs(saver)[1]))
+    app.update_state(continuation.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, fork) == _causes(raw, continuation) == {_sid(_runs(saver)[1][-1]): RETURN}
+
+
+def test_a_persistent_subgraph_resumed_after_a_root_update_keeps_its_own_failure():
+    # The root update sets an error and launches the resumed subgraph, which builds its state from
+    # its own namespace: the update is a cause of it, but its error was not inherited.
+    def fail(state):
+        interrupt("q")
+        return {"log": ["i2"], "error": "inner"}
+
+    app, saver = _app(_persistent(i2=fail))
+    app.invoke(START_STATE, CFG)
+    app.update_state(CFG, {"error": "outer", "log": ["edit"]}, as_node="before")
+    app.invoke(Command(resume="yes"), CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    resumed = _sub(saver)[-1]
+    assert _causes(raw, resumed) == {_sid(_sub(saver)[-2]): DECLARED, _sid(update): DECLARED}
+    assert _causes(raw, _continuation(saver, update)) == {_sid(resumed): RETURN}
+    assert sorted(s.error_msg for s in raw.steps if s.status is StepStatus.ERROR) == [
+        "inner", "outer"
+    ]
+
+
+def test_time_travel_into_a_finished_persistent_subgraph_returns_through_its_fork():
+    # Replaying a subgraph checkpoint's config (`checkpoint_map`) makes LangGraph write a root fork
+    # and a subgraph fork launched from it; the continuation holds the subgraph's output.
+    app, saver = _app(_persistent())
+    app.invoke(START_STATE, CFG)
+    app.invoke(None, app.get_state(_sub(saver)[-1].config).config)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [root_fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"
+                   and not t.config["configurable"].get("checkpoint_ns")]
+    [sub_fork] = [t for t in _sub(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, root_fork) == {_sid(_launcher(saver, _runs(saver)[0])): DECLARED}
+    assert _causes(raw, sub_fork) == {_sid(_runs(saver)[0][-1]): DECLARED, _sid(root_fork): DECLARED}
+    assert _causes(raw, _continuation(saver, root_fork)) == {_sid(sub_fork): RETURN}
+
+
+def test_a_human_finishing_a_later_run_from_an_earlier_runs_checkpoint_is_what_it_returns():
+    # The second run fails in i1 and is interrupted; the human edits a checkpoint of the first run
+    # as i2. LangGraph resumes from the namespace's latest checkpoint, that edit, whichever run it
+    # came from, so the abandoned failure is not an ancestor of the parent graph's own failure.
+    def i1(state):
+        return {"log": ["i1"], "error": "abandoned" if state["log"].count("before") > 1 else None}
+
+    def i2(state):
+        if state["log"].count("before") > 1:
+            interrupt("q")
+        return {"log": ["i2"]}
+
+    def after(state):
+        return {"log": ["after"], "error": "outer" if "human" in state["log"] else None}
+
+    app, saver = _app(_persistent(i1=i1, i2=i2), after=after)
+    app.invoke(START_STATE, CFG)
+    first_step = next(t for t in _runs(saver)[0] if t.metadata["source"] == "loop")
+    app.invoke(START_STATE, CFG)
+    update = app.update_state(first_step.config, {"log": ["human"], "error": None}, as_node="i2")
+    app.invoke(None, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [human] = [t for t in _sub(saver) if t.config["configurable"]["checkpoint_id"]
+               == update["configurable"]["checkpoint_id"]]
+    continuation = _continuation(saver, _launcher(saver, _runs(saver)[1]))
+    assert _causes(raw, continuation) == {_sid(human): RETURN}
+    report = analyze(normalize(raw))
+    assert sorted(f.step.name for f in report.primary_failures) == ["after", "i1"]
+
+
+def test_a_persistent_subgraph_inside_a_plain_one_returns_through_each_level():
+    # The persistent namespace drops the enclosing call's task id (`mid|w`) while `metadata.parents`
+    # names that call's checkpoint under `mid:<task_id>`: that checkpoint launched it.
+    mid = StateGraph(_State)
+    mid.add_node("m", _log("m"))
+    mid.add_node("w", _persistent())
+    mid.add_node("m2", _log("m2"))
+    mid.add_edge(START, "m")
+    mid.add_edge("m", "w")
+    mid.add_edge("w", "m2")
+    mid.add_edge("m2", END)
+    app, saver = _app(mid.compile())
+    app.invoke(START_STATE, CFG)
+    app.invoke(START_STATE, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    ns = lambda t: t.config["configurable"].get("checkpoint_ns", "")  # noqa: E731
+    inner = [t for t in _history(saver) if ns(t) == "w|w"]
+    runs: dict[str, list] = {}
+    for t in inner:
+        [(launcher_ns, launcher_id)] = [(k, v) for k, v in t.metadata["parents"].items() if k]
+        runs.setdefault(launcher_id, []).append((launcher_ns, t))
+    assert len(runs) == 2
+    previous = None
+    for launcher_id, members in runs.items():
+        launcher_ns, entry = members[0]
+        launcher = _sid_of(saver, launcher_ns, launcher_id)
+        expected = {launcher: DECLARED}
+        if previous is not None:
+            expected = {_sid(previous): DECLARED, **expected}
+        assert _causes(raw, entry) == expected
+        [continuation] = [t for t in _history(saver) if ns(t) == launcher_ns and t.parent_config
+                          and t.parent_config["configurable"]["checkpoint_id"] == launcher_id]
+        assert _causes(raw, continuation) == {_sid(members[-1][1]): RETURN}
+        previous = members[-1][1]
+    # An edit of the launcher as another node is judged by the call's own segment below `mid:`.
+    [launcher] = [t for t in _history(saver) if t.checkpoint["id"] == launcher_id]
+    app.update_state(launcher.config, {"log": ["edited"]}, as_node="m")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    [update] = [t for t in _history(saver) if t.metadata["source"] == "update"]
+    assert _causes(raw, update) == {_sid(launcher): DECLARED}
+
+
+def _sid_of(saver, ns, checkpoint_id):
+    [t] = [t for t in _history(saver) if t.checkpoint["id"] == checkpoint_id
+           and t.config["configurable"].get("checkpoint_ns", "") == ns]
+    return _sid(t)
+
+
+def test_finishing_a_run_after_editing_its_launcher_is_the_documented_limitation():
+    # The root edit launches nothing and the subgraph edit records the original launcher, so the
+    # continuation, which declares the root edit, is not linked through the edit it applied.
+    app, saver = _app(_persistent(i2=_ask))
+    app.invoke(START_STATE, CFG)
+    first_step = next(t for t in _sub(saver) if t.metadata["source"] == "loop")
+    app.update_state(CFG, {"log": ["rootedit"]}, as_node="before")
+    app.update_state(first_step.config, {"log": ["finish"]}, as_node="i2")
+    app.invoke(None, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [root_edit] = [t for t in _history(saver) if t.metadata["source"] == "update"
+                   and not t.config["configurable"].get("checkpoint_ns")]
+    continuation = _continuation(saver, root_edit)
+    assert "finish" in continuation.checkpoint["channel_values"]["log"]
+    assert _causes(raw, continuation) == {_sid(root_edit): DECLARED}
+
+
+def test_an_old_runs_edit_taken_by_a_later_copy_is_the_documented_limitation():
+    # A caller's edit records the launcher of the run it edits, but a resumed subgraph continues from
+    # its namespace's latest checkpoint, so the edit joins the run in progress. A copy of that run's
+    # continuation, written after the edit, then returns through it although the copied checkpoint
+    # never saw it. Pinned so a change here is a decision, not an accident.
+    app, saver = _app(_persistent())
+    app.invoke(START_STATE, CFG)
+    app.invoke(START_STATE, CFG)
+    continuation = _continuation(saver, _launcher(saver, _runs(saver)[1]))
+    app.update_state(_runs(saver)[0][-1].config, {"log": ["unused"]}, as_node="i2")
+    app.update_state(continuation.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [edit] = [t for t in _sub(saver) if t.metadata["source"] == "update"]
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, continuation) == {_sid(_runs(saver)[1][-1]): RETURN}
+    assert _causes(raw, fork) == {_sid(edit): RETURN}
 
 
 # --- analysis, tree and artifact ----------------------------------------------------------------
