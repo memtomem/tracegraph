@@ -16,10 +16,11 @@ closest LangGraph-declared ``metadata.parents`` entry when there is no direct
 the parent namespace checkpoint as its ``parent_config``; this adapter expands that
 namespace-level shortcut through the terminal checkpoint inside the subgraph namespace: the
 latest one written before the continuation, since a resumed subgraph continues from (and
-returns) its namespace's latest checkpoint. Only a checkpoint the loop wrote is expanded; an
-``update_state`` or replay fork of the launching checkpoint keeps its declared parent. A node
-that edits its own subgraph's checkpoints while it is still running leaves two candidates the
-checkpoints cannot tell apart, and the later one is taken.
+returns) its namespace's latest checkpoint. Only a checkpoint the loop wrote, or a fork copying
+one, is expanded; an ``update_state`` or replay fork of the launching checkpoint keeps its
+declared parent. A subgraph checkpoint written after the subgraph finished but before the
+parent continued (a node editing its own subgraph while still running, an outside edit while a
+sibling task is interrupted) cannot be told apart from what the subgraph returned, and is taken.
 
 A few facts about the checkpoint stream this relies on (verified against
 langgraph-checkpoint 4.x):
@@ -314,7 +315,7 @@ class LangGraphCheckpointAdapter:
             key_by_step_id,
             step_id_by_key,
             chrono_rank,
-            {step_id for step_id, step in steps.items() if step.source is StepSource.LOOP},
+            self._continuation_ranks(steps, checkpoints, key_by_step_id, chrono_rank),
         )
 
         parents_by_step: dict[str, list[str]] = {}
@@ -1032,17 +1033,52 @@ class LangGraphCheckpointAdapter:
         }
 
     @staticmethod
+    def _continuation_ranks(
+        steps: dict[str, Step],
+        checkpoints: dict[str, dict],
+        key_by_step_id: dict[str, _CheckpointKey],
+        chrono_rank: dict[str, int],
+    ) -> dict[str, int]:
+        """The steps that may continue after a subgraph, each with the rank its state is from.
+
+        Only the loop continues after a subgraph. A checkpoint a caller wrote from the launching
+        checkpoint (``update_state``, the fork a replay writes) holds the state from before the
+        subgraph ran, so it keeps the parent it declares. A fork is a copy, though, and declares
+        the copied checkpoint's parent (``as_node="__copy__"``) or the copied checkpoint itself
+        (a replay): a copy of a continuation holds the subgraph's output and continues from it as
+        of when the copied checkpoint was written. The copy is recognised by its channel
+        versions, which a fork carries over unchanged and every write otherwise moves.
+        """
+        ranks = {
+            step_id: chrono_rank[step_id]
+            for step_id, step in steps.items()
+            if step.source is StepSource.LOOP
+        }
+        copied_by_versions: dict[tuple[str, tuple[tuple[str, Any], ...]], str] = {}
+        for step_id in sorted(checkpoints, key=chrono_rank.__getitem__):
+            versions = checkpoints[step_id].get("channel_versions")
+            if not versions:
+                continue
+            key = (key_by_step_id[step_id][0], tuple(sorted(versions.items())))
+            if steps[step_id].source is not StepSource.FORK:
+                copied_by_versions[key] = step_id
+            elif (copied := copied_by_versions.get(key)) in ranks:
+                ranks[step_id] = ranks[copied]
+        return ranks
+
+    @staticmethod
     def _with_subgraph_exit_edges(
         parent_keys: dict[str, list[_CheckpointKey]],
         key_by_step_id: dict[str, _CheckpointKey],
         step_id_by_key: dict[_CheckpointKey, str],
         chrono_rank: dict[str, int],
-        loop_steps: set[str],
+        continuations: dict[str, int],
     ) -> tuple[dict[str, list[_CheckpointKey]], set[tuple[str, str]]]:
         """Each step's causal parents, and the ``(step_id, parent_id)`` pairs that are returns.
 
-        A return replaces a loop step's declared parent, when that parent launched a subgraph
-        invocation, with the invocation's last checkpoint written before the step.
+        A return replaces a continuation's declared parent, when that parent launched a subgraph
+        invocation, with the invocation's last checkpoint written before the rank
+        ``continuations`` gives it (see :meth:`_continuation_ranks`).
         """
         # Group each namespace's checkpoints into *invocations*, in chronological order.
         #
@@ -1103,15 +1139,12 @@ class LangGraphCheckpointAdapter:
         returns: set[tuple[str, str]] = set()
         for step_id, refs in parent_keys.items():
             step_ns, _ = key_by_step_id[step_id]
-            rank = chrono_rank[step_id]
+            rank = continuations.get(step_id)
             expanded: list[_CheckpointKey] = []
             seen: set[_CheckpointKey] = set()
             for ref in refs:
-                # Only the loop continues after a subgraph. A checkpoint a caller wrote from the
-                # launching checkpoint (`update_state`, a replay's fork) holds the state from
-                # before the subgraph ran, so it keeps the parent it declares.
                 exit_ids: list[str] = []
-                if ref[0] == step_ns and step_id in loop_steps:
+                if ref[0] == step_ns and rank is not None:
                     for ranks, members in exits_by_entry_parent.get(ref, []):
                         before = bisect_left(ranks, rank)
                         if before:

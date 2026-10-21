@@ -402,10 +402,12 @@ runs through the last checkpoint the invocation wrote before the continuation (a
 subgraph continues from, and returns, its namespace's latest checkpoint) and has origin
 `checkpoint_subgraph_return`, which `analyze` counts as explicit ancestry and the derived tree
 ranks as a declared checkpoint parent. Only a checkpoint the graph loop wrote is linked this
-way: an `update_state` or a replay fork of the checkpoint that launched the subgraph holds the
-state from before it ran, and keeps its declared parent. A node that edits its own subgraph's
-checkpoints while it is still running leaves two candidates the checkpoints cannot tell apart;
-the later one is taken.
+way, or a fork copying one: an `update_state` or a replay fork of the checkpoint that launched
+the subgraph holds the state from before it ran, and keeps its declared parent. A subgraph
+checkpoint written after the subgraph finished but before the parent graph continued — a node
+editing its own subgraph while it is still running, or an outside `update_state` of a finished
+subgraph while a sibling task is interrupted — cannot be told apart from what the subgraph
+returned, and is taken as the return.
 
 ## Develop
 

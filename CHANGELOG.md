@@ -20,8 +20,10 @@ explicitly.
   parent.
 - **Artifact schema 9.** An artifact with a `checkpoint_subgraph_return` edge declares
   `schema_version` 9, so 0.8.0 and earlier refuse it by version instead of failing on the new
-  origin value. Every other artifact keeps the version and bytes it had. Artifacts written by
-  earlier releases are read as before; their return edges still say `checkpoint_parent`.
+  origin value. An artifact written by an earlier release keeps its version and bytes when it is
+  loaded and saved again, and is read as before: its return edges still say `checkpoint_parent`.
+  A fresh ingest of a history with time travel around a subgraph can link differently from
+  0.8.0 (see Fixed) even when it has no return edge and stays at an earlier schema version.
 - **`explain` and `query --explain` describe fan-in as "more than one recorded cause" for every
   lossy chain** (#143). A trace without a heuristic-parent disclosure used to print "multiple real
   causes … trust this raw chain, not the tree", and `query --explain` said the lossy step was "in
@@ -56,7 +58,9 @@ explicitly.
 - **LangGraph time travel no longer gains a subgraph it never ran** (#150). An `update_state` of
   the checkpoint that launched a subgraph, or the fork a replay from it writes, holds the state
   from before the subgraph ran, but ingest linked it to the subgraph's last checkpoint from the
-  original run. It now keeps the parent it declares. An `update_state` there that writes the
+  original run. It now keeps the parent it declares. A fork that copies the continuation
+  (`update_state(..., as_node="__copy__")`) still returns through the subgraph, since it holds
+  the subgraph's output; it is recognised by the channel versions it copies. An `update_state` there that writes the
   error channel is therefore recorded as introducing the error even when the original subgraph
   had failed.
 - **A later edit of a subgraph checkpoint no longer rewrites an earlier return** (#150). The

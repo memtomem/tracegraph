@@ -175,6 +175,37 @@ def test_a_replay_fork_keeps_its_declared_parent_and_its_run_returns_through_its
     ]
 
 
+def test_a_copy_of_the_continuation_returns_through_the_subgraph_it_copied():
+    # A `__copy__` fork declares the copied checkpoint's parent, the launching checkpoint, but it
+    # holds the subgraph's output: a failure resumed from it is still downstream of the subgraph.
+    # Its state is the copied checkpoint's, so a subgraph edit made in between is not its cause.
+    app, saver = _app(_subgraph())
+    app.invoke({"log": [], "error": None}, CFG)
+    terminal = _sub(saver)[-1]
+    continuation = _root(saver, "loop", 2)
+    app.update_state(_sub(saver)[-2].config, {"log": ["later"]}, as_node="i1")
+    app.update_state(continuation.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert fork.parent_config["configurable"]["checkpoint_id"] == (
+        _pre_subgraph(saver).checkpoint["id"]
+    )
+    assert _causes(raw, fork) == _causes(raw, continuation) == {_sid(terminal): RETURN}
+
+
+def test_a_copy_of_the_launching_checkpoint_keeps_its_declared_parent():
+    app, saver = _app(_subgraph())
+    app.invoke({"log": [], "error": None}, CFG)
+    launch = _pre_subgraph(saver)
+    app.update_state(launch.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    # It copies the launching checkpoint, so it declares that checkpoint's parent.
+    assert _causes(raw, fork) == {launch.parent_config["configurable"]["checkpoint_id"]: DECLARED}
+
+
 def test_a_later_edit_of_a_subgraph_checkpoint_does_not_rewrite_the_earlier_return():
     app, saver = _app(_subgraph())
     app.invoke({"log": [], "error": None}, CFG)
