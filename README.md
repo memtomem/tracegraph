@@ -413,7 +413,13 @@ travel around a `Send` or a node whose task id the adapter cannot recompute (one
 plain channel, some barrier configurations), and a subgraph checkpoint written
 after the subgraph finished but before the parent graph continued (a node editing its own
 subgraph while it is still running, or an outside `update_state` of a finished subgraph while a
-sibling task is interrupted).
+sibling task is interrupted). A persistent subgraph (`compile(checkpointer=True)`) keeps one
+namespace across the parent graph's runs; each run is told apart by the launcher its
+checkpoints record in `metadata.parents`. A caller's edit of an earlier run's checkpoint joins
+the run in progress, because the subgraph resumes from its namespace's latest checkpoint, so a
+later copy of that run's continuation returns through the edit; and when an interrupted run is
+finished by an `update_state` of the subgraph after the launcher itself was edited, the
+continuation keeps the edited launcher as its parent and does not return through the subgraph.
 
 ## Develop
 

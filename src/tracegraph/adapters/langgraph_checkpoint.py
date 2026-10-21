@@ -214,6 +214,10 @@ _SOURCE_MAP = {
 _CheckpointKey = tuple[str, str]
 
 
+def _segment_names(ns: str) -> list[str]:
+    return [segment.split(":", 1)[0] for segment in ns.split("|")] if ns else []
+
+
 class LangGraphCheckpointAdapter:
     def __init__(
         self,
@@ -313,8 +317,9 @@ class LangGraphCheckpointAdapter:
             )
 
         chrono_rank = self._chrono_rank(checkpoints)
-        causal_parent_keys, subgraph_returns = self._with_subgraph_exit_edges(
+        causal_parent_keys, subgraph_returns, relaunched = self._with_subgraph_exit_edges(
             parent_keys,
+            launch_keys,
             key_by_step_id,
             step_id_by_key,
             chrono_rank,
@@ -325,6 +330,7 @@ class LangGraphCheckpointAdapter:
                 key_by_step_id[launcher_id][0],
                 original_seq[launcher_id],
                 invocation_ns,
+                writes_by_step[launcher_id],
             ),
         )
 
@@ -400,7 +406,10 @@ class LangGraphCheckpointAdapter:
             if no_producer and step.source is StepSource.LOOP and display_parent_id is not None:
                 upstream_keys += [*parent_keys.get(display_parent_id, []),
                                   *launch_keys.get(display_parent_id, [])]
-            upstream_ids = [*parents_by_step.get(step_id, []),
+            # A relaunched persistent subgraph continues its own namespace's state, so the
+            # checkpoint that launched it is a cause but not a state it was built from.
+            relauncher_id = step_id_by_key.get(relaunched[step_id]) if step_id in relaunched else None
+            upstream_ids = [*(pid for pid in parents_by_step.get(step_id, []) if pid != relauncher_id),
                             *(pid for key in upstream_keys if (pid := step_id_by_key.get(key)))]
             error_parent_cps = [checkpoints[pid] for pid in dict.fromkeys(upstream_ids)]
             err = (None if step.source is StepSource.FORK
@@ -1017,10 +1026,17 @@ class LangGraphCheckpointAdapter:
 
     @staticmethod
     def _closest_parent_ns(ns: str, parents: dict[str, str]) -> str | None:
+        # A persistent subgraph's segment carries no task id (`mid|inner`), while its launcher's
+        # namespace does (`mid:<task_id>`), so segments are compared by node name.
+        names = _segment_names(ns)
         candidates = [
             parent_ns or _ROOT_NS
             for parent_ns in parents
-            if parent_ns == _ROOT_NS or ns.startswith(f"{parent_ns}|")
+            if parent_ns == _ROOT_NS
+            or (
+                len(segments := _segment_names(parent_ns)) < len(names)
+                and names[: len(segments)] == segments
+            )
         ]
         if not candidates:
             return None
@@ -1051,6 +1067,7 @@ class LangGraphCheckpointAdapter:
         launcher_ns: str,
         launcher_md_step: int,
         invocation_ns: str,
+        launcher_task_ids: Iterable[str],
     ) -> bool:
         """Whether a step can hold the output of the subgraph invocation its parent launched.
 
@@ -1061,17 +1078,17 @@ class LangGraphCheckpointAdapter:
         did not apply that task, as when a caller edits the launching checkpoint as another node
         or replays it. A ``Send`` is a push task and never enters ``versions_seen``, and a node
         on a plain channel trigger has a task id this adapter does not recognise as pull; both
-        count as applied, so they are linked as before.
+        count as applied, so they are linked as before. A persistent subgraph's namespace carries
+        no task id, so its task is looked for among the ids the launcher holds writes from.
         """
         if step.source is StepSource.LOOP:
             return True
         # The launcher's task is the first segment below the launcher's namespace; a node that
         # calls its subgraph again gets a counter segment after it (`w:<task_id>|1`).
-        relative = invocation_ns[len(launcher_ns) + 1 :] if launcher_ns else invocation_ns
+        relative = "|".join(invocation_ns.split("|")[launcher_ns.count("|") + 1 :]) if launcher_ns else invocation_ns
         node, _, task_id = relative.split("|", 1)[0].partition(":")
-        if not task_id or task_id not in cls._pull_task_ids(
-            launcher_cp, launcher_ns, launcher_md_step, node
-        ):
+        pull_ids = cls._pull_task_ids(launcher_cp, launcher_ns, launcher_md_step, node)
+        if not (task_id in pull_ids if task_id else any(t in pull_ids for t in launcher_task_ids)):
             return True
         return cp.get("versions_seen", {}).get(node) != launcher_cp.get("versions_seen", {}).get(
             node
@@ -1080,16 +1097,22 @@ class LangGraphCheckpointAdapter:
     @staticmethod
     def _with_subgraph_exit_edges(
         parent_keys: dict[str, list[_CheckpointKey]],
+        launch_keys: dict[str, list[_CheckpointKey]],
         key_by_step_id: dict[str, _CheckpointKey],
         step_id_by_key: dict[_CheckpointKey, str],
         chrono_rank: dict[str, int],
         applied: Callable[[str, str, str], bool],
-    ) -> tuple[dict[str, list[_CheckpointKey]], set[tuple[str, str]]]:
-        """Each step's causal parents, and the ``(step_id, parent_id)`` pairs that are returns.
+    ) -> tuple[
+        dict[str, list[_CheckpointKey]], set[tuple[str, str]], dict[str, _CheckpointKey]
+    ]:
+        """Each step's causal parents, the ``(step_id, parent_id)`` pairs that are returns, and
+        the launcher added to each relaunched entry.
 
         A return replaces a step's declared parent, when that parent launched a subgraph
         invocation in the step's namespace and ``applied(step_id, parent_id, invocation_ns)``
-        holds, with the invocation's last checkpoint written before the step.
+        holds, with the invocation's last checkpoint written before the step. A persistent
+        subgraph's entry that declares the namespace's previous invocation also gets the
+        checkpoint that launched it, from ``launch_keys``, as a parent.
         """
         # Group each namespace's checkpoints into *invocations*, in chronological order.
         #
@@ -1117,8 +1140,10 @@ class LangGraphCheckpointAdapter:
         # Per entry parent, each invocation's namespace, and its members and their ranks, both in
         # chronological order.
         exits_by_entry_parent: dict[_CheckpointKey, list[tuple[str, list[int], list[str]]]] = {}
+        relaunched: dict[str, _CheckpointKey] = {}
         for ns, member_ids in members_by_ns.items():
             invocations: list[tuple[_CheckpointKey, list[str]]] = []
+            launchers: set[_CheckpointKey] = set()
             pending: list[str] = []
             for step_id in member_ids:
                 # Only a parent *outside and above* this namespace is an entry. A parent in a
@@ -1135,12 +1160,26 @@ class LangGraphCheckpointAdapter:
                     ),
                     None,
                 )
+                launch = next(iter(launch_keys.get(step_id, [])), None)
+                # A persistent subgraph (`checkpointer=True`) keeps one namespace across the
+                # parent's invocations, so its next entry declares the previous invocation's last
+                # checkpoint as its parent; only `metadata.parents` names the checkpoint that
+                # launched it. A launcher no invocation here has had yet begins a new one. A
+                # member recording a launcher already seen continues the invocation in progress
+                # even when that launcher is an older one's: a caller's edit records the launcher
+                # of the checkpoint it edits, and a resumed subgraph continues from its
+                # namespace's latest checkpoint whichever invocation that edit came from.
+                if entry_parent is None and invocations and launch is not None and (
+                    launch not in launchers
+                ):
+                    entry_parent = relaunched[step_id] = launch
                 if entry_parent is None:
                     # Not an entry: it continues the invocation in progress. Anything seen
                     # before the first entry is held over and joins it.
                     (invocations[-1][1] if invocations else pending).append(step_id)
                 else:
                     invocations.append((entry_parent, [*pending, step_id]))
+                    launchers.add(launch or entry_parent)
                     pending = []
             for entry_parent, members in invocations:
                 exits_by_entry_parent.setdefault(entry_parent, []).append(
@@ -1154,6 +1193,8 @@ class LangGraphCheckpointAdapter:
             rank = chrono_rank[step_id]
             expanded: list[_CheckpointKey] = []
             seen: set[_CheckpointKey] = set()
+            if step_id in relaunched:
+                refs = [*refs, relaunched[step_id]]
             for ref in refs:
                 exit_ids: list[str] = []
                 if ref[0] == step_ns:
@@ -1174,7 +1215,7 @@ class LangGraphCheckpointAdapter:
                         seen.add(replacement)
                         expanded.append(replacement)
             out[step_id] = expanded
-        return out, returns
+        return out, returns, relaunched
 
     @staticmethod
     def _metadata_seq_is_valid(

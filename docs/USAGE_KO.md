@@ -456,6 +456,12 @@ checkpoint에 새 입력을 넣은 경우, `Send`나 adapter가 task id를 다�
 실행되는 노드, 일부 barrier 구성) 주변의 time travel, 그리고
 subgraph가 끝난 뒤 부모 그래프가 이어지기 전에 쓰인 subgraph checkpoint(실행 중인 노드가 자기
 subgraph를 고친 경우, 형제 task가 interrupt된 동안 밖에서 끝난 subgraph를 `update_state`한 경우)입니다.
+persistent subgraph(`compile(checkpointer=True)`)는 부모 그래프가 여러 번 실행되어도 namespace 하나를
+계속 쓰며, 각 실행은 checkpoint의 `metadata.parents`에 기록된 launcher로 구분합니다. 이전 실행의
+checkpoint를 호출자가 고치면 그 수정은 진행 중인 실행에 속합니다. subgraph는 namespace의 최신
+checkpoint에서 이어지기 때문입니다. 그래서 그 뒤에 만든 그 실행 continuation의 복사본은 그 수정을
+거쳐 돌아옵니다. 또 launcher 자체를 고친 뒤 interrupt된 실행을 subgraph의 `update_state`로 끝내면,
+continuation은 고친 launcher를 부모로 두고 subgraph로 돌아오지 않습니다.
 
 ### derived tree
 

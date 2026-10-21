@@ -54,6 +54,25 @@ explicitly.
 
 ### Fixed
 
+- **Every run of a LangGraph persistent subgraph is in its continuation's ancestry** (#154). A
+  subgraph compiled with `checkpointer=True` keeps one checkpoint namespace across the parent's
+  runs, so a later run's input checkpoint declares the previous run's last checkpoint as its
+  parent. Ingest treated that run as part of the first one: the parent graph's continuation was
+  linked straight to the checkpoint that launched the subgraph, and the later run was missing
+  from its ancestry. A subgraph checkpoint whose `metadata.parents` names a launcher the
+  namespace has not had yet now begins a new run, which gets that launcher as a second
+  `checkpoint_parent` (an error the launcher held is not counted as inherited), and the
+  continuation returns through the run's own checkpoints with origin `checkpoint_subgraph_return`.
+  This also covers a loop calling the subgraph again, a resume after a root `update_state`, and
+  time travel into a subgraph checkpoint. A persistent subgraph inside a plain subgraph has a
+  namespace without the enclosing call's task id (`mid|inner`); it is now linked to that call's
+  checkpoint, which launched it, instead of the root's, so the enclosing subgraph's continuation
+  returns through it, on the first run too. A replay or edit of a persistent subgraph's launcher
+  is judged by `versions_seen` as for other subgraphs since #155, where it used to return through
+  whichever run came last. Re-ingesting such a history adds these edges. A caller's edit of an
+  earlier run's checkpoint still joins the run in progress, since LangGraph resumes from the
+  namespace's latest checkpoint; a copy of a continuation written after such an edit therefore
+  returns through the edit.
 - **LangGraph time travel from a subgraph's launching checkpoint no longer gains the subgraph**
   (#155). An `update_state` of the checkpoint that launched a subgraph as another node, or the
   fork a replay from it writes, holds the state from before the subgraph ran, but ingest linked
