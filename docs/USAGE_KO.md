@@ -446,13 +446,16 @@ Phoenix export의 link 전부입니다. 알려진 한계 일부는 trace 단위(
 `causal_fidelity`, `links_preserved`)나 edge 단위(`origin`, 예: LangGraph 복귀 edge의
 `checkpoint_subgraph_return`)로 기록되며, gap 목록이 비어 있다고 수집이 완전하다는 뜻은 아닙니다.
 `analyze`는 이 edge를 선언된 원인으로 보고, derived tree에서도 선언된 checkpoint 부모와 같은 순위입니다.
-checkpoint는 호출자가 쓴 checkpoint의 state가 어디서 왔는지 기록하지 않아서, 이 edge가 틀릴 수 있는
-경우가 둘 알려져 있습니다. subgraph를 시작한 checkpoint에서 갈라진 `update_state`나 replay fork도 같은
-방식으로 이어지지만, 그 state는 subgraph가 돌기 전의 것일 수 있습니다(거기서
-`update_state(..., as_node=END)`를 하면 끝난 subgraph의 출력을 적용하기도 하는데, 이 경우는 복귀
-edge가 맞습니다). 그리고 subgraph가 끝난 뒤 부모 그래프가 이어지기 전에 쓰인 subgraph
-checkpoint(실행 중인 노드가 자기 subgraph를 고친 경우, 형제 task가 interrupt된 동안 밖에서 끝난
-subgraph를 `update_state`한 경우)는 subgraph가 돌려준 것으로 잡힙니다.
+subgraph를 시작한 checkpoint에서 호출자가 쓴 checkpoint(`update_state`, replay fork)는
+`versions_seen`에 subgraph 노드의 task를 적용한 흔적이 있을 때만 이렇게 이어집니다. 그래서 다른
+노드로 고친 update나 replay는 선언된 부모를 그대로 쓰고, 끝난 subgraph의 출력을 적용하는
+`update_state(..., as_node=END)`나 continuation의 복사본은 subgraph로 돌아옵니다. checkpoint가 보여
+주지 못하는 경우에는 여전히 틀릴 수 있습니다. subgraph 노드 자신으로 한 `update_state`(metadata에
+`as_node`가 남지 않음), subgraph 자체가 interrupt된 동안 `as_node=END`로 task를 정리한 경우, 그
+checkpoint에 새 입력을 넣은 경우, `Send`나 adapter가 task id를 다시 계산하지 못하는 노드(일반 채널로
+실행되는 노드, 일부 barrier 구성) 주변의 time travel, 그리고
+subgraph가 끝난 뒤 부모 그래프가 이어지기 전에 쓰인 subgraph checkpoint(실행 중인 노드가 자기
+subgraph를 고친 경우, 형제 task가 interrupt된 동안 밖에서 끝난 subgraph를 `update_state`한 경우)입니다.
 
 ### derived tree
 
