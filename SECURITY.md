@@ -54,7 +54,8 @@ the trace is ingested with `--redact-errors` (`ingest-otlp` and `ingest` both ta
 leaves every error message out and marks it unknown on the step. Span and node names are
 recorded as given either way.
 `export-review-candidates` is likewise not passed through the report redactor: its
-`tool_key` is the raw endpoint span name.
+`tool_key` is the raw endpoint span name. Its schema allows additional fields, which tracegraph
+never writes; consumers must ignore them rather than store, display or forward them.
 
 **So: if your producer puts prompt text, customer data, or credentials into span names or
 exception messages, those land in the artifact** — the messages only when ingested without

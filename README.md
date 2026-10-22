@@ -347,7 +347,13 @@ A `*.json` file in a directory that is not a valid artifact is skipped with a wa
 `query`; pass `--strict` to fail the batch instead.
 The public schema is a repository-vendored contract (not wheel package data) at
 [`contracts/review-candidates.schema.json`](contracts/review-candidates.schema.json); G3
-consumers should vendor that file explicitly.
+consumers should vendor that file explicitly. The schema allows additional fields at both
+levels so that version 1 can grow, which means a document that validates can still carry text
+tracegraph never writes, such as a prompt or an error message. A consumer must ignore fields it
+does not know and must not store, display or forward them, as SyncMill and Toolgraph do; a field
+that carries trace body text would need a new major version. `ReviewCandidateReport` in the
+`tracegraph.review_candidates` module reads that way too: it drops unknown fields and keeps rejected
+input out of the `ValidationError` message.
 
 SyncMill can consume the report without importing this package:
 

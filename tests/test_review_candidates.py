@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
+from pydantic import ValidationError as ModelValidationError
 from typer.testing import CliRunner
 
 from tracegraph import artifact
@@ -78,6 +79,38 @@ def test_contract_schema_and_canonical_fixture():
     Draft202012Validator(schema).validate({**fixture, "future_additive_field": True})
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate({**fixture, "schema_version": 2})
+
+
+def test_reader_discards_extra_fields_at_both_levels():
+    fixture = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    body = "the user's full prompt text"
+    noisy = {
+        **fixture,
+        "prompt": body,
+        "candidates": [
+            {**candidate, "prompt": body, "error_msg": "Traceback ..."}
+            for candidate in fixture["candidates"]
+        ],
+    }
+
+    report = ReviewCandidateReport.model_validate(noisy)
+
+    assert not report.model_extra
+    assert all(not candidate.model_extra for candidate in report.candidates)
+    assert dumps(report) == GOLDEN.read_text(encoding="utf-8")
+
+
+def test_rejected_document_keeps_body_out_of_the_error_text():
+    fixture = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    candidate = {**fixture["candidates"][0], "prompt": "EXTRA_BODY"}
+    del candidate["run_id"]
+
+    with pytest.raises(ModelValidationError) as caught:
+        ReviewCandidateReport.model_validate({**fixture, "candidates": [candidate]})
+
+    assert "run_id" in str(caught.value)
+    assert "EXTRA_BODY" not in str(caught.value)
+    assert "EXTRA_BODY" not in repr(caught.value.errors(include_input=False))
 
 
 def test_canonical_fixture_is_producer_derived(tmp_path):
@@ -236,6 +269,21 @@ def test_invalid_export_preserves_existing_output(
     result = _export(preset, source, target)
     assert result.exit_code != 0
     assert message in result.output
+    assert target.read_text(encoding="utf-8") == "keep-me\n"
+
+
+def test_invalid_candidate_names_the_trace_but_not_the_value(tmp_path):
+    source = tmp_path / "trace.json"
+    target = tmp_path / "report.json"
+    _write_trace(source, "bad", run_id="RUNMARK" + "x" * 250)
+    target.write_text("keep-me\n", encoding="utf-8")
+
+    result = _export("tool-failure", source, target)
+
+    assert result.exit_code == 2
+    compact = " ".join(result.output.split())
+    assert "trace 'bad'" in compact and "run_id" in compact
+    assert "RUNMARK" not in result.output
     assert target.read_text(encoding="utf-8") == "keep-me\n"
 
 
