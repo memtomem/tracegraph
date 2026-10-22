@@ -10,6 +10,10 @@ explicitly.
 
 ### Changed
 
+- **The Phoenix + SyncMill E2E runs against Phoenix server 20.24.0** (#129), pinned by its index
+  digest in `contracts/phoenix-runtime.json`; it was 18.0.0. The body-free evidence (diagnosis
+  `tool-retry-failure@v2`, the diff, one review candidate and the board import) is the same under
+  both servers once run-specific ids and timings are masked. The Phoenix CLI pin stays 1.18.8.
 - **CI runs the suite on Python 3.13 and 3.14** (#128), which `requires-python = ">=3.12"` already
   allowed, and the package now lists both classifiers. A new `full suite (Python 3.13|3.14)` job
   runs the `[cypher]` suite on each; the existing jobs and their names are unchanged and stay on

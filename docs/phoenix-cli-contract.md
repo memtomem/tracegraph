@@ -23,7 +23,8 @@ may contain exported trace data.
 
 ## Updating the Phoenix server pin
 
-1. Select an exact release tag and resolve its immutable Linux digest.
+1. Select an exact release tag and resolve its immutable digest: the multi-arch **index**
+   digest, which covers linux/amd64 (CI) and linux/arm64, not one platform's manifest digest.
 2. Update `version` and `digest` together. The E2E workflow runs
    `image:version@digest`, so a moved tag cannot silently change the tested server.
 3. Run the manual `Phoenix + SyncMill E2E` workflow and verify both diagnosis and review-candidate
