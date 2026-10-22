@@ -33,6 +33,7 @@ from tracegraph.model import (
     EdgeType,
     NormalizedTrace,
     Step,
+    StepSource,
     StepStatus,
     _validated_copy,
     cost_is_bounded,
@@ -59,12 +60,43 @@ HEURISTIC_PARENT_FIDELITY_WARNING = (
     "Some causal parents were chosen heuristically at ingest, by start order or by falling back "
     "to the span parent; a chain through them is inferred, not declared."
 )
+#: Follows the task markers in reports and memos: the markers are records, and the trace status
+#: is defined by failures alone, so neither says whether the run completed.
+TRACE_STATUS_SCOPE = (
+    "trace status reports whether a recorded step failed, not whether the run completed"
+)
 
 
 def has_heuristic_edges(nt: NormalizedTrace) -> bool:
     """Whether the trace's capture record discloses a causal parent chosen heuristically."""
     capture = nt.trace.capture
     return capture is not None and any(gap.code in HEURISTIC_EDGE_GAP_CODES for gap in capture.gaps)
+
+
+def recorded_task_markers(nt: NormalizedTrace) -> str:
+    """Interrupted, scheduled and undecided-interrupt task counts, in ``inspect``'s wording.
+
+    Empty when there are none. Undecided tasks have no interrupt or scheduled step, only the
+    ``langgraph.undecided_interrupt`` capture gap, so no task is counted twice.
+    """
+    interrupted = sum(step.source is StepSource.INTERRUPT for step in nt.steps)
+    scheduled = sum(step.source is StepSource.SCHEDULED for step in nt.steps)
+    capture = nt.trace.capture
+    undecided = sum(
+        gap.count
+        for gap in (capture.gaps if capture is not None else ())
+        if gap.code == "langgraph.undecided_interrupt"
+    )
+    parts = [
+        f"{count} {label}"
+        for count, label in (
+            (interrupted, "interrupted"),
+            (scheduled, "scheduled"),
+            (undecided, "undecided interrupt"),
+        )
+        if count
+    ]
+    return " · ".join(parts)
 
 
 def _clause(sentence: str) -> str:
@@ -690,6 +722,9 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             warnings.append(f"{label}: {_clause(LINKS_PRESERVED_FIDELITY_WARNING)}")
         if has_heuristic_edges(trace):
             warnings.append(f"{label}: {_clause(HEURISTIC_PARENT_FIDELITY_WARNING)}")
+        markers = recorded_task_markers(trace)
+        if markers:
+            warnings.append(f"{label}: recorded task markers: {markers}; {TRACE_STATUS_SCOPE}.")
     if primary or propagated:
         warnings.append(INCIDENT_FIDELITY_WARNING)
     if any(getattr(metrics, field) is not None for field in ("prompt_tokens", "completion_tokens", "total_tokens", "total_cost")):
