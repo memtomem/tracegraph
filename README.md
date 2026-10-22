@@ -37,8 +37,8 @@ uvx --from agent-tracegraph tracegraph --version
 `tracegraph`.** The plain name was already taken on PyPI by an unrelated project, so only the
 name you install differs — you still run `tracegraph` and still `import tracegraph`.
 
-Requires Python 3.12. CI exercises 3.12 on Linux; other versions and platforms are untested
-rather than unsupported.
+Requires Python 3.12 or newer. CI exercises 3.12, 3.13 and 3.14 on Linux; other versions and
+platforms are untested rather than unsupported.
 
 ## Design commitment: causality is never faked
 
@@ -411,7 +411,7 @@ Known limits:
   causes may be missing.
 - Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
   producer's names, and its error messages unless ingested with `--redact-errors`.
-- CI covers Python 3.12 on Linux.
+- CI covers Python 3.12, 3.13 and 3.14 on Linux.
 
 Caveat for the checkpoint adapter: it is a **checkpoint-level** view (one node per
 super-step), and node names/kinds are best-effort metadata. Phoenix/OTLP adapters are
@@ -618,8 +618,8 @@ at 757 MiB, where the store alone takes about 300 MiB. A plain read, `count(*)` 
 Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;
 Ladybug's existing insertion semantics are unchanged. Use `is_isomorphic` or `diff` for
 deep-tree equality; `canonical()` preserves nested tuples, whose external Python equality
-can still reach the interpreter recursion limit. CI currently covers Python 3.12/Linux;
-other supported Python versions and platforms require separate validation.
+can still reach the interpreter recursion limit. CI currently covers Python 3.12–3.14/Linux;
+other Python versions and platforms require separate validation.
 
 ## Contributing, security, and license
 

@@ -206,6 +206,47 @@ jobs:
       - name: pytest (cypher tests included)
         run: uv run --no-sync --extra cypher pytest -v -m "not perf"
 
+  python-versions:
+    # The other Python versions `requires-python` allows. The jobs above keep their names, which
+    # branch protection lists as required checks, and stay on 3.12. These run the cypher suite, a
+    # superset of the core one; packaging, gating, lint and perf are not interpreter behavior.
+    # `release.yml` requires this workflow's run to succeed, so a failure here blocks a release
+    # whether or not the check is required for merging.
+    name: full suite (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v6
+
+      # `python-version` sets UV_PYTHON, which takes precedence over `.python-version` (3.12).
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python }}
+
+      - name: Install with cypher extra
+        run: uv sync --locked --extra cypher
+
+      # A silent fall back to 3.12 would pass every test and prove nothing.
+      - name: Assert the environment runs Python ${{ matrix.python }}
+        env:
+          EXPECTED: ${{ matrix.python }}
+        run: >-
+          uv run --no-sync python -c 'import os, sys;
+          actual = "%d.%d" % sys.version_info[:2];
+          sys.exit(None if actual == os.environ["EXPECTED"]
+          else "expected Python " + os.environ["EXPECTED"] + ", got " + actual)'
+
+      - name: pytest (cypher tests included)
+        run: uv run --no-sync --extra cypher pytest -v -m "not perf"
+
   perf:
     # Wall-clock regression guards, isolated so transient runner load never fails the
     # correctness jobs above. Bounds carry 10-25x headroom; a quadratic regression

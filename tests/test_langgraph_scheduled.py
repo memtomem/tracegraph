@@ -835,7 +835,7 @@ def test_a_utf8_path_keeps_its_module_name(tmp_path, name):
 
 
 def test_a_path_without_utf8_bytes_never_shares_a_utf8_paths_module_name(monkeypatch):
-    """Under Shift-JIS the bytes of "\u7e3a\udc82" (a surrogate-escaped name) are the UTF-8
+    r"""Under Shift-JIS the bytes of "\u7e3a\udc82" (a surrogate-escaped name) are the UTF-8
     bytes of "\u3042", so hashing both bare would register two files as one module."""
     monkeypatch.setattr(
         graph_ref.os, "fsencode", lambda p: os.fspath(p).encode("shift_jis", "surrogateescape")

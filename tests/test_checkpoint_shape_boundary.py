@@ -268,10 +268,21 @@ def _corrupt(tmp_path, sql: str, *params) -> Path:
     return db
 
 
+DEEP_METADATA = "[" * 100_000 + "]" * 100_000
+
+
+def _json_recurses(text: str) -> bool:
+    try:
+        json.loads(text)
+    except RecursionError:
+        return True
+    return False
+
+
 CORRUPTIONS = [
     ("UPDATE checkpoints SET type = 'no-such-type' WHERE rowid = (SELECT max(rowid) FROM checkpoints)",),
     ("UPDATE checkpoints SET metadata = ? WHERE rowid = (SELECT max(rowid) FROM checkpoints)",
-     "[" * 100_000 + "]" * 100_000),
+     DEEP_METADATA),
     ("UPDATE checkpoints SET metadata = 7 WHERE rowid = (SELECT max(rowid) FROM checkpoints)",),
     ("UPDATE checkpoints SET type = 'json', checkpoint = ? WHERE rowid = (SELECT max(rowid) FROM checkpoints)",
      b'{"lc": 2, "type": "constructor", "id": 7}'),
@@ -281,11 +292,16 @@ CORRUPTIONS = [
 @pytest.mark.parametrize("corruption", CORRUPTIONS, ids=["serde-type", "deep-json", "int-metadata", "json-envelope"])
 def test_undecodable_history_is_a_usage_error(tmp_path, corruption):
     db = _corrupt(tmp_path, *corruption)
-    with pytest.raises(ValueError, match="cannot be decoded"):
+    message = "cannot be decoded"
+    if DEEP_METADATA in corruption and not _json_recurses(DEEP_METADATA):
+        # Python 3.14's json parses this depth without recursing; the list then fails the
+        # adapter's shape check instead. Either way it is a ValueError and a usage error.
+        message = "metadata must be an object"
+    with pytest.raises(ValueError, match=message):
         ingest_snapshot(db, "t", error_channel="error")
     conn = sqlite3.connect(db)
     try:
-        with pytest.raises(ValueError, match="cannot be decoded"):
+        with pytest.raises(ValueError, match=message):
             LangGraphCheckpointAdapter(SqliteSaver(conn, serde=_inert_serde())).discover()
     finally:
         conn.close()
