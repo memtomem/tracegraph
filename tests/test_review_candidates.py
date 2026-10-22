@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
+from pydantic import ValidationError as ModelValidationError
 from typer.testing import CliRunner
 
 from tracegraph import artifact
@@ -16,6 +17,7 @@ from tracegraph.cli import app
 from tracegraph.model import Edge, EdgeType, RawTrace, Step, StepKind, StepStatus, Trace
 from tracegraph.normalize import normalize
 from tracegraph.review_candidates import (
+    ReviewCandidate,
     ReviewCandidateReport,
     build_report,
     dumps,
@@ -78,6 +80,43 @@ def test_contract_schema_and_canonical_fixture():
     Draft202012Validator(schema).validate({**fixture, "future_additive_field": True})
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate({**fixture, "schema_version": 2})
+
+
+def test_reader_discards_extra_fields_at_both_levels():
+    fixture = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    body = "the user's full prompt text"
+    noisy = {
+        **fixture,
+        "prompt": body,
+        "candidates": [
+            {**candidate, "prompt": body, "error_msg": "Traceback ..."}
+            for candidate in fixture["candidates"]
+        ],
+    }
+
+    report = ReviewCandidateReport.model_validate(noisy)
+
+    assert not report.model_extra
+    assert all(not candidate.model_extra for candidate in report.candidates)
+    assert dumps(report) == GOLDEN.read_text(encoding="utf-8")
+
+
+def test_rejected_document_keeps_body_out_of_the_error_text():
+    fixture = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    candidate = {**fixture["candidates"][0], "prompt": "EXTRA_BODY"}
+    del candidate["run_id"]
+
+    with pytest.raises(ModelValidationError) as caught:
+        ReviewCandidateReport.model_validate({**fixture, "candidates": [candidate]})
+
+    assert "run_id" in str(caught.value)
+    assert "EXTRA_BODY" not in str(caught.value)
+    assert "EXTRA_BODY" not in repr(caught.value.errors(include_input=False))
+
+    # The envelope's setting also covers nested errors, so check the candidate on its own.
+    with pytest.raises(ModelValidationError) as direct:
+        ReviewCandidate.model_validate(candidate)
+    assert "EXTRA_BODY" not in str(direct.value)
 
 
 def test_canonical_fixture_is_producer_derived(tmp_path):
@@ -182,6 +221,24 @@ def test_builder_deduplicates_and_only_indexes_matched_traces(tmp_path, monkeypa
     assert indexed == ["dupe"]
 
 
+def test_builder_keeps_validation_errors_and_names_the_trace(tmp_path):
+    source = tmp_path / "trace.json"
+    _write_trace(source, "bad", run_id="RUNMARK" + "x" * 250)
+    nt = artifact.load(source)
+    endpoint = next(step for step in nt.steps if step.kind is StepKind.TOOL)
+    match = Match(trace_id="bad", step_ids=[endpoint.step_id], labels=[endpoint.name])
+    digest = f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"
+
+    with pytest.raises(ModelValidationError) as caught:
+        build_report(PRESETS["tool-failure"], [match], {"bad": nt}, {"bad": digest})
+
+    assert caught.value.title == "ReviewCandidate for trace 'bad'"
+    assert [(e["loc"], e["type"]) for e in caught.value.errors()] == [
+        (("run_id",), "string_too_long")
+    ]
+    assert "RUNMARK" not in str(caught.value)
+
+
 @pytest.mark.cypher
 def test_memory_and_ladybug_exports_are_byte_identical(tmp_path):
     pytest.importorskip("ladybug")
@@ -236,6 +293,21 @@ def test_invalid_export_preserves_existing_output(
     result = _export(preset, source, target)
     assert result.exit_code != 0
     assert message in result.output
+    assert target.read_text(encoding="utf-8") == "keep-me\n"
+
+
+def test_invalid_candidate_names_the_trace_but_not_the_value(tmp_path):
+    source = tmp_path / "trace.json"
+    target = tmp_path / "report.json"
+    _write_trace(source, "bad", run_id="RUNMARK" + "x" * 250)
+    target.write_text("keep-me\n", encoding="utf-8")
+
+    result = _export("tool-failure", source, target)
+
+    assert result.exit_code == 2
+    compact = " ".join(result.output.split())
+    assert "trace 'bad'" in compact and "run_id" in compact
+    assert "RUNMARK" not in result.output
     assert target.read_text(encoding="utf-8") == "keep-me\n"
 
 

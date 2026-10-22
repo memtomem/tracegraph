@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic_core import InitErrorDetails
 
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.analysis.patterns import Match, PathPattern
@@ -18,9 +19,13 @@ REVIEW_CANDIDATE_KIND: Final = "tracegraph.review-candidates"
 
 
 class ReviewCandidate(BaseModel):
-    """One minimal governance-review input; no trace body or local path is retained."""
+    """One minimal governance-review input; no trace body or local path is retained.
 
-    model_config = ConfigDict(extra="allow")
+    Unknown fields are accepted and discarded, and rejected input is left out of the error
+    text. ``ValidationError.errors()`` still carries it; use ``errors(include_input=False)``.
+    """
+
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
 
     run_id: str = Field(min_length=1, max_length=256, pattern=r"^\S+$")
     pattern_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -30,9 +35,9 @@ class ReviewCandidate(BaseModel):
 
 
 class ReviewCandidateReport(BaseModel):
-    """Schema-v1 deterministic envelope for zero or more review candidates."""
+    """Schema-v1 deterministic envelope; additive fields are accepted and discarded."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore", hide_input_in_errors=True)
 
     schema_version: Literal[1] = REVIEW_CANDIDATE_SCHEMA_VERSION
     kind: Literal["tracegraph.review-candidates"] = REVIEW_CANDIDATE_KIND
@@ -93,13 +98,25 @@ def build_report(
                 f"trace {match.trace_id!r} matched a TOOL without a server-qualified tool_key"
             )
         digest = artifact_digests[match.trace_id]
-        candidate = ReviewCandidate(
-            run_id=run_id,
-            pattern_id=pattern.pattern_id,
-            pattern_version=pattern.pattern_version,
-            tool_key=tool_key,
-            artifact_digest=digest,
-        )
+        try:
+            candidate = ReviewCandidate(
+                run_id=run_id,
+                pattern_id=pattern.pattern_id,
+                pattern_version=pattern.pattern_version,
+                tool_key=tool_key,
+                artifact_digest=digest,
+            )
+        except ValidationError as exc:
+            # The error text hides the rejected value, so name the trace it came from.
+            details: list[InitErrorDetails] = []
+            for error in exc.errors():
+                detail = InitErrorDetails(type=error["type"], loc=error["loc"], input=error["input"])
+                if "ctx" in error:
+                    detail["ctx"] = error["ctx"]
+                details.append(detail)
+            raise ValidationError.from_exception_data(
+                f"ReviewCandidate for trace {match.trace_id!r}", details, hide_input=True
+            ) from exc
         key = (
             candidate.run_id,
             candidate.pattern_id,

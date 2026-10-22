@@ -10,6 +10,15 @@ explicitly.
 
 ### Changed
 
+- **`ReviewCandidateReport` and `ReviewCandidate` drop fields they do not know** (#126). Both
+  kept them, so reading a review-candidate document that carried, say, a `prompt` or `error_msg`
+  and writing it back with `dumps` passed the text through. They now discard unknown fields at
+  both levels, as the SyncMill and Toolgraph readers do, and a `ValidationError` from either model
+  no longer prints the rejected input; `errors()` still includes it unless called with
+  `include_input=False`. `export-review-candidates` output is unchanged, and the contract schema
+  is unchanged at version 1, still allowing additional fields. A candidate the exporter cannot
+  build still raises `ValidationError`, now titled with its trace, since the rejected
+  value is no longer shown.
 - **A LangGraph subgraph return is recorded on its edge** (#150). When the parent graph continues
   after a subgraph, LangGraph declares the checkpoint that launched the subgraph as the
   continuation's parent, and ingest links the continuation to a subgraph checkpoint instead. That
