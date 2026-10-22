@@ -17,6 +17,7 @@ from tracegraph.cli import app
 from tracegraph.model import Edge, EdgeType, RawTrace, Step, StepKind, StepStatus, Trace
 from tracegraph.normalize import normalize
 from tracegraph.review_candidates import (
+    ReviewCandidate,
     ReviewCandidateReport,
     build_report,
     dumps,
@@ -111,6 +112,11 @@ def test_rejected_document_keeps_body_out_of_the_error_text():
     assert "run_id" in str(caught.value)
     assert "EXTRA_BODY" not in str(caught.value)
     assert "EXTRA_BODY" not in repr(caught.value.errors(include_input=False))
+
+    # The envelope's setting also covers nested errors, so check the candidate on its own.
+    with pytest.raises(ModelValidationError) as direct:
+        ReviewCandidate.model_validate(candidate)
+    assert "EXTRA_BODY" not in str(direct.value)
 
 
 def test_canonical_fixture_is_producer_derived(tmp_path):
@@ -213,6 +219,24 @@ def test_builder_deduplicates_and_only_indexes_matched_traces(tmp_path, monkeypa
     )
     assert len(report.candidates) == 1
     assert indexed == ["dupe"]
+
+
+def test_builder_keeps_validation_errors_and_names_the_trace(tmp_path):
+    source = tmp_path / "trace.json"
+    _write_trace(source, "bad", run_id="RUNMARK" + "x" * 250)
+    nt = artifact.load(source)
+    endpoint = next(step for step in nt.steps if step.kind is StepKind.TOOL)
+    match = Match(trace_id="bad", step_ids=[endpoint.step_id], labels=[endpoint.name])
+    digest = f"sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"
+
+    with pytest.raises(ModelValidationError) as caught:
+        build_report(PRESETS["tool-failure"], [match], {"bad": nt}, {"bad": digest})
+
+    assert caught.value.title == "ReviewCandidate for trace 'bad'"
+    assert [(e["loc"], e["type"]) for e in caught.value.errors()] == [
+        (("run_id",), "string_too_long")
+    ]
+    assert "RUNMARK" not in str(caught.value)
 
 
 @pytest.mark.cypher

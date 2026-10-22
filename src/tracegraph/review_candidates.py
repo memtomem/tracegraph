@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic_core import InitErrorDetails
 
 from tracegraph._atomic_write import write_text_atomic
 from tracegraph.analysis.patterns import Match, PathPattern
@@ -107,7 +108,15 @@ def build_report(
             )
         except ValidationError as exc:
             # The error text hides the rejected value, so name the trace it came from.
-            raise ValueError(f"trace {match.trace_id!r} is not a valid candidate: {exc}") from exc
+            details: list[InitErrorDetails] = []
+            for error in exc.errors():
+                detail = InitErrorDetails(type=error["type"], loc=error["loc"], input=error["input"])
+                if "ctx" in error:
+                    detail["ctx"] = error["ctx"]
+                details.append(detail)
+            raise ValidationError.from_exception_data(
+                f"ReviewCandidate for trace {match.trace_id!r}", details, hide_input=True
+            ) from exc
         key = (
             candidate.run_id,
             candidate.pattern_id,

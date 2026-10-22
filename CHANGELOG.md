@@ -17,7 +17,8 @@ explicitly.
   no longer prints the rejected input; `errors()` still includes it unless called with
   `include_input=False`. `export-review-candidates` output is unchanged, and the contract schema
   is unchanged at version 1, still allowing additional fields. A candidate the exporter cannot
-  build now names its trace in the error, since the rejected value is no longer shown.
+  build still raises `ValidationError`, now titled with its trace, since the rejected
+  value is no longer shown.
 - **A LangGraph subgraph return is recorded on its edge** (#150). When the parent graph continues
   after a subgraph, LangGraph declares the checkpoint that launched the subgraph as the
   continuation's parent, and ingest links the continuation to a subgraph checkpoint instead. That
