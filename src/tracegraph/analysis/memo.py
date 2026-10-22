@@ -12,8 +12,10 @@ from tracegraph.analysis.diagnose import (
     LANGGRAPH_FIDELITY_WARNING,
     LINKS_PRESERVED_FIDELITY_WARNING,
     PARENT_ONLY_FIDELITY_WARNING,
+    TRACE_STATUS_SCOPE,
     has_heuristic_edges,
     pattern_findings,
+    recorded_task_markers,
 )
 from tracegraph.model import (
     EXPLICIT_ORIGINS,
@@ -125,6 +127,12 @@ def build_incident_memo(
         "",
         "## Summary",
         f"- **Trace Status**: `{nt.trace.status.value}`",
+    ])
+    markers = recorded_task_markers(nt)
+    if markers:
+        # Only when present, so the memo of every run without markers keeps its bytes.
+        lines.append(f"- **Recorded Task Markers**: {markers} ({TRACE_STATUS_SCOPE})")
+    lines.extend([
         f"- **Artifact Digest**: `{artifact_digest}`",
         f"- **Causal Fidelity**: `{nt.trace.causal_fidelity.value}`",
         f"- **Links Preserved**: `{links_preserved}`",

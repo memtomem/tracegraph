@@ -10,6 +10,17 @@ explicitly.
 
 ### Changed
 
+- **`analyze` and `export-incident-memo` show recorded task markers** (#127). A run paused by
+  `interrupt()` or stopped by the recursion limit has trace status `ok`, because the status
+  reports whether a recorded step failed; `inspect` marked those tasks, but `analyze` and the
+  memo said nothing. When a trace records any, `analyze` adds the warning
+  `<label>: recorded task markers: 1 interrupted · 1 scheduled · 1 undecided interrupt; trace
+  status reports whether a recorded step failed, not whether the run completed.` (non-zero
+  parts only, for the current trace and the baseline), and the memo adds a
+  `Recorded Task Markers` line after Trace Status. `undecided interrupt` counts the
+  `langgraph.undecided_interrupt` capture gap. The markers are records, not completion: see
+  README. The artifact, its schema version and the trace status are unchanged, and so are the
+  report schema and every report and memo of a trace without markers.
 - **`ReviewCandidateReport` and `ReviewCandidate` drop fields they do not know** (#126). Both
   kept them, so reading a review-candidate document that carried, say, a `prompt` or `error_msg`
   and writing it back with `dumps` passed the text through. They now discard unknown fields at
