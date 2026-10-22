@@ -528,7 +528,7 @@ current: recorded task markers: 1 interrupted · 1 scheduled; trace status repor
 ```
 
 - `interrupted`는 interrupt step, `scheduled`는 scheduled step의 개수이고, `undecided interrupt`는
-  resume이나 오류와 함께 기록된 interrupt의 개수입니다. 이런 task에는 interrupt·scheduled step이
+  resume이나 오류와 함께 기록됐지만 결과는 없는 interrupt의 개수입니다. 이런 task에는 interrupt·scheduled step이
   생기지 않으므로 `langgraph.undecided_interrupt` capture gap에서 셉니다(오류 step은 남을 수 있습니다). 한 task가 두 번 세어지지 않습니다. `inspect`는 앞의 두 개만 보여 줍니다.
 - **표식은 기록이지 완료 여부가 아닙니다.** 가장 최근 root checkpoint가 기록한 것을 root task
   단위로 셉니다. checkpoint를 남기지 않고 끝난 수정된 그래프 뒤에도 interrupt 기록은 남고,

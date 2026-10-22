@@ -397,7 +397,8 @@ Known limits:
   paused or stopped run reads `ok` unless a step failed. Next to it, `analyze` (as a warning,
   also in `--json-out`) and `export-incident-memo` show the recorded task markers:
   `interrupted`, `scheduled`, and `undecided interrupt` (an interrupt recorded with a resume or
-  an error; it gets no interrupt or scheduled step and is counted from its capture gap).
+  an error and no result; it gets no interrupt or scheduled step and is counted from its
+  capture gap).
   `inspect` shows the first two. They count what the newest root checkpoint records, per root
   task: an interrupt record outlives a revised graph that finished without writing a
   checkpoint, a resumed subgraph can leave its parent's record, several paused inner tasks

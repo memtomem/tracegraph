@@ -1,9 +1,8 @@
 """Interrupted, scheduled and undecided-interrupt tasks are shown by ``analyze`` and the memo.
 
 The trace status means "a recorded step failed", so a paused or stopped run reads ``ok`` unless
-a step failed. The
-markers say what the checkpoints record and nothing more: a revised graph can finish past an
-interrupt record, so the wording never claims the run did or did not complete.
+a step failed. The markers say what the checkpoints record and nothing more: a revised graph can
+finish past an interrupt record, so the wording never claims the run did or did not complete.
 """
 
 from __future__ import annotations
