@@ -68,6 +68,9 @@ _MAY_OMIT_STEPS = frozenset({
 _REWRITTEN_ERRORS = frozenset({"langgraph.rewritten_error_channel"})
 _MAY_HIDE_FAILURES = _MAY_OMIT_STEPS | _REWRITTEN_ERRORS
 _HEURISTIC_EDGES = HEURISTIC_EDGE_GAP_CODES
+#: Causal edges the adapter could not decide and left out. Every step and status is recorded, so
+#: only the rules that follow edges (paths and the derived tree) are affected.
+_UNDECIDED_EDGES = frozenset({"langgraph.ambiguous_subgraph_return"})
 
 LANGGRAPH_LIMITATION = (
     "LangGraph checkpoint layouts this adapter does not recognize record no failure, so a "
@@ -362,6 +365,9 @@ def _causal_reasons(current: NormalizedTrace, baseline: NormalizedTrace) -> list
     for label, nt in (("current", current), ("baseline", baseline)):
         if _gap_hides(nt, _HEURISTIC_EDGES):
             reasons.append(f"{label}: some causal edges were chosen heuristically at ingest")
+        if _gap_codes(nt) & _UNDECIDED_EDGES:
+            reasons.append(f"{label}: some causal edges could not be decided at ingest and were "
+                           "left out")
     return reasons
 
 

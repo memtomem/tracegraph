@@ -317,7 +317,8 @@ class LangGraphCheckpointAdapter:
             )
 
         chrono_rank = self._chrono_rank(checkpoints)
-        causal_parent_keys, subgraph_returns, relaunched = self._with_subgraph_exit_edges(
+        causal_parent_keys, subgraph_returns, relaunched, undecided_returns = (
+            self._with_subgraph_exit_edges(
             parent_keys,
             launch_keys,
             key_by_step_id,
@@ -332,6 +333,8 @@ class LangGraphCheckpointAdapter:
                 invocation_ns,
                 writes_by_step[launcher_id],
             ),
+            lambda step_id: steps[step_id].source is StepSource.FORK,
+            )
         )
 
         parents_by_step: dict[str, list[str]] = {}
@@ -460,6 +463,16 @@ class LangGraphCheckpointAdapter:
                 f"{malformed_writes} pending write(s) are not a (task id, channel, value) "
                 "triple and were ignored; a task failure recorded in one would not be reported.",
                 malformed_writes,
+            )
+        if undecided_returns:
+            count = sum(map(len, undecided_returns.values()))
+            disclosures.add(
+                "langgraph.ambiguous_subgraph_return",
+                f"{count} subgraph return(s) were left out: a copy of a checkpoint holds the "
+                "subgraph's output, but earlier checkpoints from that launcher returned through "
+                "different subgraph checkpoints and nothing records which one it holds; it keeps "
+                "its declared parent.",
+                count,
             )
         if rewritten_errors:
             disclosures.add(
@@ -1102,11 +1115,16 @@ class LangGraphCheckpointAdapter:
         step_id_by_key: dict[_CheckpointKey, str],
         chrono_rank: dict[str, int],
         applied: Callable[[str, str, str], bool],
+        copies: Callable[[str], bool],
     ) -> tuple[
-        dict[str, list[_CheckpointKey]], set[tuple[str, str]], dict[str, _CheckpointKey]
+        dict[str, list[_CheckpointKey]],
+        set[tuple[str, str]],
+        dict[str, _CheckpointKey],
+        dict[str, list[list[str]]],
     ]:
-        """Each step's causal parents, the ``(step_id, parent_id)`` pairs that are returns, and
-        the launcher added to each relaunched entry.
+        """Each step's causal parents, the ``(step_id, parent_id)`` pairs that are returns, the
+        launcher added to each relaunched entry, and per step the candidate members of each
+        return left out undecided.
 
         A return replaces a step's declared parent, when that parent launched a subgraph
         invocation in the step's namespace and ``applied(step_id, parent_id, invocation_ns)``
@@ -1188,7 +1206,12 @@ class LangGraphCheckpointAdapter:
 
         out: dict[str, list[_CheckpointKey]] = {}
         returns: set[tuple[str, str]] = set()
-        for step_id, refs in parent_keys.items():
+        # Per launcher and invocation namespace, the members earlier steps returned through.
+        chosen: dict[tuple[_CheckpointKey, str], set[str]] = {}
+        # Per step, the members each return left out could have come from.
+        undecided: dict[str, list[list[str]]] = {}
+        for step_id in sorted(parent_keys, key=lambda sid: (chrono_rank[sid], sid)):
+            refs = parent_keys[step_id]
             step_ns, _ = key_by_step_id[step_id]
             rank = chrono_rank[step_id]
             expanded: list[_CheckpointKey] = []
@@ -1197,6 +1220,7 @@ class LangGraphCheckpointAdapter:
                 refs = [*refs, relaunched[step_id]]
             for ref in refs:
                 exit_ids: list[str] = []
+                keep_ref = False
                 if ref[0] == step_ns:
                     # A launcher missing from the history cannot be judged; the subgraph's entry
                     # declares it too, and the caller reports it as partial history.
@@ -1206,16 +1230,30 @@ class LangGraphCheckpointAdapter:
                         if before and (
                             launcher_id is None or applied(step_id, launcher_id, ns)
                         ):
-                            exit_ids.append(members[before - 1])
+                            # A fork copies a checkpoint that already applied the subgraph's output,
+                            # and nothing records which one: where earlier steps from this launcher
+                            # returned through another member than the last one written before the
+                            # fork, as when a member was edited in between, it is left out. A fork
+                            # runs no node, so leaving it out cannot make its error look new.
+                            exit_id = members[before - 1]
+                            earlier = chosen.setdefault((ref, ns), set())
+                            if not copies(step_id) or earlier <= {exit_id}:
+                                earlier.add(exit_id)
+                                exit_ids.append(exit_id)
+                            else:
+                                keep_ref = True
+                                undecided.setdefault(step_id, []).append(sorted(earlier | {exit_id}))
                 exit_ids.sort(key=chrono_rank.__getitem__)
                 returns.update((step_id, exit_id) for exit_id in exit_ids)
-                replacements = [key_by_step_id[exit_id] for exit_id in exit_ids] or [ref]
+                replacements = [key_by_step_id[exit_id] for exit_id in exit_ids]
+                if keep_ref or not replacements:
+                    replacements.insert(0, ref)
                 for replacement in replacements:
                     if replacement not in seen:
                         seen.add(replacement)
                         expanded.append(replacement)
             out[step_id] = expanded
-        return out, returns, relaunched
+        return {step_id: out[step_id] for step_id in parent_keys}, returns, relaunched, undecided
 
     @staticmethod
     def _metadata_seq_is_valid(

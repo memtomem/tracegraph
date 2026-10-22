@@ -277,6 +277,7 @@ class ScheduleGraph(BaseModel):
 #: no checkpoint id, task id or producer value.
 CAPTURE_GAP_CODES = frozenset(
     {
+        "langgraph.ambiguous_subgraph_return",
         "langgraph.malformed_pending_writes",
         "langgraph.rewritten_error_channel",
         "langgraph.unapplied_command_goto",

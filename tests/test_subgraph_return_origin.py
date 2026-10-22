@@ -799,23 +799,144 @@ def test_finishing_a_run_after_editing_its_launcher_is_the_documented_limitation
     assert _causes(raw, continuation) == {_sid(root_edit): DECLARED}
 
 
-def test_an_old_runs_edit_taken_by_a_later_copy_is_the_documented_limitation():
-    # A caller's edit records the launcher of the run it edits, but a resumed subgraph continues from
-    # its namespace's latest checkpoint, so the edit joins the run in progress. A copy of that run's
-    # continuation, written after the edit, then returns through it although the copied checkpoint
-    # never saw it. Pinned so a change here is a decision, not an accident.
-    app, saver = _app(_persistent())
+@pytest.mark.parametrize("persistent", [False, True])
+def test_a_copy_written_after_an_edit_inside_the_subgraph_keeps_its_declared_parent(persistent):
+    # The continuation returned through the subgraph's terminal; an edit inside the namespace is
+    # written after it (an earlier member of the run, or of an earlier run), then the continuation
+    # is copied. Nothing records which checkpoint the copy holds, so it keeps its declared parent
+    # and the undecided return is disclosed, rather than returning through the unused edit.
+    app, saver = _app(_persistent() if persistent else _subgraph())
     app.invoke(START_STATE, CFG)
-    app.invoke(START_STATE, CFG)
-    continuation = _continuation(saver, _launcher(saver, _runs(saver)[1]))
-    app.update_state(_runs(saver)[0][-1].config, {"log": ["unused"]}, as_node="i2")
+    if persistent:
+        app.invoke(START_STATE, CFG)
+    run = _runs(saver)[-1]
+    launcher = _launcher(saver, run)
+    continuation = _continuation(saver, launcher)
+    edited = _runs(saver)[0][-1] if persistent else run[-2]
+    app.update_state(edited.config, {"log": ["unused"], "error": "unused-error"}, as_node="i2")
     app.update_state(continuation.config, None, as_node="__copy__")
     raw = LangGraphCheckpointAdapter(saver).ingest("t")
 
-    [edit] = [t for t in _sub(saver) if t.metadata["source"] == "update"]
     [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
-    assert _causes(raw, continuation) == {_sid(_runs(saver)[1][-1]): RETURN}
-    assert _causes(raw, fork) == {_sid(edit): RETURN}
+    assert _causes(raw, continuation) == {_sid(run[-1]): RETURN}
+    assert _causes(raw, fork) == {_sid(launcher): DECLARED}
+    assert {g.code: g.count for g in raw.trace.capture.gaps} == {
+        "langgraph.ambiguous_subgraph_return": 1
+    }
+
+
+def test_a_copy_of_a_copy_without_an_edit_in_between_still_returns():
+    app, saver = _app(_subgraph())
+    app.invoke(START_STATE, CFG)
+    continuation = _root(saver, "loop", 2)
+    first = app.update_state(continuation.config, None, as_node="__copy__")
+    app.update_state(first, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    forks = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert len(forks) == 2
+    assert all(_causes(raw, f) == {_sid(_sub(saver)[-1]): RETURN} for f in forks)
+    assert raw.trace.capture.gaps == []
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_copies_after_two_continuations_of_one_launcher_keep_their_declared_parent(persistent):
+    # Resuming the launcher's config again writes a second continuation, which returns through an
+    # edit made in between. A copy of either continuation could hold either result.
+    calls = {"fail": False}
+
+    def after(state):
+        if calls["fail"]:
+            raise RuntimeError("after failed")
+        return {"log": ["after"]}
+
+    app, saver = _app(_persistent() if persistent else _subgraph(), after=after)
+    app.invoke(START_STATE, CFG)
+    launcher = _pre_subgraph(saver)
+    first = _root(saver, "loop", 2)
+    sub = _sub(saver)
+    app.update_state(sub[-2].config, {"log": ["later"], "error": "later-error"}, as_node="i2")
+    app.invoke(Command(resume="yes"), launcher.config)
+    app.update_state(first.config, None, as_node="__copy__")
+    calls["fail"] = True
+    with pytest.raises(RuntimeError):
+        app.invoke(None, CFG)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    continuations = [t for t in _history(saver) if not t.config["configurable"].get("checkpoint_ns")
+                     and t.metadata["source"] == "loop" and t.parent_config
+                     and t.parent_config["configurable"]["checkpoint_id"] == launcher.checkpoint["id"]]
+    assert len(continuations) == 2
+    # Each continuation ran the subgraph on from its namespace's latest checkpoint at the time.
+    [edit] = [t for t in _sub(saver) if t.metadata["source"] == "update"]
+    assert [_causes(raw, c) for c in continuations] == [
+        {_sid(sub[-1]): RETURN}, {_sid(edit): RETURN}
+    ]
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, fork) == {_sid(launcher): DECLARED}
+    report = analyze(normalize(raw))
+    assert "after" in [f.step.name for f in report.primary_failures]
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_an_update_after_an_edit_is_linked_as_before_and_judged_by_its_own_error(persistent):
+    # An update applies the caller's values or the launcher's stored output, not necessarily what
+    # an earlier checkpoint applied, so it is not held back like a copy: it returns through the last
+    # subgraph checkpoint written before it, as before, and its error is judged against that.
+    def run(update):
+        sub = _log("i2", error="inner-error")
+        app, saver = _app(_persistent(i2=sub) if persistent else _subgraph(i2=sub))
+        app.invoke(START_STATE, CFG)
+        launcher = _pre_subgraph(saver)
+        edit = app.update_state(_sub(saver)[-2].config, update, as_node="i2")
+        return app, saver, launcher, edit
+
+    # The caller's own error is new: the edit it returns through is clean.
+    app, saver, launcher, edit = run({"log": ["clean"], "error": None})
+    config = app.update_state(launcher.config, {"log": ["caller"], "error": "new-caller-error"},
+                              as_node="w")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    step = next(s for s in raw.steps if s.step_id == _sid_by_id(saver, config))
+    assert step.status is StepStatus.ERROR and step.error_msg == "new-caller-error"
+    assert _causes(raw, _by_id(saver, config)) == {_sid_by_id(saver, edit): RETURN}
+
+    # Applying the stored output re-applies the subgraph's error, which is not new.
+    app, saver, launcher, edit = run({"log": ["unused"], "error": "inner-error"})
+    config = app.update_state(launcher.config, None, as_node=END)
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+    step = next(s for s in raw.steps if s.step_id == _sid_by_id(saver, config))
+    assert step.status is StepStatus.OK
+    assert raw.trace.capture.gaps == []
+
+
+def test_a_copy_after_an_edit_in_one_of_two_fanned_out_runs_keeps_its_launcher_too():
+    app, saver = _app(_subgraph(), fan_out=True)
+    app.invoke(START_STATE, CFG)
+    continuation = _root(saver, "loop", 2)
+    launcher = _pre_subgraph(saver)
+    runs: dict[str, list] = {}
+    for t in _sub(saver):
+        runs.setdefault(t.config["configurable"]["checkpoint_ns"], []).append(t)
+    edited, untouched = runs.values()
+    app.update_state(edited[-2].config, {"log": ["unused"]}, as_node="i2")
+    app.update_state(continuation.config, None, as_node="__copy__")
+    raw = LangGraphCheckpointAdapter(saver).ingest("t")
+
+    [fork] = [t for t in _history(saver) if t.metadata["source"] == "fork"]
+    assert _causes(raw, fork) == {_sid(launcher): DECLARED, _sid(untouched[-1]): RETURN}
+    assert {g.code: g.count for g in raw.trace.capture.gaps} == {
+        "langgraph.ambiguous_subgraph_return": 1
+    }
+
+
+def _by_id(saver, config):
+    [t] = [t for t in _history(saver) if t.checkpoint["id"] == config["configurable"]["checkpoint_id"]
+           and t.config["configurable"].get("checkpoint_ns", "") == config["configurable"].get("checkpoint_ns", "")]
+    return t
+
+
+def _sid_by_id(saver, config):
+    return _sid(_by_id(saver, config))
 
 
 # --- analysis, tree and artifact ----------------------------------------------------------------

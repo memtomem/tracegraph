@@ -459,8 +459,12 @@ subgraph를 고친 경우, 형제 task가 interrupt된 동안 밖에서 끝난 s
 persistent subgraph(`compile(checkpointer=True)`)는 부모 그래프가 여러 번 실행되어도 namespace 하나를
 계속 쓰며, 각 실행은 checkpoint의 `metadata.parents`에 기록된 launcher로 구분합니다. 이전 실행의
 checkpoint를 호출자가 고치면 그 수정은 진행 중인 실행에 속합니다. subgraph는 namespace의 최신
-checkpoint에서 이어지기 때문입니다. 그래서 그 뒤에 만든 그 실행 continuation의 복사본은 그 수정을
-거쳐 돌아옵니다. 또 launcher 자체를 고친 뒤 interrupt된 실행을 subgraph의 `update_state`로 끝내면,
+checkpoint에서 이어지기 때문입니다. continuation의 `__copy__`는 앞선 checkpoint가 적용한 출력을 담지만,
+그것이 어느 것인지는 기록되지 않습니다. 그 launcher에서 앞서 쓰인 checkpoint들이 복사본 직전의 subgraph
+checkpoint와 다른 곳으로 돌아왔다면(그 사이에 subgraph checkpoint를 고쳤거나 launcher를 두 번 resume한
+경우), 복사본은 그 돌아오는 edge 없이 선언된 부모를 유지하고 `langgraph.ambiguous_subgraph_return` gap이
+기록됩니다. 그러면 `check`의 여러 step에 걸친 path 규칙과 topology 규칙은 증거 부족으로 판정합니다. launcher에서 쓴
+`update_state`는 고쳐졌든 아니든 그 직전의 subgraph checkpoint로 돌아옵니다. 또 launcher 자체를 고친 뒤 interrupt된 실행을 subgraph의 `update_state`로 끝내면,
 continuation은 고친 launcher를 부모로 두고 subgraph로 돌아오지 않습니다.
 
 ### derived tree

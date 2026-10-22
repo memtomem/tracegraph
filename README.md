@@ -416,8 +416,14 @@ subgraph while it is still running, or an outside `update_state` of a finished s
 sibling task is interrupted). A persistent subgraph (`compile(checkpointer=True)`) keeps one
 namespace across the parent graph's runs; each run is told apart by the launcher its
 checkpoints record in `metadata.parents`. A caller's edit of an earlier run's checkpoint joins
-the run in progress, because the subgraph resumes from its namespace's latest checkpoint, so a
-later copy of that run's continuation returns through the edit; and when an interrupted run is
+the run in progress, because the subgraph resumes from its namespace's latest checkpoint. A
+`__copy__` of a continuation holds output an earlier checkpoint applied, and nothing records
+which one: when earlier checkpoints from that launcher returned through a different subgraph
+checkpoint than the last one written before the copy (a subgraph checkpoint was edited in
+between, or the launcher was resumed twice), the copy keeps its declared parent without that
+return, and the gap `langgraph.ambiguous_subgraph_return` is recorded, which makes `check`'s
+multi-step path rules and topology rules insufficient evidence. An `update_state` from the launcher still returns
+through the last subgraph checkpoint written before it, edited or not. When an interrupted run is
 finished by an `update_state` of the subgraph after the launcher itself was edited, the
 continuation keeps the edited launcher as its parent and does not return through the subgraph.
 
