@@ -266,6 +266,20 @@ def test_heuristic_edges_block_only_graph_dependent_rules():
                         TOPOLOGY + ":shape": "INSUFFICIENT_EVIDENCE"}
 
 
+def test_an_undecided_subgraph_return_blocks_only_graph_dependent_rules():
+    # The return was left out, not a step: counts stand, paths and the tree do not.
+    def lg(gaps=None):
+        return _trace("t", [("a", AGENT, "agent", OK), ("x", TOOL, "call_tool", OK)], [("x", "a")],
+                      source="langgraph", links=None, gaps=gaps)
+    gapped = lg({"langgraph.ambiguous_subgraph_return": 1})
+    outcomes = _outcomes(_run(gapped, lg(), FAILURES, pattern("tool-failure"), pattern("plan-then-tool-failure"), SHAPE))
+    assert outcomes == {FAILURES: "PASS", "pattern-not-increased:1,tool-failure": "PASS",
+                        "pattern-not-increased:1,plan-then-tool-failure": "INSUFFICIENT_EVIDENCE",
+                        TOPOLOGY + ":shape": "INSUFFICIENT_EVIDENCE"}
+    reasons = [r for rule in _run(gapped, lg(), SHAPE).rules for r in rule.reasons]
+    assert "current: some causal edges could not be decided at ingest and were left out" in reasons
+
+
 def test_links_on_and_off_are_not_comparable_structurally():
     cur, base = _pair(OK)
     off = _trace("c", [("a", AGENT, "agent", OK), ("t", TOOL, "search", OK)], [("t", "a")], links=False)

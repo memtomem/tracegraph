@@ -54,6 +54,18 @@ explicitly.
 
 ### Fixed
 
+- **A copy written after an edit inside a LangGraph subgraph no longer returns through the edit**
+  (#158). A `__copy__` of a checkpoint that applied a subgraph's output returned through the last
+  subgraph checkpoint written before the copy, so an edit made in between, which the copied
+  checkpoint never saw, became its cause, with any error that edit wrote. A copy now returns
+  through that checkpoint only when every earlier checkpoint from the same launcher returned
+  through it too. Otherwise nothing records which result it holds: it keeps its declared parent
+  without that return, and ingest records the new gap `langgraph.ambiguous_subgraph_return` (one
+  per return left out), which makes `check`'s multi-step path rules and `topology-unchanged`
+  insufficient evidence; the failure count rule is unaffected, since a copy records no new error.
+  Loop checkpoints, which run the subgraph on from its latest checkpoint, and `update_state`
+  checkpoints, which apply the caller's values or the launcher's stored output, are linked as
+  before. A reader older than this release reads the new code as a gap of unknown effect.
 - **Every run of a LangGraph persistent subgraph is in its continuation's ancestry** (#154). A
   subgraph compiled with `checkpointer=True` keeps one checkpoint namespace across the parent's
   runs, so a later run's input checkpoint declares the previous run's last checkpoint as its
@@ -71,8 +83,7 @@ explicitly.
   is judged by `versions_seen` as for other subgraphs since #155, where it used to return through
   whichever run came last. Re-ingesting such a history adds these edges. A caller's edit of an
   earlier run's checkpoint still joins the run in progress, since LangGraph resumes from the
-  namespace's latest checkpoint; a copy of a continuation written after such an edit therefore
-  returns through the edit.
+  namespace's latest checkpoint.
 - **LangGraph time travel from a subgraph's launching checkpoint no longer gains the subgraph**
   (#155). An `update_state` of the checkpoint that launched a subgraph as another node, or the
   fork a replay from it writes, holds the state from before the subgraph ran, but ingest linked
