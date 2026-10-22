@@ -15,6 +15,7 @@ asserted from the record the head actually carries.
 
 import json
 import operator
+import threading
 from typing import Annotated, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -216,17 +217,43 @@ def test_failure_then_interrupt_keeps_the_failure_and_discloses_the_pause(saver)
     assert any(UNDECIDED in w for w in raw.ingest_warnings)
 
 
-def test_interrupt_beside_a_raising_sibling(saver):
+def _signal_on_write(saver, monkeypatch, channel):
+    """An event set once the saver has stored a write on ``channel``.
+
+    Set from the saver's own ``put_writes``, so a waiting node never reads the saver while it
+    is being written (``InMemorySaver`` takes no lock). ``task_path`` stays in the signature
+    because LangGraph checks for it.
+    """
+    recorded = threading.Event()
+    put_writes = saver.put_writes
+
+    def put_and_signal(config, writes, task_id, task_path=""):
+        put_writes(config, writes, task_id, task_path)
+        if any(name == channel for name, _ in writes):
+            recorded.set()
+
+    monkeypatch.setattr(saver, "put_writes", put_and_signal)
+    return recorded
+
+
+def test_interrupt_beside_a_raising_sibling(saver, monkeypatch):
+    interrupted = _signal_on_write(saver, monkeypatch, "__interrupt__")
+
     def boom(state):
+        # A sibling that raises first stops x, which then records an error instead of its
+        # interrupt, so raise only once the interrupt is stored (#164).
+        if not interrupted.wait(30):
+            raise AssertionError("x's interrupt was not stored within 30 s")
         raise RuntimeError("boom")
 
     app = _fan_out(_asks("x"), boom).compile(checkpointer=saver)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="^boom"):
         app.invoke({"log": []}, CONFIG)
 
     raw = _ingest(saver)
     assert _paused(raw) == ["x"]
-    assert [s.name for s in raw.steps if s.status is StepStatus.ERROR] == ["y"]
+    [failed] = [s for s in raw.steps if s.status is StepStatus.ERROR]
+    assert (failed.name, failed.error_msg) == ("y", "RuntimeError('boom')")
     assert raw.trace.status is StepStatus.ERROR
 
 
