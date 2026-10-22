@@ -15,9 +15,10 @@ explicitly.
   runs the `[cypher]` suite on each; the existing jobs and their names are unchanged and stay on
   3.12. Both versions failed before: a test docstring with a lone-surrogate escape does not compile
   on 3.13 and later, and Python 3.14's `json` parses nesting that earlier versions refuse with
-  `RecursionError`. On 3.14 such input is therefore no longer refused as `JSON nesting too deep`:
-  a deep value in a key tracegraph ignores is dropped, and anything else fails the same shape
-  checks, still as `ValueError`.
+  `RecursionError`. On 3.14 such input is therefore no longer refused as `JSON nesting too deep`
+  wherever it appears: a deep value in a key tracegraph ignores is dropped, and a deep top-level
+  array or checkpoint metadata list fails a shape check as `ValueError`. Other positions were not
+  surveyed.
 - **`analyze` and `export-incident-memo` show recorded task markers** (#127). A run paused by
   `interrupt()` or stopped by the recursion limit has trace status `ok` unless a step failed,
   because the status reports whether a recorded step failed; `inspect` marked those tasks, but `analyze` and the
