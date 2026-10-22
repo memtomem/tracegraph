@@ -11,8 +11,8 @@ explicitly.
 ### Changed
 
 - **`analyze` and `export-incident-memo` show recorded task markers** (#127). A run paused by
-  `interrupt()` or stopped by the recursion limit has trace status `ok`, because the status
-  reports whether a recorded step failed; `inspect` marked those tasks, but `analyze` and the
+  `interrupt()` or stopped by the recursion limit has trace status `ok` unless a step failed,
+  because the status reports whether a recorded step failed; `inspect` marked those tasks, but `analyze` and the
   memo said nothing. When a trace records any, `analyze` adds the warning
   `<label>: recorded task markers: 1 interrupted · 1 scheduled · 1 undecided interrupt; trace
   status reports whether a recorded step failed, not whether the run completed.` (non-zero

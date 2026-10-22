@@ -519,7 +519,7 @@ step이 됩니다. 끝났는지·실패했는지·멈췄는지는 여전히 chec
 ### trace status와 기록된 task 표식
 
 trace status는 "기록된 step 중 실패한 것이 있는가"이고, 실행이 끝났는지는 말하지 않습니다.
-그래서 `interrupt()`로 멈춘 run이나 recursion limit으로 멈춘 run도 `ok`입니다. 대신 `analyze`는
+그래서 `interrupt()`로 멈춘 run이나 recursion limit으로 멈춘 run도 실패한 step이 없으면 `ok`입니다. 대신 `analyze`는
 경고로(`--json-out`의 `warnings`에도), `export-incident-memo`는 Summary의 한 줄로 기록된 task
 표식(recorded task markers)을 보여 줍니다.
 
@@ -528,14 +528,15 @@ current: recorded task markers: 1 interrupted · 1 scheduled; trace status repor
 ```
 
 - `interrupted`는 interrupt step, `scheduled`는 scheduled step의 개수이고, `undecided interrupt`는
-  resume이나 오류와 함께 기록된 interrupt(step 없이 `langgraph.undecided_interrupt` 공시만
-  남는 task)의 개수입니다. 한 task가 두 번 세어지지 않습니다. `inspect`는 앞의 두 개만 보여 줍니다.
+  resume이나 오류와 함께 기록된 interrupt의 개수입니다. 이런 task에는 interrupt·scheduled step이
+  생기지 않으므로 `langgraph.undecided_interrupt` capture gap에서 셉니다(오류 step은 남을 수 있습니다). 한 task가 두 번 세어지지 않습니다. `inspect`는 앞의 두 개만 보여 줍니다.
 - **표식은 기록이지 완료 여부가 아닙니다.** 가장 최근 root checkpoint가 기록한 것을 root task
   단위로 셉니다. checkpoint를 남기지 않고 끝난 수정된 그래프 뒤에도 interrupt 기록은 남고,
   resume된 subgraph가 부모의 기록을 남길 수 있으며, 안쪽 task 여러 개가 멈춰도 subgraph task
   하나로 셉니다. `scheduled`는 넘긴 그래프에 대한 답입니다.
-- 적용되지 않은 `Command(goto=...)` 입력, 없는 노드로 가는 `Send` packet, 형식이 맞지 않는
-  pending write는 세지 않습니다. 각각 자기 capture gap으로 공시됩니다.
+- 형식이 맞지 않는 pending write는 무시되고 공시되므로 표식을 가릴 수 있습니다. `--graph`를 주면
+  적용되지 않은 `Command(goto=...)` 입력과 그래프에 없는 노드로 가는 `Send` packet은 scheduled로
+  세지 않고 공시합니다.
 - 실패도 interrupt도 기록하지 않은 정지(root 그래프의 recursion limit, 프로세스 종료, static
   breakpoint)는 `--graph` 없이는 표식이 없습니다.
 - `check`는 규칙마다 그 규칙의 증거를 판정하며, 완료 여부를 판정하지 않습니다.

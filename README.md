@@ -393,16 +393,19 @@ Known limits:
   it such a run reads `ok` unless some other step recorded an error. Trace status stays `ok`
   either way. A task paused by `interrupt()` is reported without a graph. Both are reported
   only at the root graph: the subgraph node is named, not the node inside it.
-- Trace status reports whether a recorded step failed, not whether the run completed. Next to
-  it, `analyze` (as a warning, also in `--json-out`) and `export-incident-memo` show the
-  recorded task markers: `interrupted`, `scheduled`, and `undecided interrupt` (an interrupt
-  recorded with a resume or an error, counted from its capture gap). `inspect` shows the first
-  two. They are counts of what the newest root checkpoint records, per root task: an interrupt
-  record outlives a revised graph that finished without writing a checkpoint, a resumed
-  subgraph can leave its parent's record, several paused inner tasks count as one subgraph
-  task, and `scheduled` is the answer for the graph you passed. Unapplied `Command(goto=...)`
-  input, `Send` packets to an unknown node and malformed pending writes are not counted; they
-  have their own capture gaps. `check` judges each rule's evidence, not completion.
+- Trace status reports whether a recorded step failed, not whether the run completed: a
+  paused or stopped run reads `ok` unless a step failed. Next to it, `analyze` (as a warning,
+  also in `--json-out`) and `export-incident-memo` show the recorded task markers:
+  `interrupted`, `scheduled`, and `undecided interrupt` (an interrupt recorded with a resume or
+  an error; it gets no interrupt or scheduled step and is counted from its capture gap).
+  `inspect` shows the first two. They count what the newest root checkpoint records, per root
+  task: an interrupt record outlives a revised graph that finished without writing a
+  checkpoint, a resumed subgraph can leave its parent's record, several paused inner tasks
+  count as one subgraph task, and `scheduled` is the answer for the graph you passed. A
+  malformed pending write is ignored and disclosed, so it can hide a marker; with `--graph`,
+  unapplied `Command(goto=...)` input and `Send` packets to a node the graph lacks are
+  disclosed rather than counted as scheduled. `check` judges each rule's evidence, not
+  completion.
 - Phoenix exports carry no span links, so their artifacts are parent-only; additional fan-in
   causes may be missing.
 - Report privacy (`safe-v1`) applies to reports; OTLP and LangGraph artifacts keep the
