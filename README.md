@@ -602,7 +602,7 @@ withheld, and a single unparseable cost withholds the whole total instead of und
 An OTLP or Phoenix import records an unreadable total cost as `unreadable` for that reason, and
 reports token counts, other costs, currencies and evaluation scores it cannot read as
 unavailable, disclosing each on stderr; the producer's value is never kept. File input, stdin
-and Phoenix `px` output share one size limit (`TRACEGRAPH_MAX_ARTIFACT_BYTES`). JSON nested more than 9000 levels deep is refused as `JSON nesting too deep` on every Python version, counted on the text before it is parsed; `ingest --sqlite` checks the JSON in the thread's checkpoint rows the same way. `query` reads
+and Phoenix `px` output share one size limit (`TRACEGRAPH_MAX_ARTIFACT_BYTES`). JSON nested more than 9000 levels deep is refused as `JSON nesting too deep` on every Python version, counted on the text before it is parsed; `ingest --sqlite` checks the JSON in the thread's checkpoint rows the same way. A document the caller decoded and passes to the library is not depth-capped, but reading one too deep to process is refused as `ValueError` (`... cannot be read: recursion limit exceeded`), not a crash. `query` reads
 artifacts one after another and keeps only the matches it prints (plus the traces `--explain`
 renders). With `--limit`, its peak memory therefore grows with the number of artifacts only
 by a small per-file record (path, trace id); without it, by the matches it prints. Inside one

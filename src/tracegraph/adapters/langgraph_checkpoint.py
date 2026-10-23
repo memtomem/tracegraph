@@ -111,7 +111,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from tracegraph._errors import describe, type_name
 from tracegraph.adapters.base import Disclosures
-from tracegraph.input_validation import object_field
+from tracegraph.input_validation import object_field, refuses_deep_nesting
 from tracegraph.model import (
     CausalFidelity,
     Edge,
@@ -128,6 +128,7 @@ from tracegraph.model import (
 )
 
 _ROOT_NS = ""
+_UNREADABLE = "checkpoint history cannot be read: recursion limit exceeded"
 _BRANCH_PREFIX = "branch:to:"
 _JOIN_PREFIX = "join:"
 _TOOL_TOKENS = {"tool", "tools"}
@@ -240,6 +241,7 @@ class LangGraphCheckpointAdapter:
 
     # --- TraceAdapter ---
 
+    @refuses_deep_nesting(_UNREADABLE)
     def discover(self) -> list[str]:
         """Distinct thread ids known to the saver (best effort; not all savers support it)."""
         list_fn = getattr(self._saver, "list", None)
@@ -265,6 +267,7 @@ class LangGraphCheckpointAdapter:
                 ordered.append(tid)
         return ordered
 
+    @refuses_deep_nesting(_UNREADABLE)
     def ingest(self, trace_id: str) -> RawTrace:
         config = {"configurable": {"thread_id": trace_id}}
         tuples = [

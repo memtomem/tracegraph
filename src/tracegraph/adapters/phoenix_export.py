@@ -16,7 +16,12 @@ from tracegraph.adapters.otlp_spans import (
     _parse_nanos,
     _span_array,
 )
-from tracegraph.input_validation import loads, object_field
+from tracegraph.input_validation import (
+    TRACE_UNREADABLE,
+    loads,
+    object_field,
+    refuses_deep_nesting,
+)
 from tracegraph.model import RawTrace
 
 _SAFE_ATTRIBUTES = {
@@ -194,6 +199,7 @@ def _trace_objects(document: Any) -> list[dict[str, Any]]:
 class PhoenixExportAdapter:
     """Convert Phoenix CLI trace DTOs through the shared OTLP causal builder."""
 
+    @refuses_deep_nesting(TRACE_UNREADABLE)
     def __init__(self, document: Any) -> None:
         self._traces = _trace_objects(document)
         self._ids: list[str] = []
@@ -217,6 +223,7 @@ class PhoenixExportAdapter:
     def discover(self) -> list[str]:
         return list(self._ids)
 
+    @refuses_deep_nesting(TRACE_UNREADABLE)
     def ingest(self, trace_id: str) -> RawTrace:
         try:
             trace = self._by_id[trace_id]

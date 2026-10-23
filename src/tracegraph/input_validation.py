@@ -1,8 +1,13 @@
 """Shape checks at untrusted JSON boundaries; diagnostics never echo field values."""
 
+import functools
 import json
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, ParamSpec, TypeVar
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 #: Deepest container nesting accepted in a JSON text, on every interpreter. Python 3.12 and
 #: 3.13's ``json`` refuse near 10,000 less the C frames already on the stack (9,984 through
@@ -65,6 +70,33 @@ def loads(text: str, *, strict: bool = False) -> Any:
         return json.loads(text)
     except RecursionError as exc:
         raise ValueError("JSON nesting too deep") from exc
+
+
+#: For a span document read by the OTLP or Phoenix adapter; Phoenix reads through OTLP's, so the
+#: two share one message.
+TRACE_UNREADABLE = "trace document cannot be read: recursion limit exceeded"
+
+
+def refuses_deep_nesting(message: str) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Report a ``RecursionError`` raised inside the wrapped entry point as ``ValueError(message)``.
+
+    For library callers that hand over documents they decoded themselves: those are not
+    depth-capped, and reading one nested deep enough recurses (formatting a value, or code
+    LangGraph runs). The error does not prove the input is deep, since a caller-supplied saver,
+    graph or object can recurse on its own, so ``message`` names the limit, not a cause.
+    """
+
+    def decorate(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(fn)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            try:
+                return fn(*args, **kwargs)
+            except RecursionError as exc:
+                raise ValueError(message) from exc
+
+        return wrapper
+
+    return decorate
 
 
 def object_field(value: Any, path: str) -> dict:
