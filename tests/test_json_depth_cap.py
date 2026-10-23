@@ -261,7 +261,7 @@ def _json_write(db: Path, value: str, *, checkpoint_id: str | None = None) -> No
             "SELECT thread_id, checkpoint_ns, checkpoint_id, task_id FROM writes LIMIT 1"
         ).fetchone()
         conn.execute(
-            "INSERT INTO writes VALUES (?, ?, ?, ?, 999, 'extra', 'json', ?)",
+            "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES (?, ?, ?, ?, 999, 'extra', 'json', ?)",
             (thread, ns, checkpoint_id or cid, task, value.encode()),
         )
         conn.commit()
@@ -290,7 +290,8 @@ def test_every_namespace_is_scanned(tmp_path):
     db = _db(tmp_path)
     _execute(
         db,
-        "INSERT INTO checkpoints SELECT thread_id, 'sub:1', checkpoint_id, parent_checkpoint_id, "
+        "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, "
+        "type, checkpoint, metadata) SELECT thread_id, 'sub:1', checkpoint_id, parent_checkpoint_id, "
         "type, checkpoint, ? FROM checkpoints WHERE rowid = (SELECT max(rowid) FROM checkpoints)",
         with_key('{"source": "loop", "step": 2}', "x", nested(OVER_CAP)),
     )
@@ -307,7 +308,7 @@ def test_scan_is_charged_to_the_snapshot_deadline(tmp_path):
             _check_json_depth(conn, "t", past)
         # A query that runs long before its first row is interrupted inside SQLite.
         conn.executemany(
-            "INSERT INTO writes VALUES ('t', '', ?, 'task', 0, 'c', 'json', '[]')",
+            "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES ('t', '', ?, 'task', 0, 'c', 'json', '[]')",
             [(f"orphan-{i}",) for i in range(20_000)],
         )
         conn.execute("DELETE FROM checkpoints")
