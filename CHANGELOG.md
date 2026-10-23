@@ -10,6 +10,22 @@ explicitly.
 
 ### Changed
 
+- **JSON nested more than 9000 levels deep is refused on every Python version** (#167). Whether
+  deep input was refused depended on the interpreter: 3.12 and 3.13's `json` refuse at about
+  10,000 levels less the C frames already on the stack (9,984 through the CLI), while 3.14's
+  parses far deeper, so 3.14 accepted input that 3.12 refused. `input_validation.MAX_JSON_DEPTH`
+  (9000) is now checked on the text before it is parsed, wherever tracegraph parses JSON:
+  artifacts, OTLP JSON and JSONL, Phoenix exports and `px` output. It counts the text rather
+  than the parsed value, so a deep value that a later duplicate key overwrites still counts, and
+  brackets inside strings do not. `ingest --sqlite` checks each checkpoint's metadata, each
+  checkpoint body stored as JSON, and each JSON write the saver reads in the same way, before
+  decoding, and refuses with `checkpoint history cannot be decoded (JSON nesting too deep)`. The
+  scan counts against the snapshot `timeout`. The message for text input is unchanged,
+  `JSON nesting too deep`. On 3.12 and 3.13 this newly refuses nesting from 9001 levels up to
+  their own limit; on 3.14 it refuses everything above 9000. Objects already decoded by the
+  caller (`artifact.from_obj`, the adapter constructors, a caller-supplied checkpoint saver) are
+  not checked (#168). The scan adds about 2.4 s to `ingest-otlp` on a 120 MB input dense with
+  brackets and quotes (3.5 s before); the artifact is byte-identical.
 - **The Phoenix + SyncMill E2E runs against Phoenix server 20.24.0** (#129), pinned by its index
   digest in `contracts/phoenix-runtime.json`; it was 18.0.0. The body-free evidence (diagnosis
   `tool-retry-failure@v2`, the diff, one review candidate and the board import) is the same under
@@ -19,10 +35,7 @@ explicitly.
   runs the `[cypher]` suite on each; the existing jobs and their names are unchanged and stay on
   3.12. Both versions failed before: a test docstring with a lone-surrogate escape does not compile
   on 3.13 and later, and Python 3.14's `json` parses nesting that earlier versions refuse with
-  `RecursionError`. On 3.14 such input is therefore no longer refused as `JSON nesting too deep`
-  wherever it appears: a deep value in a key tracegraph ignores is dropped, and a deep top-level
-  array or checkpoint metadata list fails a shape check as `ValueError`. Other positions were not
-  surveyed.
+  `RecursionError`; the explicit nesting cap above makes every version refuse the same input.
 - **`analyze` and `export-incident-memo` show recorded task markers** (#127). A run paused by
   `interrupt()` or stopped by the recursion limit has trace status `ok` unless a step failed,
   because the status reports whether a recorded step failed; `inspect` marked those tasks, but `analyze` and the

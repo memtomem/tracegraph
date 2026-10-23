@@ -18,7 +18,19 @@ import time
 from typing import Any
 
 from tracegraph.adapters.langgraph_checkpoint import LangGraphCheckpointAdapter
+from tracegraph.input_validation import check_text_depth
 from tracegraph.model import RawTrace
+
+# Every JSON text `SqliteSaver` parses while listing one thread: each checkpoint's metadata,
+# its body when serialized as JSON, and its JSON-serialized writes. The saver reads writes per
+# listed checkpoint, so a write whose checkpoint is missing is never parsed and is not scanned.
+_JSON_TEXTS = (
+    "SELECT metadata FROM checkpoints WHERE thread_id = ?",
+    "SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND type = 'json'",
+    """SELECT value FROM writes AS w WHERE w.thread_id = ? AND w.type = 'json' AND EXISTS (
+        SELECT 1 FROM checkpoints AS c WHERE c.thread_id = w.thread_id
+        AND c.checkpoint_ns = w.checkpoint_ns AND c.checkpoint_id = w.checkpoint_id)""",
+)
 
 
 def _inert_serde():
@@ -33,6 +45,47 @@ def _inert_serde():
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     return JsonPlusSerializer(allowed_msgpack_modules=())
+
+
+def _check_json_depth(conn: sqlite3.Connection, thread: str, deadline: float) -> None:
+    """Refuse the thread if any JSON text the saver will parse is nested too deep.
+
+    Python 3.12 and 3.13's ``json`` refuse deep nesting and 3.14's parses it, so the text is
+    measured here, before the saver decodes it, the same way on every interpreter. Charged to
+    the snapshot deadline before each value, once the scan ends, and inside SQLite while a
+    query runs. A value found too deep while the deadline passes is reported as too deep:
+    either refuses the input, and the nesting is a property of it.
+    """
+    expired = False
+
+    def interrupt() -> int:
+        nonlocal expired
+        expired = time.monotonic() >= deadline
+        return expired
+
+    def check_deadline() -> None:
+        if time.monotonic() >= deadline:
+            raise ValueError("SQLite snapshot deadline exceeded")
+
+    conn.set_progress_handler(interrupt, 10_000)
+    try:
+        for query in _JSON_TEXTS:
+            for (text,) in conn.execute(query, (thread,)):
+                check_deadline()
+                if isinstance(text, (str, bytes)):
+                    try:
+                        check_text_depth(text)
+                    except ValueError as exc:
+                        raise ValueError(
+                            "checkpoint history cannot be decoded (JSON nesting too deep)"
+                        ) from exc
+        check_deadline()
+    except sqlite3.OperationalError:
+        if expired:
+            raise ValueError("SQLite snapshot deadline exceeded") from None
+        raise
+    finally:
+        conn.set_progress_handler(None, 0)
 
 
 def ingest_snapshot(
@@ -69,6 +122,10 @@ def ingest_snapshot(
             # that helper does.
             with closing(sqlite3.connect(str(snapshot), check_same_thread=False)) as conn:
                 saver = SqliteSaver(conn, serde=_inert_serde())
+                # Creates the tables in this private copy when absent, as the saver's first
+                # listing would, so a database without them still reads as "no checkpoints".
+                saver.setup()
+                _check_json_depth(conn, thread, deadline)
                 return LangGraphCheckpointAdapter(
                     saver,
                     error_channel=error_channel,

@@ -292,13 +292,13 @@ CORRUPTIONS = [
 @pytest.mark.parametrize("corruption", CORRUPTIONS, ids=["serde-type", "deep-json", "int-metadata", "json-envelope"])
 def test_undecodable_history_is_a_usage_error(tmp_path, corruption):
     db = _corrupt(tmp_path, *corruption)
+    with pytest.raises(ValueError, match="cannot be decoded"):
+        ingest_snapshot(db, "t", error_channel="error")
     message = "cannot be decoded"
     if DEEP_METADATA in corruption and not _json_recurses(DEEP_METADATA):
-        # Python 3.14's json parses this depth without recursing; the list then fails the
-        # adapter's shape check instead. Either way it is a ValueError and a usage error.
+        # A caller-supplied saver bypasses the snapshot's depth scan, and Python 3.14's json
+        # parses this depth; the list then fails the adapter's shape check instead.
         message = "metadata must be an object"
-    with pytest.raises(ValueError, match=message):
-        ingest_snapshot(db, "t", error_channel="error")
     conn = sqlite3.connect(db)
     try:
         with pytest.raises(ValueError, match=message):

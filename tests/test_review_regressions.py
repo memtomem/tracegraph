@@ -154,39 +154,23 @@ def test_malformed_phoenix_context(context):
 ROOT = Path(__file__).parents[1]
 
 
-def _json_recurses(text: str) -> bool:
-    try:
-        json.loads(text)
-    except RecursionError:
-        return True
-    return False
-
-
 def test_deep_json_all_boundaries(tmp_path):
     text = '[' * 20000 + ']' * 20000
-    # Python 3.14's json parses this depth without recursing, and the list then fails each
-    # parser's shape check. Either way nothing but ValueError leaves the boundary.
-    match = "nesting" if _json_recurses(text) else None
     for parse in (artifact.loads, OTLPSpanAdapter.from_json, PhoenixExportAdapter.from_json):
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ValueError, match="nesting"):
             parse(text)
     source = tmp_path / "deep.json"
     source.write_text(text)
     assert CliRunner().invoke(app, ["analyze", str(source)]).exit_code == 2
 
 
-def test_deep_value_in_an_ignored_key_follows_the_interpreters_json():
-    """Where json recurses, the depth is refused; where it does not, the key is dropped."""
+def test_deep_value_in_an_ignored_key_is_refused():
+    """Refused on every interpreter, though 3.14's json would parse it and drop the key."""
     source = ROOT / "tests" / "fixtures" / "review-candidates" / "source.json"
-    clean = source.read_text(encoding="utf-8")
     deep = '{"a":' * 20000 + "1" + "}" * 20000
-    payload = json.loads(clean)
-    text = json.dumps(payload)[:-1] + ', "ignored": ' + deep + "}"
-    if _json_recurses(deep):
-        with pytest.raises(ValueError, match="JSON nesting too deep"):
-            artifact.loads(text)
-    else:
-        assert artifact.dumps(artifact.loads(text)) == artifact.dumps(artifact.loads(clean))
+    text = json.dumps(json.loads(source.read_text(encoding="utf-8")))[:-1] + ', "ignored": ' + deep + "}"
+    with pytest.raises(ValueError, match="JSON nesting too deep"):
+        artifact.loads(text)
 
 
 def test_recursion_in_json_is_reported_as_nesting(monkeypatch):
