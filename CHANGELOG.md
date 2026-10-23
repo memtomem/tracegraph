@@ -125,8 +125,7 @@ explicitly.
     a deep error channel or pending-write value, or a schedule graph whose `get_state` returns a
     deep config.
   - Decoded documents still have no explicit depth cap: within the recursion limit they are read
-    as before. The analysis functions are outside this guarantee; pattern matching recurses once
-    per predicate (#170).
+    as before. The analysis functions are outside this guarantee.
 - **A copy written after an edit inside a LangGraph subgraph no longer returns through the edit**
   (#158). A `__copy__` of a checkpoint that applied a subgraph's output returned through the last
   subgraph checkpoint written before the copy, so an edit made in between, which the copied
