@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from tracegraph._atomic_write import write_text_atomic
-from tracegraph.input_validation import loads as json_loads
+from tracegraph.input_validation import loads as json_loads, refuses_deep_nesting
 from tracegraph.model import EdgeOrigin, EdgeType, NormalizedTrace, StepSource, _validated_copy
 from tracegraph.normalize import validate_normalized
 
@@ -173,6 +173,7 @@ def loads(text: str) -> NormalizedTrace:
     return from_obj(json_loads(text))
 
 
+@refuses_deep_nesting("artifact cannot be read: recursion limit exceeded")
 def from_obj(payload: object) -> NormalizedTrace:
     """Validate an already-parsed artifact payload (the envelope ``loads`` would parse).
 

@@ -59,7 +59,12 @@ import re
 from typing import Any, Iterator
 
 from tracegraph.adapters.base import Disclosures
-from tracegraph.input_validation import loads, object_field
+from tracegraph.input_validation import (
+    TRACE_UNREADABLE,
+    loads,
+    object_field,
+    refuses_deep_nesting,
+)
 
 from tracegraph.model import (
     CausalFidelity,
@@ -416,6 +421,7 @@ class OTLPSpanAdapter:
         return cls.from_documents(documents, **kwargs)
 
     @classmethod
+    @refuses_deep_nesting(TRACE_UNREADABLE)
     def from_documents(cls, documents: list[Any], **kwargs: Any) -> "OTLPSpanAdapter":
         """Merge already-parsed TracesData objects (one per Collector JSONL line) into one adapter."""
         if not documents or not all(isinstance(item, dict) for item in documents):
@@ -436,10 +442,12 @@ class OTLPSpanAdapter:
 
     # --- TraceAdapter ---
 
+    @refuses_deep_nesting(TRACE_UNREADABLE)
     def discover(self) -> list[str]:
         """Distinct ``traceId``s present in the document, in first-seen order."""
         return list(self._grouped())
 
+    @refuses_deep_nesting(TRACE_UNREADABLE)
     def ingest(self, trace_id: str) -> RawTrace:
         by_id = self._spans_of(trace_id)
         parent_span = self._structural_parents(trace_id, by_id)

@@ -100,6 +100,27 @@ explicitly.
 
 ### Fixed
 
+- **Deeply nested input no longer crashes ingestion with `RecursionError`** (#168). An entry point
+  that reads a document now reports a `RecursionError` raised while reading it as the
+  `ValueError` it promises, so the CLI exits with a usage error (2) instead of a traceback.
+  - The entry points are `artifact.from_obj`, `OTLPSpanAdapter.from_documents`, `.discover` and
+    `.ingest`, `PhoenixExportAdapter(document)` and `.ingest`, and
+    `LangGraphCheckpointAdapter.discover` and `.ingest`, which `ingest --sqlite` runs.
+  - Messages: `artifact cannot be read: recursion limit exceeded`, `trace document cannot be
+    read: recursion limit exceeded` (OTLP and Phoenix), and `checkpoint history cannot be read:
+    recursion limit exceeded`. They name the limit, not a cause, because a caller-supplied saver,
+    graph or object can recurse on its own.
+  - Reached from the CLI: `ingest --sqlite` on a crafted checkpoint body that decodes to a value
+    nested past the recursion limit, which then crashed while the error channel value was
+    formatted. The limit is about 10,000 levels on 3.12 and 3.13 and about 70,000 on 3.14,
+    where it is the C stack.
+  - Reached from the library: documents the caller decoded, which the #167 text cap does not see,
+    with a deep `exception.message`, a deep `schema_version` (formatted into the refusal),
+    a deep error channel or pending-write value, or a schedule graph whose `get_state` returns a
+    deep config.
+  - Decoded documents still have no explicit depth cap: within the recursion limit they are read
+    as before. The analysis functions are outside this guarantee; pattern matching recurses once
+    per predicate (#170).
 - **A copy written after an edit inside a LangGraph subgraph no longer returns through the edit**
   (#158). A `__copy__` of a checkpoint that applied a subgraph's output returned through the last
   subgraph checkpoint written before the copy, so an edit made in between, which the copied
