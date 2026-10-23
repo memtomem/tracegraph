@@ -100,6 +100,12 @@ explicitly.
 
 ### Fixed
 
+- **A `PathPattern` of about 1000 or more predicates no longer fails with `RecursionError`**
+  (#170). The pure-Python matcher behind `find_matches`, `iter_matches` and `search` recursed
+  once per predicate; it now walks the predicates with an explicit stack. Matches and the order
+  `iter_matches` yields them in are unchanged. CLI `query` and `analyze` run short presets and
+  were not affected. `LadybugStore` runs patterns natively, which has its own limit on long
+  patterns (#173).
 - **Deeply nested input no longer crashes ingestion with `RecursionError`** (#168). An entry point
   that reads a document now reports a `RecursionError` raised while reading it as the
   `ValueError` it promises, so the CLI exits with a usage error (2) instead of a traceback.

@@ -1,5 +1,7 @@
 """Cross-trace pattern matching over the raw causal graph."""
 
+from collections import deque
+
 import pytest
 
 from tracegraph.analysis import (
@@ -601,6 +603,122 @@ def test_recursion_shapes_equal_brute_force_oracle_on_dense_dags(shape, seed):
     pattern = _RECURSION_SHAPES[shape]
     expected = _oracle_matches(nt, pattern)
     assert find_matches(nt, pattern) == expected
+
+
+def _long_patterns(k):
+    head, s = _P(name="h"), _P(name="s")
+    return {
+        "strict": PathPattern((head, *[s] * (k - 1))),
+        "gap": PathPattern((head, *[_P(name="s", gap=(1, 1))] * (k - 1))),
+        "back-reference": PathPattern((head, s, *[_P(same_name_as=1)] * (k - 2))),
+    }
+
+
+@pytest.mark.parametrize("shape", ["strict", "gap", "back-reference"])
+def test_a_pattern_longer_than_the_recursion_limit_matches(shape):
+    # One predicate per step of a chain longer than the interpreter's recursion limit: the walk
+    # over predicates is iterative, so the whole chain is the one match.
+    import sys
+
+    from tracegraph.analysis.patterns import iter_matches
+
+    k = max(2000, sys.getrecursionlimit() + 1)
+    nt = _custom("K", [(0, "h", StepKind.CHAIN, OK), *[(i, "s", StepKind.CHAIN, OK) for i in range(1, k)]],
+                 [(i, i - 1) for i in range(1, k)])
+    pattern = _long_patterns(k)[shape]
+    chain = [f"K{i}" for i in range(k)]
+    assert find_matches(nt, pattern) == [chain]
+    assert list(iter_matches(nt, pattern)) == [chain]
+
+
+def _recursive_reference(steps, children, preds, node_id, idx, acc, bound):
+    """The recursive matcher the iterative one replaced, kept to pin its yield order."""
+    step = steps[node_id]
+    pred = preds[idx]
+    if not pred.matches(step):
+        return
+    if pred.same_name_as is not None:
+        ref = bound[pred.same_name_as]
+        if ref is None or step.name is None or step.name != ref:
+            return
+    acc2 = acc + [node_id]
+    if idx + 1 == len(preds):
+        yield acc2
+        return
+    bound2 = {**bound, idx: step.name}
+    nxt = preds[idx + 1]
+    if nxt.gap is None:
+        for child in dict.fromkeys(children.get(node_id, [])):
+            yield from _recursive_reference(steps, children, preds, child, idx + 1, acc2, bound2)
+        return
+    lo, hi = nxt.gap
+    frontier = deque((c, 1) for c in children.get(node_id, []))
+    visited, advanced = set(), set()
+    while frontier:
+        cur, dist = frontier.popleft()
+        if (cur, dist) in visited:
+            continue
+        visited.add((cur, dist))
+        if dist >= lo and (hi is None or dist <= hi) and cur not in advanced:
+            advanced.add(cur)
+            yield from _recursive_reference(steps, children, preds, cur, idx + 1, acc2, bound2)
+        if hi is None or dist < hi:
+            for c in children.get(cur, []):
+                frontier.append((c, dist + 1))
+
+
+@pytest.mark.parametrize("seed", range(300))
+def test_forward_matcher_yields_in_the_recursive_matchers_order(seed):
+    # The oracle tests compare sorted results; this pins the unsorted order iter_matches yields.
+    import random
+
+    from tracegraph.analysis.patterns import _iter_forward, build_index
+
+    rng = random.Random(seed)
+    nt = _random_dag(rng, f"ORD{seed}", rng.randint(2, 12))
+    pattern = _random_pattern(rng)
+    steps, children = index = build_index(nt)
+    expected = [
+        path
+        for sid in steps
+        for path in _recursive_reference(steps, children, pattern.steps, sid, 0, [], {})
+    ]
+    assert list(_iter_forward(index, pattern)) == expected, str(pattern)
+
+
+def test_a_back_reference_compares_the_name_the_step_had_when_it_matched():
+    # Steps are mutable. A caller renaming a matched step while consuming iter_matches does not
+    # change the matches still to come, which compare against the name bound at match time.
+    from tracegraph.analysis.patterns import build_index, iter_matches
+
+    nt = _custom("SN", [(s, "x", StepKind.CHAIN, OK) for s in "rabc"], [("a", "r"), ("b", "a"), ("c", "a")])
+    index = build_index(nt)
+    pattern = PathPattern((_P(name="x"), _P(), _P(same_name_as=0)))
+    matches = iter_matches(nt, pattern, index=index)
+    assert next(matches) == ["SNr", "SNa", "SNb"]
+    index[0]["SNr"].name = "y"
+    assert list(matches) == [["SNr", "SNa", "SNc"]]
+
+
+def test_iter_matches_reads_only_what_the_first_match_needs():
+    # A gap's BFS is suspended while later predicates are tried, so the first match of a
+    # three-predicate pattern on a long chain reads the children of two steps, not the chain.
+    from tracegraph.analysis.patterns import build_index, iter_matches
+
+    class Recorded(dict):
+        def get(self, key, default=None):
+            read.append(key)
+            return super().get(key, default)
+
+    read: list[str] = []
+    nt = _custom("LZ", [(0, "h", StepKind.CHAIN, OK), *[(i, "s", StepKind.CHAIN, OK) for i in range(1, 200)]],
+                 [(i, i - 1) for i in range(1, 200)])
+    steps, children = build_index(nt)
+    pattern = PathPattern((_P(name="h"), _P(gap=(1, None)), _P(gap=(1, None))))
+    matches = iter_matches(nt, pattern, index=(steps, Recorded(children)))
+    assert next(matches) == ["LZ0", "LZ1", "LZ2"]
+    assert read == ["LZ0", "LZ1"]
+    matches.close()
 
 
 def _prefix_sizes(total):
