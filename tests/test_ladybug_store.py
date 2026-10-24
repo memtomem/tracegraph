@@ -312,7 +312,7 @@ def test_fell_back_flag_resets_between_calls() -> None:
 
 
 def test_unbounded_fallback_matches_far_retry_past_the_hop_cap() -> None:
-    # A retry well beyond LadybugDB's 30-hop cap: the bounded 'near' Cypher would miss it, but the
+    # A retry well beyond LadybugDB's 30-hop cap: the bounded 'near' preset would miss it, but the
     # unbounded fallback (whole-graph pull + pure-Python) catches it AND equals the in-memory
     # store at that depth — the same load-then-traverse guarantee ancestors() makes.
     n = 80  # > MAX_GAP, so a *2..30 var-length query could never reach the failing retry
@@ -328,7 +328,7 @@ def test_unbounded_fallback_matches_far_retry_past_the_hop_cap() -> None:
         ["DEEP3", f"DEEP{n - 3}"]
     ]
     assert (n - 3) - 3 > MAX_GAP  # guard: the retry really is past the cap
-    # the bounded variant, run as native Cypher, correctly finds nothing this far apart
+    # the bounded variant (a gap, so also the pure-Python matcher) finds nothing this far apart
     assert store.find_matches(PRESETS["tool-retry-failure-near"]) == []
 
 
