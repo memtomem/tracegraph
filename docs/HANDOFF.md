@@ -1,12 +1,14 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-24, `c9cd600` 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `c9cd600`(PR #177 병합)이다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0) 이후 `uv.lock`의 의존성은 바뀌지 않았고,
-  0.9.0 준비 PR은 그 안의 프로젝트 버전만 0.9.0으로 바꾼다.
-- **0.9.0을 준비 중이다. 이 문서를 쓰는 시점에 PyPI 최신은 0.8.0이다(`c4be406`, 2026-10-20).** 소유자가 2026-10-24에
-  0.9.0 릴리스를 지시했고, 준비 PR이 `CHANGELOG.md`의 `## Unreleased`를 `## 0.9.0 - 2026-10-24`로 옮긴다. 새 `EdgeOrigin`
+  0.9.0 준비 PR(#178, `c3c3896`)은 그 안의 프로젝트 버전만 0.9.0으로 바꿨다.
+- **0.9.0 공개 완료(2026-10-24).** `agent-tracegraph` 0.9.0이 PyPI 최신이다. `test-v0.9.0`과 `v0.9.0`이 모두
+  `c3c3896`(PR #178)을 가리킨다. 업그레이드 주의는
+  [GitHub Release v0.9.0](https://github.com/memtomem/tracegraph/releases/tag/v0.9.0)의 "Before you upgrade"에 있다.
+  PR #178이 `CHANGELOG.md`의 `## Unreleased`를 `## 0.9.0 - 2026-10-24`로 옮겼다. 새 `EdgeOrigin`
   두 개(`graph_parent_heuristic`, `checkpoint_subgraph_return`), 새 capture gap 코드(`langgraph.ambiguous_subgraph_return`),
   내용 기준 artifact schema v8·v9, CLI 출력 문구 변경이 있어 0.8.0 때와 같은 기준(출력 문구가 바뀌면 patch가 아니라
   minor)으로 minor다. 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## 0.9.0`이다:
@@ -121,8 +123,9 @@
 | #174 | `7c16ee0` | #170: `analysis/patterns._advance`를 predicate마다 재귀하는 대신 lazy 후보 iterator의 명시적 스택으로 바꾸고, back-reference는 매칭 시점에 저장한 이름과 비교한다. 매칭 결과와 yield 순서는 그대로다 |
 | #175 | `64f6cae` | 이 전달 상태 절(문서만)과 `.gitignore`의 memtomem 로컬 디렉터리 |
 | #177 | `c9cd600` | #173·#176: `LadybugStore`가 첫 predicate 뒤에 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행하고 나머지는 순수 Python fallback으로 보낸다. CLI fallback 안내 문구를 고쳤다 |
+| #178 | `c3c3896` | 0.9.0 준비: 버전·lock, CHANGELOG 날짜와 릴리스 단위 claims review 4라운드 반영, 이 절의 #177 기록 |
 
-### 이번 구간의 결정(2026-10-20~24, PR #148~#177)
+### 이번 구간의 결정(2026-10-20~24, PR #148~#178)
 
 1. **#142(PR #148):** 이슈의 옵션 1(`otlp.graph_parent_by_timing` 코드가 있으면 모든 `graph_parent` edge를 명시된 조상에서
    제외)은 선언된 체인 `plan→exec→report` 옆에 무관한 타이밍 loop가 있는 trace에서 실패 분류를 `[x]`/`[y]`에서
@@ -181,10 +184,17 @@
     `RuntimeError`를 잡아 fallback하는 이슈의 옵션 2는, 엔진이 타입 없는 `builtins.RuntimeError`만 내서 메시지 비교가
     필요하므로 택하지 않았다. `compile_to_cypher`는 공개 API라 그대로 두고 실행 여부를 store가 정한다. bounded gap을
     Cypher로 실행하고 안내를 띄우지 않던 기존 설계를 뒤집은 변경이다.
+11. **0.9.0 릴리스(PR #178):** 소유자가 2026-10-24에 릴리스를 지시했다. PR마다 쓴 CHANGELOG 항목을 한 릴리스로 묶자
+    나중 PR이 틀리게 만든 주장과 0.8.0 기준으로 처음부터 사실이 아닌 "as before" 주장이 드러나, claims review를 4라운드
+    돌렸다(13 → 4 → 6 → 0건, 2·3라운드 지적은 앞 라운드에서 고쳐 쓴 문장이 아니라 원래 문장에서 나왔다). 3라운드는 0.8.0과
+    비교하거나 바뀌지 않았다고 말하는 문장만 대상으로, 재현할 수 있는 곳은 양쪽 트리에서 재현했다. 리뷰가 끝난 뒤에만 태그를 달았다.
+    [GitHub Release v0.9.0](https://github.com/memtomem/tracegraph/releases/tag/v0.9.0)(prerelease) 노트도 게시 전에
+    claims review를 3라운드 돌렸다(13 → 3 → 0건). 1라운드는 요약에서 빠진 조건과 "Before you upgrade"에서 빠진 변경이었고,
+    2라운드 3건 중 1건은 1라운드에 고쳐 쓴 `__copy__` 문장이었다.
 
 ### 검증 증거
 
-아래 수치는 각 PR 본문에 적힌 것만 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
+PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 행은 배포 run과 배포 후 측정에서 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
 
 | 검증 | 결과 |
 | --- | --- |
@@ -192,15 +202,14 @@
 | lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153·#175를 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#175·#177에 적혀 있다 |
 | 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174·#177(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
 | 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개), #177(4개) 모두 신규 테스트가 검출 |
+| 0.9.0 배포 | 리허설 run [40063647251](https://github.com/memtomem/tracegraph/actions/runs/40063647251), 배포 run [40064065262](https://github.com/memtomem/tracegraph/actions/runs/40064065262). wheel `441d704f5ce901c61db4de566b11064f58fae9a76887da1e9a9184d86bf711b5`, sdist `103a9411cb55d63b636b7c89d6a1c6c53013bce8da0c5fcafe6ec3cb22d92b28`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200, 설명은 각 태그의 `README.md`와 같다. 깨끗한 Python 3.12.11 core·cypher 설치에서 `verify_wheel` PASS(cypher는 backend parity도 PASS), `uvx --refresh --from agent-tracegraph==0.9.0 tracegraph --version`도 0.9.0을 출력했다. 배포된 0.8.0 `validate`는 0.9.0 코드가 쓴 schema 1·2·7 artifact를 받고, `graph_parent_heuristic`·`checkpoint_subgraph_return` artifact는 `unsupported artifact schema_version 8`/`9 (this build reads 1, 2, 3, 4, 5, 6, 7)`로 거부한다 |
 | 리뷰 게이트 | PR 본문에 적힌 라운드 수(#148 plan 2·diff 2, #149 plan 2·diff 3, #151 diff 2, #156 plan 2·diff 4, #157 plan 2·diff 2, #159 4라운드, #160 3라운드, #161 plan 2·diff 3, #162 plan 3·diff 2, #163 plan 2·diff 2, #165 diff 2, #166 plan 2·diff 2, #169 plan 5·diff 3, #171 plan 2·diff 2, #174 plan 2·diff 2, #175 claims-check 5라운드, #177 plan 2·diff 2). 마지막 라운드 **SHIP**이 본문에 적힌 것은 #148·#149·#151·#156·#157·#159·#160·#161·#163·#165·#166·#169·#171·#174·#177이다. #175는 마지막 라운드가 NEEDS-FIX(Minor 2, 1개 반영·1개 기각)였다. #162는 라운드와 수정 내용만 있고 최종 판정이 없으며, #147·#153·#172 본문에는 리뷰 기록이 없다 |
 
 ### 남은 결정과 후속 항목
 
 1. **열린 이슈:** 없다.
-2. **0.9.0 릴리스:** `CHANGELOG.md`의 `## 0.9.0 - 2026-10-24`에 #126, #127, #128, #129, #142, #143, #150, #154, #155,
-   #158, #167, #168, #170, #173, #176이 있다. 준비 PR을 병합한 뒤 [릴리스 런북](releasing.md) 3~5단계(`test-v0.9.0`
-   리허설 → 검증 → `v0.9.0`)를 따른다. `pypi` 환경 승인은 소유자만 할 수 있다. 배포 결과는 배포 뒤 별도 PR로 이
-   문서에 기록한다.
+2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다(이 배포 기록 문서만 있다). 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
+   소유자만 할 수 있다.
 3. **기존 보류 항목 정리 상태:**
    - 아래 `2026-10-14` 절 5번과 `2026-09-15` 절 3·4·5·7·8번 가운데 이슈로 옮긴 #122(`phoenix diagnose` 종료 코드),
      #123(`from_file` 크기 제한 문서화), #124·#136(Phoenix 숫자 타임스탬프와 loop 부모), #125(`--redact-errors`),
