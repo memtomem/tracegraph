@@ -63,7 +63,7 @@
     `contracts/review-candidates.schema.json`(schema v1)은 바이트 단위로 그대로다.
   - **`analyze`와 incident memo의 기록된 task 표식(#127, PR #162).** `trace.status`는 그대로 `"error"` 또는 `"ok"`로
     두고(`diagnose.TRACE_STATUS_SCOPE`: `"trace status reports whether a recorded step failed, not whether the run completed"`),
-    trace가 가진 기록된 미완료 표식(`source=interrupt` step, `source=scheduled` step, `langgraph.undecided_interrupt`
+    trace가 가진 기록된 task 표식(`source=interrupt` step, `source=scheduled` step, `langgraph.undecided_interrupt`
     capture gap)의 개수를 `diagnose.recorded_task_markers(nt)`로 세어 `analyze` warnings(current·baseline 각각)와
     incident memo의 `Recorded Task Markers` 줄에 중립적인 기록 개수로 적는다. 세 표식이 모두 0개인 trace의 출력은 바이트
     단위로 같다.
@@ -193,7 +193,7 @@
 3. **기존 보류 항목 정리 상태:**
    - 아래 `2026-10-14` 절 5번과 `2026-09-15` 절 3·4·5·7·8번 가운데 이슈로 옮긴 #122(`phoenix diagnose` 종료 코드),
      #123(`from_file` 크기 제한 문서화), #124·#136(Phoenix 숫자 타임스탬프와 loop 부모), #125(`--redact-errors`),
-     #126(review-candidates `extra="ignore"`), #127(미완료 실행의 기록된 task 표식), #128(Python 3.13·3.14 CI),
+     #126(review-candidates `extra="ignore"`), #127(`analyze`·memo의 기록된 task 표식), #128(Python 3.13·3.14 CI),
      #129(Phoenix E2E 서버 20.24.0 핀)는 모두 해결됐다.
    - Review candidate의 `tool_key` redaction 여부(PR #161에서 분리된 나머지 절반), 알려진 한계(#90·#96), `summarize`
      후속(아래 `2026-10-19` 절 3번)은 그대로다.
