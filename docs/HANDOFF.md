@@ -194,7 +194,7 @@
 
 ### 검증 증거
 
-아래 수치는 각 PR 본문에 적힌 것만 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
+PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 행은 배포 run과 배포 후 측정에서 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
 
 | 검증 | 결과 |
 | --- | --- |
@@ -202,7 +202,7 @@
 | lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153·#175를 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#175·#177에 적혀 있다 |
 | 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174·#177(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
 | 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개), #177(4개) 모두 신규 테스트가 검출 |
-| 0.9.0 배포 | 리허설 run [40063647251](https://github.com/memtomem/tracegraph/actions/runs/40063647251), 배포 run [40064065262](https://github.com/memtomem/tracegraph/actions/runs/40064065262). wheel `441d704f5ce901c61db4de566b11064f58fae9a76887da1e9a9184d86bf711b5`, sdist `103a9411cb55d63b636b7c89d6a1c6c53013bce8da0c5fcafe6ec3cb22d92b28`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200, 설명은 각 태그의 `README.md`와 같다. 깨끗한 Python 3.12.11 core·cypher 설치에서 `verify_wheel` PASS(cypher는 backend parity도 PASS), `uvx --refresh --from agent-tracegraph==0.9.0`도 0.9.0. 배포된 0.8.0 `validate`는 0.9.0 코드가 쓴 schema 1·2·7 artifact를 받고, `graph_parent_heuristic`·`checkpoint_subgraph_return` artifact는 `unsupported artifact schema_version 8`/`9 (this build reads 1, 2, 3, 4, 5, 6, 7)`로 거부한다 |
+| 0.9.0 배포 | 리허설 run [40063647251](https://github.com/memtomem/tracegraph/actions/runs/40063647251), 배포 run [40064065262](https://github.com/memtomem/tracegraph/actions/runs/40064065262). wheel `441d704f5ce901c61db4de566b11064f58fae9a76887da1e9a9184d86bf711b5`, sdist `103a9411cb55d63b636b7c89d6a1c6c53013bce8da0c5fcafe6ec3cb22d92b28`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200, 설명은 각 태그의 `README.md`와 같다. 깨끗한 Python 3.12.11 core·cypher 설치에서 `verify_wheel` PASS(cypher는 backend parity도 PASS), `uvx --refresh --from agent-tracegraph==0.9.0 tracegraph --version`도 0.9.0을 출력했다. 배포된 0.8.0 `validate`는 0.9.0 코드가 쓴 schema 1·2·7 artifact를 받고, `graph_parent_heuristic`·`checkpoint_subgraph_return` artifact는 `unsupported artifact schema_version 8`/`9 (this build reads 1, 2, 3, 4, 5, 6, 7)`로 거부한다 |
 | 리뷰 게이트 | PR 본문에 적힌 라운드 수(#148 plan 2·diff 2, #149 plan 2·diff 3, #151 diff 2, #156 plan 2·diff 4, #157 plan 2·diff 2, #159 4라운드, #160 3라운드, #161 plan 2·diff 3, #162 plan 3·diff 2, #163 plan 2·diff 2, #165 diff 2, #166 plan 2·diff 2, #169 plan 5·diff 3, #171 plan 2·diff 2, #174 plan 2·diff 2, #175 claims-check 5라운드, #177 plan 2·diff 2). 마지막 라운드 **SHIP**이 본문에 적힌 것은 #148·#149·#151·#156·#157·#159·#160·#161·#163·#165·#166·#169·#171·#174·#177이다. #175는 마지막 라운드가 NEEDS-FIX(Minor 2, 1개 반영·1개 기각)였다. #162는 라운드와 수정 내용만 있고 최종 판정이 없으며, #147·#153·#172 본문에는 리뷰 기록이 없다 |
 
 ### 남은 결정과 후속 항목
