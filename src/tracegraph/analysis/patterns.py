@@ -294,7 +294,7 @@ def first_matches(
     return kept, total
 
 
-def _name_ok(pred: StepPredicate, step: Step, bound: dict[int, str | None]) -> bool:
+def _name_ok(pred: StepPredicate, step: Step, names: list[str | None]) -> bool:
     """Resolve a ``same_name_as`` back-reference against the names bound by earlier predicates.
 
     Cypher's ``NULL = NULL`` is ``NULL`` (the row is dropped); mirror that — a nameless step can
@@ -302,7 +302,7 @@ def _name_ok(pred: StepPredicate, step: Step, bound: dict[int, str | None]) -> b
     """
     if pred.same_name_as is None:
         return True
-    ref = bound.get(pred.same_name_as)
+    ref = names[pred.same_name_as]
     return ref is not None and step.name is not None and step.name == ref
 
 
@@ -321,43 +321,61 @@ def _find_matches_forward(index: TraceIndex, pattern: PathPattern) -> list[list[
 def _iter_forward(index: TraceIndex, pattern: PathPattern) -> Iterator[list[str]]:
     steps, children = index
     for sid in steps:
-        yield from _advance(steps, children, pattern.steps, sid, 0, [], {})
+        yield from _advance(steps, children, pattern.steps, sid)
 
 
-# Recursion depth here == predicate index (len(preds), ~2-4), NOT trace depth — safe on the
-# deep-linear traces this project sees. The variable-length gap walk below is an explicit
-# deque (heap, not stack), so a 30-hop span over a 2000-step trace never grows the call stack.
 def _advance(
     steps: dict[str, Step],
     children: dict[str, list[str]],
     preds: tuple[StepPredicate, ...],
-    node_id: str,
-    idx: int,
-    acc: list[str],
-    bound: dict[int, str | None],
+    start: str,
 ) -> Iterator[list[str]]:
-    """Yield every match extending the prefix ``acc`` from ``node_id`` at predicate ``idx``.
+    """Yield every match whose first step is ``start``.
 
-    Each call yields distinct paths: it extends one fixed prefix, and each level advances any
-    node at most once (a strict step dedups its children, since an unvalidated trace can repeat
-    an edge; a gap advances a node once however many in-range distances reach it). So, with no
-    set of every path, each match is produced once — ``RETURN DISTINCT``'s result.
+    A depth-first walk over the predicates with an explicit stack, so neither the number of
+    predicates nor the length of a gap grows the call stack. ``stack[i]`` yields the nodes
+    predicate ``i`` is tried at, extending the prefix ``path[:i]``; ``names[i]`` is the name
+    ``path[i]`` had when it matched, which later back-references compare against.
+
+    Each match is produced once: a prefix is extended by one candidate iterator, which tries any
+    node at most once (see :func:`_candidates`). So, with no set of every path, the result is
+    ``RETURN DISTINCT``'s.
     """
-    step = steps[node_id]
-    pred = preds[idx]
-    if not pred.matches(step) or not _name_ok(pred, step, bound):
+    path: list[str] = []
+    names: list[str | None] = []
+    stack: list[Iterator[str]] = [iter((start,))]
+    while stack:
+        node_id = next(stack[-1], None)
+        if node_id is None:
+            stack.pop()
+            continue
+        idx = len(stack) - 1
+        del path[idx:], names[idx:]
+        step = steps[node_id]
+        pred = preds[idx]
+        if not pred.matches(step) or not _name_ok(pred, step, names):
+            continue
+        path.append(node_id)
+        names.append(step.name)
+        if idx + 1 == len(preds):
+            yield list(path)
+            continue
+        stack.append(_candidates(children, preds[idx + 1], node_id))
+
+
+def _candidates(
+    children: dict[str, list[str]], pred: StepPredicate, node_id: str
+) -> Iterator[str]:
+    """The nodes ``pred`` is tried at after ``node_id`` matched the predicate before it.
+
+    A strict step tries each child once (an unvalidated trace can repeat an edge); a gap tries
+    a node once however many in-range distances reach it. Lazy, so a walk that stops early
+    never runs the rest of a gap's BFS.
+    """
+    if pred.gap is None:
+        yield from dict.fromkeys(children.get(node_id, []))
         return
-    acc2 = acc + [node_id]
-    if idx + 1 == len(preds):
-        yield acc2
-        return
-    bound2 = {**bound, idx: step.name}
-    nxt = preds[idx + 1]
-    if nxt.gap is None:
-        for child in dict.fromkeys(children.get(node_id, [])):
-            yield from _advance(steps, children, preds, child, idx + 1, acc2, bound2)
-        return
-    lo, hi = nxt.gap
+    lo, hi = pred.gap
     # BFS forward over CAUSED_BY (cause -> effect). De-dup on (node, distance) so a diamond
     # doesn't blow up exponentially while still visiting every distinct path *length* — an
     # endpoint reachable only at a longer-than-min distance within [lo, hi] is not missed.
@@ -371,7 +389,7 @@ def _advance(
         visited_states.add((cur, dist))
         if dist >= lo and (hi is None or dist <= hi) and cur not in advanced:
             advanced.add(cur)
-            yield from _advance(steps, children, preds, cur, idx + 1, acc2, bound2)
+            yield cur
         if hi is None or dist < hi:
             for c in children.get(cur, []):
                 frontier.append((c, dist + 1))
