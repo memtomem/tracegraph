@@ -1,15 +1,15 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-24, `7c16ee0` 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `c9cd600` 기준 (Asia/Seoul)
 
-- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `7c16ee0`(PR #174 병합)이다. 그 직전
-  `7729d2f`(PR #172)는 테스트 전용 수정이었다. 시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0)
-  이후 `uv.lock`은 바뀌지 않았다.
-- **PyPI 최신은 여전히 0.8.0이다(`c4be406`, 2026-10-20).** `CHANGELOG.md`의 `## Unreleased`에 0.8.0 이후 착지한 변경이
-  쌓여 있고, 아직 릴리스하지 않았다. 새 `EdgeOrigin` 두 개(`graph_parent_heuristic`, `checkpoint_subgraph_return`), 새
-  capture gap 코드(`langgraph.ambiguous_subgraph_return`), 내용 기준 artifact schema v8·v9, CLI 출력 문구 변경이 있다. 0.8.0
-  때와 같은 기준(출력 문구가 바뀌면 patch가 아니라 minor)을 쓰면 다음 버전은 0.9.0이고, 버전은 소유자가 정한다. 다음
-  릴리스에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## Unreleased`다:
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `c9cd600`(PR #177 병합)이다. 시작 전에
+  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0) 이후 `uv.lock`의 의존성은 바뀌지 않았고,
+  0.9.0 준비 PR은 그 안의 프로젝트 버전만 0.9.0으로 바꾼다.
+- **0.9.0을 준비 중이다. 이 문서를 쓰는 시점에 PyPI 최신은 0.8.0이다(`c4be406`, 2026-10-20).** 소유자가 2026-10-24에
+  0.9.0 릴리스를 지시했고, 준비 PR이 `CHANGELOG.md`의 `## Unreleased`를 `## 0.9.0 - 2026-10-24`로 옮긴다. 새 `EdgeOrigin`
+  두 개(`graph_parent_heuristic`, `checkpoint_subgraph_return`), 새 capture gap 코드(`langgraph.ambiguous_subgraph_return`),
+  내용 기준 artifact schema v8·v9, CLI 출력 문구 변경이 있어 0.8.0 때와 같은 기준(출력 문구가 바뀌면 patch가 아니라
+  minor)으로 minor다. 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## 0.9.0`이다:
   - **시작 순서로 고른 OTLP·Phoenix loop 부모의 per-edge origin과 schema v8(#142, PR #148).** `graph.node.parent_id`가
     가리키는 노드의 여러 실행 중 시작 시각(`by_timing`)이나 시작 번호(`by_order`)로 고른 부모 edge는 `graph_parent` 대신
     `graph_parent_heuristic`(`EdgeOrigin.GRAPH_PARENT_HEURISTIC`)으로 기록된다. `EXPLICIT_ORIGINS`에서 빠지므로
@@ -85,11 +85,17 @@
     냈다. 이제 lazy 후보 iterator(`_candidates`)의 명시적 스택으로 걷고, 매칭 시점의 step 이름을 path 옆 `names` 리스트에
     둔다(`Step`이 mutable이라 path에서 이름을 다시 읽으면 동등하지 않다). 매칭 결과, `iter_matches`의 yield 순서, gap BFS의
     지연 실행은 그대로다. CLI `query`·`analyze`는 짧은 preset만 써서 영향이 없었다.
-- **열린 이슈 1개(#173).** `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
-  이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170)는 모두 닫혔다. 현재 열려 있는 유일한 이슈는 #170 계획
-  리뷰에서 찾아 등록한 **#173**(`LadybugStore`가 긴 패턴도 Cypher로 컴파일해 네이티브로 실행해서, predicate 32개 무렵부터
-  17~23초가 걸리고 1000개에서는 `UncompilablePattern` fallback 밖에서 `RuntimeError: unordered_map::at: key not found`가
-  나는 문제; CLI는 짧은 preset만 써서 닿지 않고 라이브러리 호출 경로만 해당)이다.
+  - **`--backend ladybug`는 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행한다(#173·#176, PR #177).** bounded gap은
+    `CAUSED_BY*lo..hi`로 컴파일되는데 LadybugDB가 그 범위의 인과 경로를 모두 열거해, step마다 원인이 여럿이면 경로 수가
+    지수적으로 는다(#176: preset `tool-retry-failure-near`가 원인 2개짜리 200-step trace에서 120초 안에 끝나지 않았고,
+    기본 백엔드는 0.02초). 긴 패턴은 계획 비용이 predicate 수에 따라 커진다(#173: 1-step trace에서 32개 17.5초, 1000개
+    `RuntimeError`). 이제 `LadybugStore._runs_natively`가 gap이 있거나 `MAX_NATIVE_PREDICATES`(6)를 넘는 패턴을 순수 Python
+    fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
+    tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
+    patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
+- **열린 이슈 없음.** `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+  이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
+  #173 측정 중에 찾아 등록했다.
 
 ### `c4be406` 이후 착지한 변경
 
@@ -113,8 +119,10 @@
 | #171 | `47e5349` | #168: `input_validation.refuses_deep_nesting`으로 `artifact.from_obj`와 세 어댑터의 `from_documents`·`__init__`·`discover`·`ingest` 경계에서 `RecursionError`를 `ValueError`로 바꾼다 |
 | #172 | `7729d2f` | `test_json_depth_cap.py`의 `INSERT INTO writes`가 컬럼 이름을 명시하도록 고쳐 `langgraph-checkpoint-sqlite` 3.1.2의 `writes.task_path` 컬럼 추가(upstream-drift run `39982273053`)에 대응했다 |
 | #174 | `7c16ee0` | #170: `analysis/patterns._advance`를 predicate마다 재귀하는 대신 lazy 후보 iterator의 명시적 스택으로 바꾸고, back-reference는 매칭 시점에 저장한 이름과 비교한다. 매칭 결과와 yield 순서는 그대로다 |
+| #175 | `64f6cae` | 이 전달 상태 절(문서만)과 `.gitignore`의 memtomem 로컬 디렉터리 |
+| #177 | `c9cd600` | #173·#176: `LadybugStore`가 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행하고 나머지는 순수 Python fallback으로 보낸다. CLI fallback 안내 문구를 고쳤다 |
 
-### 이번 구간의 결정(2026-10-20~24, PR #148~#174)
+### 이번 구간의 결정(2026-10-20~24, PR #148~#177)
 
 1. **#142(PR #148):** 이슈의 옵션 1(`otlp.graph_parent_by_timing` 코드가 있으면 모든 `graph_parent` edge를 명시된 조상에서
    제외)은 선언된 체인 `plan→exec→report` 옆에 무관한 타이밍 loop가 있는 trace에서 실패 분류를 `[x]`/`[y]`에서
@@ -167,6 +175,12 @@
    path로 이름을 다시 읽는 설계가 `Step`이 mutable이라 동등하지 않음이 드러나 매칭 시점 이름을 저장하는 `names` 리스트로
    바꿨고, gap BFS의 지연 실행을 고정하는 테스트를 더했다. 같은 리뷰에서 `LadybugStore`의 네이티브 경로가 긴 패턴에서
    느려지고 `RuntimeError`를 내는 문제가 드러나 #173으로 분리 등록했다.
+10. **#173·#176(PR #177):** #173 측정 중 bounded gap 쿼리가 경로 열거 때문에 지수적으로 느려지는 #176(CLI `query
+    tool-retry-failure-near --backend ladybug`로 닿음)이 드러나, 소유자가 새 이슈로 기록하고 #173을 넓혀 함께 고치기로
+    했다. 임계치 6은 3000-step chain과 DAG 양쪽에서 Cypher가 fallback보다 빨랐던 가장 큰 predicate 수다. 엔진의
+    `RuntimeError`를 잡아 fallback하는 이슈의 옵션 2는, 엔진이 타입 없는 `builtins.RuntimeError`만 내서 메시지 비교가
+    필요하므로 택하지 않았다. `compile_to_cypher`는 공개 API라 그대로 두고 실행 여부를 store가 정한다. bounded gap을
+    Cypher로 실행하고 안내를 띄우지 않던 기존 설계를 뒤집은 변경이다.
 
 ### 검증 증거
 
@@ -174,22 +188,19 @@
 
 | 검증 | 결과 |
 | --- | --- |
-| 전체 테스트 `pytest` | PR별 통과 수(#163·#166 전체 스위트는 skipped 수 미기재, 나머지는 모두 12 skipped): #148·#149 2791, #151·#153 2792, #156 2809, #157 2816, #159 2829, #160 2837, #161 2841, #162 2850, #163 2852(Python 3.12·3.13·3.14 `[cypher]`, 3.14 core는 2762), #165 2850(경합 테스트를 3.12·3.13·3.14 각각 SQLite 600회 + in-memory 600회, 버전마다 1200회 모두 통과), #166 2852, #169 2898, #171 2912(3.13.2·3.14.4에서도 신규 14개 통과), #172 2912(최신 upstream `langgraph 1.2.16`·`langgraph-checkpoint 4.3.0`·`langgraph-checkpoint-sqlite 3.1.2`에서 `-m "not perf"` 2900 passed), #174 **3217 passed, 12 skipped**(신규 305개, `tests/test_patterns.py`는 3.13.2·3.14.4에서 각 1232 passed) |
-| lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153을 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174, `git diff --check` 통과는 #149·#169·#174에 적혀 있다 |
-| 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
-| 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개) 모두 신규 테스트가 검출 |
-| 리뷰 게이트 | PR 본문에 적힌 라운드 수(#148 plan 2·diff 2, #149 plan 2·diff 3, #151 diff 2, #156 plan 2·diff 4, #157 plan 2·diff 2, #159 4라운드, #160 3라운드, #161 plan 2·diff 3, #162 plan 3·diff 2, #163 plan 2·diff 2, #165 diff 2, #166 plan 2·diff 2, #169 plan 5·diff 3, #171 plan 2·diff 2, #174 plan 2·diff 2). 마지막 라운드 **SHIP**이 본문에 적힌 것은 #148·#149·#151·#156·#157·#159·#160·#161·#163·#165·#166·#169·#171·#174이다. #162는 라운드와 수정 내용만 있고 최종 판정이 없으며, #147·#153·#172 본문에는 리뷰 기록이 없다 |
+| 전체 테스트 `pytest` | PR별 통과 수(#163·#166 전체 스위트는 skipped 수 미기재, 나머지는 모두 12 skipped): #148·#149 2791, #151·#153 2792, #156 2809, #157 2816, #159 2829, #160 2837, #161 2841, #162 2850, #163 2852(Python 3.12·3.13·3.14 `[cypher]`, 3.14 core는 2762), #165 2850(경합 테스트를 3.12·3.13·3.14 각각 SQLite 600회 + in-memory 600회, 버전마다 1200회 모두 통과), #166 2852, #169 2898, #171 2912(3.13.2·3.14.4에서도 신규 14개 통과), #172 2912(최신 upstream `langgraph 1.2.16`·`langgraph-checkpoint 4.3.0`·`langgraph-checkpoint-sqlite 3.1.2`에서 `-m "not perf"` 2900 passed), #174 3217(신규 305개, `tests/test_patterns.py`는 3.13.2·3.14.4에서 각 1232 passed), #177 **3227 passed, 12 skipped**(Ladybug·CLI·compile 테스트는 3.13.2·3.14.4에서 각 378 passed) |
+| lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153을 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#177에 적혀 있다 |
+| 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174·#177(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
+| 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개), #177(4개) 모두 신규 테스트가 검출 |
+| 리뷰 게이트 | PR 본문에 적힌 라운드 수(#148 plan 2·diff 2, #149 plan 2·diff 3, #151 diff 2, #156 plan 2·diff 4, #157 plan 2·diff 2, #159 4라운드, #160 3라운드, #161 plan 2·diff 3, #162 plan 3·diff 2, #163 plan 2·diff 2, #165 diff 2, #166 plan 2·diff 2, #169 plan 5·diff 3, #171 plan 2·diff 2, #174 plan 2·diff 2, #175 claims-check 5라운드, #177 plan 2·diff 2). 마지막 라운드 **SHIP**이 본문에 적힌 것은 #148·#149·#151·#156·#157·#159·#160·#161·#163·#165·#166·#169·#171·#174·#177이다. #175는 마지막 라운드가 NEEDS-FIX(Minor 2, 1개 반영·1개 기각)였다. #162는 라운드와 수정 내용만 있고 최종 판정이 없으며, #147·#153·#172 본문에는 리뷰 기록이 없다 |
 
 ### 남은 결정과 후속 항목
 
-1. **열린 이슈 #173:** `LadybugStore.find_matches`·`first_matches`는 `UncompilablePattern`만 순수 Python fallback으로
-   보내므로, 긴 패턴은 네이티브로 실행돼 느려지고(predicate 32개 17~23초) 1000개에서 `RuntimeError`가 난다(CLI preset은
-   짧아서 해당 없음). 이슈의 옵션은 predicate 수 임계치를 넘으면 `UncompilablePattern`으로 fallback(임계치 측정 필요),
-   네이티브 오류를 좁게 잡아 fallback, 또는 문서화다. 소유자가 고른다.
-2. **다음 릴리스:** `CHANGELOG.md`의 `## Unreleased`에 #142, #143, #150, #154, #155, #158, #126, #127, #128, #129,
-   #167, #168, #170이 쌓여 있다. 새 `EdgeOrigin` 두 개(`graph_parent_heuristic`, `checkpoint_subgraph_return`), 새 capture gap
-   코드(`langgraph.ambiguous_subgraph_return`), 내용 기준 artifact schema v8·v9, CLI 출력 문구 변경이 있어 0.8.0 때의
-   기준이면 minor(0.9.0)다. 릴리스 여부와 버전은 소유자가 정하며 절차는 [릴리스 런북](releasing.md)이다.
+1. **열린 이슈:** 없다.
+2. **0.9.0 릴리스:** `CHANGELOG.md`의 `## 0.9.0 - 2026-10-24`에 #126, #127, #128, #129, #142, #143, #150, #154, #155,
+   #158, #167, #168, #170, #173, #176이 있다. 준비 PR을 병합한 뒤 [릴리스 런북](releasing.md) 3~5단계(`test-v0.9.0`
+   리허설 → 검증 → `v0.9.0`)를 따른다. `pypi` 환경 승인은 소유자만 할 수 있다. 배포 결과는 배포 뒤 별도 PR로 이
+   문서에 기록한다.
 3. **기존 보류 항목 정리 상태:**
    - 아래 `2026-10-14` 절 5번과 `2026-09-15` 절 3·4·5·7·8번 가운데 이슈로 옮긴 #122(`phoenix diagnose` 종료 코드),
      #123(`from_file` 크기 제한 문서화), #124·#136(Phoenix 숫자 타임스탬프와 loop 부모), #125(`--redact-errors`),
