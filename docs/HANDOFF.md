@@ -85,11 +85,11 @@
     냈다. 이제 lazy 후보 iterator(`_candidates`)의 명시적 스택으로 걷고, 매칭 시점의 step 이름을 path 옆 `names` 리스트에
     둔다(`Step`이 mutable이라 path에서 이름을 다시 읽으면 동등하지 않다). 매칭 결과, `iter_matches`의 yield 순서, gap BFS의
     지연 실행은 그대로다. CLI `query`·`analyze`는 짧은 preset만 써서 영향이 없었다.
-  - **`--backend ladybug`는 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행한다(#173·#176, PR #177).** bounded gap은
+  - **`--backend ladybug`는 첫 predicate 뒤에 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행한다(#173·#176, PR #177).** bounded gap은
     `CAUSED_BY*lo..hi`로 컴파일되는데 LadybugDB가 그 범위의 인과 경로를 모두 열거해, step마다 원인이 여럿이면 경로 수가
     지수적으로 는다(#176: preset `tool-retry-failure-near`가 원인 2개짜리 200-step trace에서 120초 안에 끝나지 않았고,
     기본 백엔드는 0.02초). 긴 패턴은 계획 비용이 predicate 수에 따라 커진다(#173: 1-step trace에서 32개 17.5초, 1000개
-    `RuntimeError`). 이제 `LadybugStore._runs_natively`가 gap이 있거나 `MAX_NATIVE_PREDICATES`(6)를 넘는 패턴을 순수 Python
+    `RuntimeError`). 이제 `store.ladybug._runs_natively`가 첫 predicate 뒤에 gap이 있거나 `MAX_NATIVE_PREDICATES`(6)를 넘는 패턴을 순수 Python
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
@@ -120,7 +120,7 @@
 | #172 | `7729d2f` | `test_json_depth_cap.py`의 `INSERT INTO writes`가 컬럼 이름을 명시하도록 고쳐 `langgraph-checkpoint-sqlite` 3.1.2의 `writes.task_path` 컬럼 추가(upstream-drift run `39982273053`)에 대응했다 |
 | #174 | `7c16ee0` | #170: `analysis/patterns._advance`를 predicate마다 재귀하는 대신 lazy 후보 iterator의 명시적 스택으로 바꾸고, back-reference는 매칭 시점에 저장한 이름과 비교한다. 매칭 결과와 yield 순서는 그대로다 |
 | #175 | `64f6cae` | 이 전달 상태 절(문서만)과 `.gitignore`의 memtomem 로컬 디렉터리 |
-| #177 | `c9cd600` | #173·#176: `LadybugStore`가 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행하고 나머지는 순수 Python fallback으로 보낸다. CLI fallback 안내 문구를 고쳤다 |
+| #177 | `c9cd600` | #173·#176: `LadybugStore`가 첫 predicate 뒤에 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행하고 나머지는 순수 Python fallback으로 보낸다. CLI fallback 안내 문구를 고쳤다 |
 
 ### 이번 구간의 결정(2026-10-20~24, PR #148~#177)
 
@@ -189,7 +189,7 @@
 | 검증 | 결과 |
 | --- | --- |
 | 전체 테스트 `pytest` | PR별 통과 수(#163·#166 전체 스위트는 skipped 수 미기재, 나머지는 모두 12 skipped): #148·#149 2791, #151·#153 2792, #156 2809, #157 2816, #159 2829, #160 2837, #161 2841, #162 2850, #163 2852(Python 3.12·3.13·3.14 `[cypher]`, 3.14 core는 2762), #165 2850(경합 테스트를 3.12·3.13·3.14 각각 SQLite 600회 + in-memory 600회, 버전마다 1200회 모두 통과), #166 2852, #169 2898, #171 2912(3.13.2·3.14.4에서도 신규 14개 통과), #172 2912(최신 upstream `langgraph 1.2.16`·`langgraph-checkpoint 4.3.0`·`langgraph-checkpoint-sqlite 3.1.2`에서 `-m "not perf"` 2900 passed), #174 3217(신규 305개, `tests/test_patterns.py`는 3.13.2·3.14.4에서 각 1232 passed), #177 **3227 passed, 12 skipped**(Ladybug·CLI·compile 테스트는 3.13.2·3.14.4에서 각 378 passed) |
-| lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153을 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#177에 적혀 있다 |
+| lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153·#175를 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#175·#177에 적혀 있다 |
 | 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174·#177(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
 | 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개), #177(4개) 모두 신규 테스트가 검출 |
 | 리뷰 게이트 | PR 본문에 적힌 라운드 수(#148 plan 2·diff 2, #149 plan 2·diff 3, #151 diff 2, #156 plan 2·diff 4, #157 plan 2·diff 2, #159 4라운드, #160 3라운드, #161 plan 2·diff 3, #162 plan 3·diff 2, #163 plan 2·diff 2, #165 diff 2, #166 plan 2·diff 2, #169 plan 5·diff 3, #171 plan 2·diff 2, #174 plan 2·diff 2, #175 claims-check 5라운드, #177 plan 2·diff 2). 마지막 라운드 **SHIP**이 본문에 적힌 것은 #148·#149·#151·#156·#157·#159·#160·#161·#163·#165·#166·#169·#171·#174·#177이다. #175는 마지막 라운드가 NEEDS-FIX(Minor 2, 1개 반영·1개 기각)였다. #162는 라운드와 수정 내용만 있고 최종 판정이 없으며, #147·#153·#172 본문에는 리뷰 기록이 없다 |
