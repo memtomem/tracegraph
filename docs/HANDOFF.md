@@ -1,6 +1,206 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-20, `c4be406`(v0.8.0) 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `7c16ee0` 기준 (Asia/Seoul)
+
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `7c16ee0`(PR #174 병합)이다. 그 직전
+  `7729d2f`(PR #172)는 테스트 전용 수정이었다. 시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0)
+  이후 `uv.lock`은 바뀌지 않았다.
+- **PyPI 최신은 여전히 0.8.0이다(`c4be406`, 2026-10-20).** `CHANGELOG.md`의 `## Unreleased`에 0.8.0 이후 착지한 변경이
+  쌓여 있고, 아직 릴리스하지 않았다. 새 `EdgeOrigin` 두 개(`graph_parent_heuristic`, `checkpoint_subgraph_return`), 새
+  capture gap 코드(`langgraph.ambiguous_subgraph_return`), 내용 기준 artifact schema v8·v9, CLI 출력 문구 변경이 있다. 0.8.0
+  때와 같은 기준(출력 문구가 바뀌면 patch가 아니라 minor)을 쓰면 다음 버전은 0.9.0이고, 버전은 소유자가 정한다. 다음
+  릴리스에서 놓치기 쉬운 동작 변경은 다음과 같다. 전체 목록은 `CHANGELOG.md`의 `## Unreleased`다:
+  - **시작 순서로 고른 OTLP·Phoenix loop 부모의 per-edge origin과 schema v8(#142, PR #148).** `graph.node.parent_id`가
+    가리키는 노드의 여러 실행 중 시작 시각(`by_timing`)이나 시작 번호(`by_order`)로 고른 부모 edge는 `graph_parent` 대신
+    `graph_parent_heuristic`(`EdgeOrigin.GRAPH_PARENT_HEURISTIC`)으로 기록된다. `EXPLICIT_ORIGINS`에서 빠지므로
+    `analyze`가 primary와 propagated 실패를 나눌 때 선언된 조상으로 치지 않고, `summarize`는 선언된 `graph_parent`와
+    따로 묶는다. `normalize._ORIGIN_PRIORITY`에서는 여전히 우선순위 0이라 `TREE_PARENT`와
+    `requires_origin_priority_projection`은 바뀌지 않는다. incident memo는 해당 edge만
+    `"preceded by (graph parent, chosen heuristically)"`로 쓰고, 이 origin이 하나도 없이 `otlp.graph_parent_by_timing`만
+    있는 0.8.0 이하 artifact는 기존 `"possibly chosen heuristically"` 문구를 유지한다. span이 고른 부모로 in-trace
+    `SPAN_LINK`도 선언했으면 링크가 선택을 뒷받침한 것으로 보아 edge는 `graph_parent`로 남고
+    `otlp.graph_parent_by_timing` 개수에서 빠진다. 이 origin이 하나라도 있는 artifact만 `schema_version: 8`(더 높은
+    버전을 요구하는 특성이 없을 때)로 찍히고, 0.8.0 이하 reader는 버전으로 거부한다.
+  - **`explain`·`query --explain`의 lossy 체인 fan-in 문구 통일(#143, PR #149·#151).** `README.md`·`docs/USAGE_KO.md`·
+    `analysis/explain.py`가 raw `CAUSED_BY` 그래프를 "every real predecessor"가 아니라 "every recorded predecessor"로
+    설명하고, projection 손실(`projection_lossy`)과 수집 충실도를 구분한다(PR #149). CLI의 `explain`과
+    `query --explain`도 휴리스틱 부모 코드 유무와 관계없이 모든 lossy 체인에서
+    `"more than one recorded cause … this raw chain lists every recorded ancestor"` 문구를 쓰고, `query --explain`은
+    `"in this match"` 대신 `"in this chain"`이라고 쓴다(PR #151). 휴리스틱 부모 경고가 붙는 조건은 그대로다.
+  - **LangGraph subgraph 복귀 edge(`checkpoint_subgraph_return`), schema v9, persistent subgraph, time travel·fork
+    경계(#150·#155·#154·#158, PR #156·#157·#159·#160).**
+    - **Per-edge origin과 schema v9(#150, PR #156):** 부모 namespace가 subgraph 실행 뒤 재개될 때 그 subgraph의 마지막
+      checkpoint를 거치는 복귀 edge가 `checkpoint_parent` 대신
+      `checkpoint_subgraph_return`(`EdgeOrigin.CHECKPOINT_SUBGRAPH_RETURN`)으로 기록된다. `EXPLICIT_ORIGINS`에 남고
+      트리 우선순위도 0이라 `TREE_PARENT`와 실패 분류는 그대로다. incident memo는 다른 명시 origin처럼 `caused by`로 쓰고
+      `origin: checkpoint_subgraph_return`을 함께 적으며, `summarize`는 별도 origin으로 묶는다. 복귀 지점도 invocation 전체의 마지막 checkpoint가 아니라 **그 부모
+      이어짐보다 앞서 기록된** 마지막 subgraph checkpoint로 고쳐, 나중에 subgraph에 `update_state`를 해도 재수집 때 복귀가
+      풀리지 않는다. 이 origin이 있는 artifact는 `schema_version: 9`로 찍힌다.
+    - **Subgraph launcher에서 갈라진 time travel(#155, PR #157):** 선언된 부모가 subgraph를 띄운 launcher
+      checkpoint인 비-loop checkpoint(`source != "loop"`, 예: `update`, `fork`)는, subgraph 노드의 task가 launcher에서
+      `_pull_task_ids`로 계산한 pull task로 인식될 때 그 노드 이름에 대한 `versions_seen`이 launcher와 다를 때만
+      subgraph를 거쳐 이어진다(`update_state(..., as_node=END)`와 이어진 뒤의 `__copy__`는 옮기고, 다른 노드 이름의
+      `update_state`와 replay fork는 옮기지 않는다). `Send` push task와 pull로 인식되지 않는 task는 비교 없이 예전처럼
+      잇는다(`_applied_subgraph_task`).
+    - **Persistent subgraph(`compile(checkpointer=True)`) 다중 실행과 중첩(#154, PR #159):** task id 없이 노드
+      경로(`child`, `mid|inner`)만 쓰는 persistent subgraph namespace에서, `metadata.parents`가 이전에 보지 못한 부모
+      checkpoint를 가리키면 새 실행을 시작하고 그 부모를 두 번째 `checkpoint_parent`로 받는다(이전 실행의 마지막
+      checkpoint 뒤에도 이어진다. 오류 상속 계산에서는 이 진입 edge를 뺀다). 이미 본 부모를 가리키면 진행 중인 실행을
+      잇는다. #155의 `versions_seen` 검사는 persistent namespace에도 적용된다. launcher 탐색(`_closest_parent_ns`)은
+      조상 namespace의 세그먼트를 노드 이름으로 비교하고(`mid`와 `mid:<task_id>`는 모두 `mid`), pull-task
+      판별(`_applied_subgraph_task`)은 마지막 세그먼트가 아니라 launcher namespace 바로 아래 첫 세그먼트를 쓴다.
+    - **기록이 갈라지지 않는 `__copy__` subgraph 복귀 보류(#158, PR #160):** subgraph launcher에서 나온
+      `__copy__`(`source="fork"`로 판별)는 #155 검사를 통과한 뒤, 같은 `(launcher, ns)`에서 앞선 step이 고른
+      복귀 지점이 없거나 모두 그 후보 subgraph checkpoint일 때만 그 후보를 거친다(복귀하지 않은 앞선 step은 따지지
+      않는다). 앞선 step이 다른 지점으로 복귀해 checkpoint 기록만으로는 갈림 시점의 subgraph 출력을 알 수 없으면, 복귀를
+      연결하지 않고 선언된 launcher를 부모로 유지하며 새 capture gap
+      `langgraph.ambiguous_subgraph_return`을 기록한다(`check`는 다중 step 경로 규칙과 `topology-unchanged`를
+      `INSUFFICIENT_EVIDENCE`로 판정).
+  - **Review-candidate reader의 알 수 없는 필드 무시와 입력 값 비노출(#126, PR #161).** `ReviewCandidateReport`와
+    `ReviewCandidate`가 `extra="ignore", hide_input_in_errors=True`로 읽는다(알 수 없는 필드를 버리는 동작은
+    SyncMill·Toolgraph reader의 `extra="ignore"`와 같다). 알 수 없는 키는 버려지고, 검증 실패 메시지에 거부된 입력 값이 찍히지 않으며, `build_report`는 candidate
+    `ValidationError`를 `ReviewCandidate for trace '<id>'` 제목으로 다시 만든다.
+    `contracts/review-candidates.schema.json`(schema v1)은 바이트 단위로 그대로다.
+  - **`analyze`와 incident memo의 기록된 task 표식(#127, PR #162).** `trace.status`는 그대로 `"error"` 또는 `"ok"`로
+    두고(`diagnose.TRACE_STATUS_SCOPE`: `"trace status reports whether a recorded step failed, not whether the run completed"`),
+    trace가 가진 기록된 task 표식(`source=interrupt` step, `source=scheduled` step, `langgraph.undecided_interrupt`
+    capture gap)의 개수를 `diagnose.recorded_task_markers(nt)`로 세어 `analyze` warnings(current·baseline 각각)와
+    incident memo의 `Recorded Task Markers` 줄에 중립적인 기록 개수로 적는다. 세 표식이 모두 0개인 trace의 출력은 바이트
+    단위로 같다.
+  - **JSON 중첩 깊이 9000 상한과 문서 디코딩 재귀 방어(#167·#168, PR #169·#171·#172).**
+    - **JSON 깊이 상한(#167, PR #169):** Python 3.12·3.13의 `json`은 약 10,000단계 근처에서 깊은 JSON을 거부하지만
+      3.14는 C 스택이 허용하는 만큼 받아들이는 버전 간 차이를 없애기 위해, `input_validation.loads`가 파싱 전에
+      `check_text_depth`로 JSON 텍스트를 훑어 깊이 `MAX_JSON_DEPTH`(9000)를 넘는 배열·객체 중첩을 모든 Python 버전에서
+      `ValueError("JSON nesting too deep")`로 거부한다. `ingest --sqlite`도 snapshot 시간 예산
+      안에서 `sqlite_snapshot._check_json_depth`로 metadata, JSON checkpoint 본문, 기존 checkpoint에 속한 JSON write의
+      깊이를 검사한다.
+    - **깊은 문서 처리 중 `RecursionError`의 `ValueError` 변환(#168, PR #171):** 이미 디코딩된 Python 객체를 받는 라이브러리
+      진입점이나 재귀 한도를 넘게 중첩된 값으로 디코딩되는 조작된 SQLite checkpoint 본문처럼 텍스트 JSON 게이트를 거치지 않는
+      경로에서 깊은 구조 때문에 `RecursionError`가 나면, `input_validation.refuses_deep_nesting` 데코레이터가
+      `artifact.from_obj`, `OTLPSpanAdapter.from_documents`/`discover`/`ingest`,
+      `PhoenixExportAdapter.__init__`/`ingest`, `LangGraphCheckpointAdapter.discover`/`ingest` 경계에서 `ValueError`로
+      바꿔 CLI가 raw traceback(exit 1) 대신 usage/input 에러(exit 2)로 끝난다.
+  - **긴 `PathPattern`의 `RecursionError` 해소(#170, PR #174).** 순수 Python forward matcher(`analysis/patterns._advance`)가
+    predicate마다 한 번씩 재귀해 predicate 약 1000개부터 `find_matches`·`iter_matches`·`search`가 `RecursionError`를
+    냈다. 이제 lazy 후보 iterator(`_candidates`)의 명시적 스택으로 걷고, 매칭 시점의 step 이름을 path 옆 `names` 리스트에
+    둔다(`Step`이 mutable이라 path에서 이름을 다시 읽으면 동등하지 않다). 매칭 결과, `iter_matches`의 yield 순서, gap BFS의
+    지연 실행은 그대로다. CLI `query`·`analyze`는 짧은 preset만 써서 영향이 없었다.
+- **열린 이슈 1개(#173).** `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+  이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170)는 모두 닫혔다. 현재 열려 있는 유일한 이슈는 #170 계획
+  리뷰에서 찾아 등록한 **#173**(`LadybugStore`가 긴 패턴도 Cypher로 컴파일해 네이티브로 실행해서, predicate 32개 무렵부터
+  17~23초가 걸리고 1000개에서는 `UncompilablePattern` fallback 밖에서 `RuntimeError: unordered_map::at: key not found`가
+  나는 문제; CLI는 짧은 preset만 써서 닿지 않고 라이브러리 호출 경로만 해당)이다.
+
+### `c4be406` 이후 착지한 변경
+
+| PR | merge | 내용 |
+| --- | --- | --- |
+| #147 | `9df9093` | 0.8.0 릴리스 기록(문서만) |
+| #148 | `c80bb96` | #142: 시작 시각·시작 번호로 고른 OTLP·Phoenix loop 부모를 `graph_parent_heuristic` origin으로 기록하고 `EXPLICIT_ORIGINS`에서 뺀다. in-trace `SPAN_LINK`가 같은 부모를 가리키면 `graph_parent`로 두고 `otlp.graph_parent_by_timing`에서 뺀다. 내용 기준 artifact schema v8 |
+| #149 | `05d57e6` | #143(문서): raw `CAUSED_BY` 그래프 설명을 "every real predecessor"에서 "every recorded predecessor"로 고치고, projection 손실과 수집 충실도를 구분한다. `CONTRIBUTING.md`의 타이밍·순서 규칙도 실제 동작에 맞췄다(문서·독스트링만) |
+| #151 | `c911fa3` | #143(CLI): `explain`과 `query --explain`이 모든 lossy 체인에서 "more than one recorded cause" 문구를 쓰고, `query --explain`은 "in this chain"으로 통일한다 |
+| #153 | `ea93ffc` | #152: `examples/getting_started_ko.ipynb`를 0.8.0 기준으로 다시 실행해 출력 셀을 갱신했다(문서·노트북만) |
+| #156 | `f113f54` | #150: LangGraph subgraph 복귀 edge를 `checkpoint_subgraph_return` origin으로 기록하고, 복귀 지점을 부모 이어짐보다 앞서 기록된 마지막 subgraph checkpoint로 고른다. 내용 기준 artifact schema v9 |
+| #157 | `a323ebc` | #155: 선언된 부모가 subgraph를 띄운 launcher checkpoint인 비-loop checkpoint는, subgraph 노드의 task가 `_pull_task_ids`로 인식한 pull task이면 `versions_seen[node]`가 launcher와 다를 때만 subgraph를 거쳐 이어진다(`Send`·미인식 task는 예전처럼 잇는다) |
+| #159 | `a3bfb7c` | #154: `compile(checkpointer=True)`의 persistent subgraph에서 새 launcher를 만나면 새 실행을 시작하고 그 부모를 두 번째 `checkpoint_parent`로 받는다(오류 상속에서는 제외). #155의 `versions_seen` 게이트를 persistent·중첩 namespace에도 적용한다 |
+| #160 | `972e7d6` | #158: `__copy__` fork는 같은 `(launcher, ns)`에서 앞선 step이 고른 복귀 지점이 없거나 모두 그 후보 subgraph checkpoint일 때만 그 후보를 거친다. 그렇지 않으면 복귀를 보류하고 `langgraph.ambiguous_subgraph_return`을 공시한다 |
+| #161 | `709da55` | #126: `ReviewCandidateReport`와 `ReviewCandidate`가 `extra="ignore", hide_input_in_errors=True`로 읽고, candidate 검증 오류 제목을 `ReviewCandidate for trace '<id>'`로 통일한다 |
+| #162 | `67ce4f1` | #127: `diagnose.recorded_task_markers`로 `interrupted`·`scheduled`·`undecided interrupt` 기록 개수를 `analyze` 경고와 memo의 `Recorded Task Markers` 줄에 표시하고 `TRACE_STATUS_SCOPE`로 trace status의 범위를 밝힌다 |
+| #163 | `bc01888` | #128: `test.yml`에 Python 3.13·3.14 `[cypher]` 전체 스위트 job과 패키지 classifier를 추가했다. 두 job을 required check에 넣는 일은 PR이 병합 후 선택적 소유자 작업으로 남겼고, 2026-10-24 현재 branch protection required check는 그 둘을 포함해 총 10개다 |
+| #165 | `2817518` | #164: `test_interrupt_beside_a_raising_sibling`에서 `__interrupt__` write가 저장된 뒤에만 형제 노드가 예외를 던지도록 동기화해 Python 3.13 SQLite 타이밍 경합을 없앴다 |
+| #166 | `04e7b30` | #129: `contracts/phoenix-runtime.json`의 E2E Phoenix 서버 이미지를 `18.0.0`에서 `20.24.0`으로 올렸다(`px` CLI는 `1.18.8` 유지) |
+| #169 | `a79c06c` | #167: `input_validation.loads`가 파싱 전에 `check_text_depth`로 JSON 중첩 깊이 9000 초과를 거부하고, `ingest --sqlite`도 `sqlite_snapshot._check_json_depth`로 같은 상한을 적용한다 |
+| #171 | `47e5349` | #168: `input_validation.refuses_deep_nesting`으로 `artifact.from_obj`와 세 어댑터의 `from_documents`·`__init__`·`discover`·`ingest` 경계에서 `RecursionError`를 `ValueError`로 바꾼다 |
+| #172 | `7729d2f` | `test_json_depth_cap.py`의 `INSERT INTO writes`가 컬럼 이름을 명시하도록 고쳐 `langgraph-checkpoint-sqlite` 3.1.2의 `writes.task_path` 컬럼 추가(upstream-drift run `39982273053`)에 대응했다 |
+| #174 | `7c16ee0` | #170: `analysis/patterns._advance`를 predicate마다 재귀하는 대신 lazy 후보 iterator의 명시적 스택으로 바꾸고, back-reference는 매칭 시점에 저장한 이름과 비교한다. 매칭 결과와 yield 순서는 그대로다 |
+
+### 이번 구간의 결정(2026-10-20~24, PR #148~#174)
+
+1. **#142(PR #148):** 이슈의 옵션 1(`otlp.graph_parent_by_timing` 코드가 있으면 모든 `graph_parent` edge를 명시된 조상에서
+   제외)은 선언된 체인 `plan→exec→report` 옆에 무관한 타이밍 loop가 있는 trace에서 실패 분류를 `[x]`/`[y]`에서
+   `[y, x]`/`[]`로 바꾸므로 기각하고, 옵션 2(`graph_parent_heuristic` per-edge origin + schema v8 조건부 스탬핑)를 택했다.
+   계획 리뷰 1라운드에서 `add()`의 `(effect, cause)` 중복 제거 때문에 타이밍으로 고른 부모로의 선언된 `SPAN_LINK`가 조용히
+   버려지는 문제가 드러나, in-trace `SPAN_LINK`가 같은 부모를 가리키면 `GRAPH_PARENT`로 유지하고
+   `otlp.graph_parent_by_timing` 개수에서 빼는 corroboration 규칙을 더했다(`SPAN_LINK`로 승격하면 우선순위가 2가 되어 트리
+   부모가 바뀌므로 `GRAPH_PARENT` 유지).
+2. **#143(PR #149·#151):** 소유자가 옵션 1(설계 문구를 실제 동작에 맞춰 "every recorded predecessor"로 고침)을 택했다.
+   런타임 출력이 바뀌지 않는 문서·독스트링 수정(PR #149)과 기존 lossy trace 출력 한 줄이 바뀌는 CLI fan-in 문구 수정(PR
+   #151)을 별도 PR로 나눠 착지시켰다.
+3. **#150·#155·#154·#158(PR #156·#157·#159·#160):** LangGraph subgraph 복귀 edge를 `checkpoint_subgraph_return`(schema v9
+   조건부 스탬핑)으로 분리하면서, 계획·구현 리뷰에서 호출자가 직접 쓴 이어짐(`source != "loop"`)과 persistent subgraph의
+   반례들을 실제 LangGraph 이력으로 측정해 네 단계로 좁혀 풀었다:
+   - #150(PR #156): 호출자가 쓴 checkpoint를 가려내는 후보 규칙 세 가지(loop step만 복귀, `channel_versions`로 fork
+     짝짓기, LOOP-leaf 선택)가 실제 이력에서 깨져 모두 걷어 내고, per-edge origin과 시간순 직전 subgraph checkpoint
+     선택만 먼저 넣었다. 호출자가 쓴 checkpoint 판별은 #155로 넘겼다.
+   - #155(PR #157): launcher checkpoint에서 `_pull_task_ids`로 계산한 pull task id와 `versions_seen[node]` 진행 여부를
+     결합해, 인식된 pull task에서는 `versions_seen[node]`가 launcher와 다른 비-loop checkpoint만 subgraph를 거치게
+     했다. 다른 노드 이름의 `update_state`와 replay fork는 선언된 부모를 유지하고, subgraph 노드 자신으로 한
+     `update_state`는 구분할 수 없어 여전히 복귀로 잇는다(알려진 한계). `Send`·미인식 task는 예전처럼 잇는다.
+   - #154(PR #159): `compile(checkpointer=True)` persistent subgraph가 모든 실행을 한 체인으로 쌓는 특성에 맞춰, 새
+     launcher를 만나면 두 번째 `checkpoint_parent`를 추가(오류 상속에서는 제외)해 실행별 경계를 복원했다.
+   - #158(PR #160): `__copy__` fork가 나중에 `update_state`로 바뀐 subgraph checkpoint를 거치면 기록에 없는 경로를
+     만들므로, 같은 `(launcher, ns)`에서 앞선 step이 고른 복귀 지점이 없거나 모두 그 후보일 때만 연결하고 아니면 복귀를 보류한 채
+     `langgraph.ambiguous_subgraph_return`을 공시하도록 했다.
+4. **#126(PR #161):** `contracts/review-candidates.schema.json`은 이미 `"additionalProperties": true`였고
+   SyncMill·Toolgraph reader도 `extra="ignore"`를 쓰고 있었으므로, 계약 스키마는 바꾸지 않고 `tracegraph`
+   reader(`ReviewCandidateReport`, `ReviewCandidate`)만 `extra="ignore", hide_input_in_errors=True`로 맞췄다.
+5. **#127(PR #162):** 미완료 실행을 위해 trace header를 세 값(`unset` 포함)으로 만드는 안은, Phoenix ingest가 상태를
+   보고하지 않은 span에 이미 `UNSET`을 쓰므로 "상태 없음"과 "미완료"가 섞이고 artifact 버전과 header migration이
+   필요하므로 채택하지 않고, `trace.status`는 "기록된 step의 실패 여부"로 범위를 명시(`TRACE_STATUS_SCOPE`)한
+   뒤 `interrupted`·`scheduled`·`undecided interrupt` 표식 개수를 `analyze` 경고와 incident memo에 중립적으로 보고하는
+   방식을 택했다.
+6. **#128·#164(PR #163·#165):** Python 3.13·3.14 `[cypher]` 스위트를 CI에 추가하면서 발견된
+   `test_interrupt_beside_a_raising_sibling`의 3.13 SQLite 간헐 실패(600회 중 7회)는 제품 버그가 아니라 테스트의 스레드
+   경합(형제 노드가 `__interrupt__` write보다 먼저 예외를 던져 취소시키는 경우)임을 확인하고 `put_writes` 동기화로
+   고쳤다(#165).
+7. **#129(PR #166):** E2E Phoenix 서버 핀을 `18.0.0`에서 `20.24.0`으로 올렸다. 원격 E2E 워크플로([run
+   39808960992](https://github.com/memtomem/tracegraph/actions/runs/39808960992), linux/amd64, 20.24.0)가 통과했고,
+   로컬 재현에서 18.0.0과 20.24.0이 모두 통과했으며, run 고유 값을 마스킹하면 CI 20.24.0 run의 증거 파일 7개가 로컬
+   18.0.0 run의 것과 일치했다.
+8. **#167·#168·#170(PR #169·#171·#172):** 깊게 중첩된 JSON을 Python 3.12·3.13은 거부하고 3.14는 받아들이는 차이(#167)는
+   `input_validation.loads`의 파싱 전 텍스트 깊이 스캔(9000 상한)과 `sqlite_snapshot._check_json_depth`로 막고, 텍스트
+   JSON 게이트를 거치지 않는 디코딩된 객체·SQLite checkpoint 입력 경로(#168)는 어댑터·artifact 진입점의
+   `refuses_deep_nesting` 데코레이터로 막았다. #168 계획 리뷰에서 찾은 `patterns._advance`의 predicate 개수 비례 재귀는
+   CLI에서는 닿지 않는 별도 문제로 보아 #170으로 분리 등록했다.
+9. **#170·#173(PR #174):** 소유자가 옵션 1(명시적 스택으로 반복문 전환)을 택했다. 옵션 2(`PathPattern`의 predicate 수
+   상한)는 지금 동작하는 패턴을 거부하고 임의의 상한을 공개 API에 넣어야 해서 택하지 않았다. 계획 리뷰 1라운드에서
+   path로 이름을 다시 읽는 설계가 `Step`이 mutable이라 동등하지 않음이 드러나 매칭 시점 이름을 저장하는 `names` 리스트로
+   바꿨고, gap BFS의 지연 실행을 고정하는 테스트를 더했다. 같은 리뷰에서 `LadybugStore`의 네이티브 경로가 긴 패턴에서
+   느려지고 `RuntimeError`를 내는 문제가 드러나 #173으로 분리 등록했다.
+
+### 검증 증거
+
+아래 수치는 각 PR 본문에 적힌 것만 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 `pytest` | PR별 통과 수(#163·#166 전체 스위트는 skipped 수 미기재, 나머지는 모두 12 skipped): #148·#149 2791, #151·#153 2792, #156 2809, #157 2816, #159 2829, #160 2837, #161 2841, #162 2850, #163 2852(Python 3.12·3.13·3.14 `[cypher]`, 3.14 core는 2762), #165 2850(경합 테스트를 3.12·3.13·3.14 각각 SQLite 600회 + in-memory 600회, 버전마다 1200회 모두 통과), #166 2852, #169 2898, #171 2912(3.13.2·3.14.4에서도 신규 14개 통과), #172 2912(최신 upstream `langgraph 1.2.16`·`langgraph-checkpoint 4.3.0`·`langgraph-checkpoint-sqlite 3.1.2`에서 `-m "not perf"` 2900 passed), #174 **3217 passed, 12 skipped**(신규 305개, `tests/test_patterns.py`는 3.13.2·3.14.4에서 각 1232 passed) |
+| lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153을 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174, `git diff --check` 통과는 #149·#169·#174에 적혀 있다 |
+| 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
+| 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개) 모두 신규 테스트가 검출 |
+| 리뷰 게이트 | PR 본문에 적힌 라운드 수(#148 plan 2·diff 2, #149 plan 2·diff 3, #151 diff 2, #156 plan 2·diff 4, #157 plan 2·diff 2, #159 4라운드, #160 3라운드, #161 plan 2·diff 3, #162 plan 3·diff 2, #163 plan 2·diff 2, #165 diff 2, #166 plan 2·diff 2, #169 plan 5·diff 3, #171 plan 2·diff 2, #174 plan 2·diff 2). 마지막 라운드 **SHIP**이 본문에 적힌 것은 #148·#149·#151·#156·#157·#159·#160·#161·#163·#165·#166·#169·#171·#174이다. #162는 라운드와 수정 내용만 있고 최종 판정이 없으며, #147·#153·#172 본문에는 리뷰 기록이 없다 |
+
+### 남은 결정과 후속 항목
+
+1. **열린 이슈 #173:** `LadybugStore.find_matches`·`first_matches`는 `UncompilablePattern`만 순수 Python fallback으로
+   보내므로, 긴 패턴은 네이티브로 실행돼 느려지고(predicate 32개 17~23초) 1000개에서 `RuntimeError`가 난다(CLI preset은
+   짧아서 해당 없음). 이슈의 옵션은 predicate 수 임계치를 넘으면 `UncompilablePattern`으로 fallback(임계치 측정 필요),
+   네이티브 오류를 좁게 잡아 fallback, 또는 문서화다. 소유자가 고른다.
+2. **다음 릴리스:** `CHANGELOG.md`의 `## Unreleased`에 #142, #143, #150, #154, #155, #158, #126, #127, #128, #129,
+   #167, #168, #170이 쌓여 있다. 새 `EdgeOrigin` 두 개(`graph_parent_heuristic`, `checkpoint_subgraph_return`), 새 capture gap
+   코드(`langgraph.ambiguous_subgraph_return`), 내용 기준 artifact schema v8·v9, CLI 출력 문구 변경이 있어 0.8.0 때의
+   기준이면 minor(0.9.0)다. 릴리스 여부와 버전은 소유자가 정하며 절차는 [릴리스 런북](releasing.md)이다.
+3. **기존 보류 항목 정리 상태:**
+   - 아래 `2026-10-14` 절 5번과 `2026-09-15` 절 3·4·5·7·8번 가운데 이슈로 옮긴 #122(`phoenix diagnose` 종료 코드),
+     #123(`from_file` 크기 제한 문서화), #124·#136(Phoenix 숫자 타임스탬프와 loop 부모), #125(`--redact-errors`),
+     #126(review-candidates `extra="ignore"`), #127(`analyze`·memo의 기록된 task 표식), #128(Python 3.13·3.14 CI),
+     #129(Phoenix E2E 서버 20.24.0 핀)는 모두 해결됐다.
+   - Review candidate의 `tool_key` redaction 여부(PR #161에서 분리된 나머지 절반), 알려진 한계(#90·#96), `summarize`
+     후속(아래 `2026-10-19` 절 3번)은 그대로다.
+
+---
+
+## 이전 전달 상태 — 2026-10-20, `c4be406`(v0.8.0) 기준 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `4931a33`(PR #114 병합)다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. PR #118(`a0d157e`)이 `uv.lock`을 바꿨으므로 그 뒤
