@@ -38,30 +38,34 @@ explicitly.
   `RecursionError`; the explicit nesting cap above makes every version refuse the same input.
 - **`analyze` and `export-incident-memo` show recorded task markers** (#127). A run paused by
   `interrupt()` or stopped by the recursion limit has trace status `ok` unless a step failed,
-  because the status reports whether a recorded step failed; `inspect` marked the recorded ones (a recursion stop
-  has a marker only when ingest is given the graph), but `analyze` and the memo said nothing. When a trace records any, `analyze` adds the warning
-  `<label>: recorded task markers: 1 interrupted · 1 scheduled · 1 undecided interrupt; trace
-  status reports whether a recorded step failed, not whether the run completed.` (non-zero
-  parts only, for the current trace and the baseline), and the memo adds a
-  `Recorded Task Markers` line after Trace Status. `undecided interrupt` counts the
-  `langgraph.undecided_interrupt` capture gap. The markers are records, not completion: see
-  README. This change leaves the artifact, its schema version, the trace status and the report
-  schema as they were, and adds nothing to a report or memo of a trace without markers.
+  because the status reports whether a recorded step failed; `inspect` marked the recorded ones
+  (a recursion stop has a marker only when ingest is given the graph), but `analyze` and the
+  memo said nothing. When a trace records any, `analyze` adds the warning `<label>: recorded
+  task markers: 1 interrupted · 1 scheduled · 1 undecided interrupt; trace status reports
+  whether a recorded step failed, not whether the run completed.` (non-zero parts only, for the
+  current trace and the baseline), and the memo adds a `Recorded Task Markers` line after Trace
+  Status. `undecided interrupt` counts the `langgraph.undecided_interrupt` capture gap. The
+  markers are records, not completion: see README. This change leaves the artifact, its schema
+  version, the trace status and the report schema as they were, and adds nothing to a report or
+  memo of a trace without markers.
 - **`ReviewCandidateReport` and `ReviewCandidate` drop fields they do not know** (#126). Both
   kept them, so reading a review-candidate document that carried, say, a `prompt` or `error_msg`
   and writing it back with `dumps` passed the text through. They now discard unknown fields at
   both levels, as the SyncMill and Toolgraph readers do, and a `ValidationError` from either model
   no longer prints the rejected input; `errors()` still includes it unless called with
-  `include_input=False`. `export-review-candidates` output is unchanged, and the contract schema
-  is unchanged at version 1, still allowing additional fields. A candidate that fails model
-  validation still raises `ValidationError`, now titled with its trace, since the rejected
-  value is no longer shown.
+  `include_input=False`. From the same artifacts, `export-review-candidates` writes the same
+  output; re-ingesting a source can change the artifact, and with it each candidate's
+  `artifact_digest`. The contract schema stays at version 1 and still allows additional fields.
+  When `build_report` builds a candidate that fails model validation, it still raises
+  `ValidationError`, now titled with that candidate's trace, since the rejected value is no
+  longer shown.
 - **A LangGraph subgraph return is recorded on its edge** (#150). When the parent graph continues
   after a subgraph, LangGraph declares the checkpoint that launched the subgraph as the
   continuation's parent, and ingest links the continuation to a subgraph checkpoint instead. That
   edge used to say `checkpoint_parent`, like a parent LangGraph declared. It now has origin
   `checkpoint_subgraph_return`. `analyze` still counts it as explicit ancestry and the derived
-  tree ranks it as a declared checkpoint parent, so classification and the tree are unchanged;
+  tree ranks it as a declared checkpoint parent, so the new origin by itself changes neither
+  classification nor the tree (the return-edge entries under Fixed can);
   the memo prints the new origin, and `summarize` groups it apart from a declared checkpoint
   parent.
 - **Artifact schema 9.** An artifact with a `checkpoint_subgraph_return` edge declares
@@ -90,7 +94,8 @@ explicitly.
   is unchanged (the origin ranks as a graph parent does). When the span also links to the parent
   that was picked, the link declares the edge: it stays `graph_parent` and is not counted under
   `otlp.graph_parent_by_timing`, so a trace whose every timed choice is linked no longer carries
-  that code or its warnings. The `otlp.graph_parent_by_timing` gap is otherwise recorded as
+  that code, and loses its heuristic-parent warnings unless it also has
+  `otlp.graph_parent_fallback`. The `otlp.graph_parent_by_timing` gap is otherwise recorded as
   before.
 - **Artifact schema 8.** An artifact with a `graph_parent_heuristic` edge declares
   `schema_version` 8, or 9 if it also has a `checkpoint_subgraph_return` edge, so 0.8.0 and
@@ -104,16 +109,16 @@ explicitly.
 ### Fixed
 
 - **`--backend ladybug` no longer hangs on gap patterns or slows down on long ones** (#176,
-  #173). `LadybugStore` ran every pattern the Cypher compiler accepts as one native query.
-  A bounded gap compiles to a variable-length relationship, and LadybugDB enumerates every
-  causal path within it, exponentially many once steps have several causes: `query
+  #173). `LadybugStore` ran every pattern the Cypher compiler accepts as one native query. A
+  bounded gap compiles to a variable-length relationship, and LadybugDB enumerates every causal
+  path within it, exponentially many once steps have several causes: `query
   tool-retry-failure-near --backend ladybug` (`gap=(2, 30)`) gave no result within 120 s on a
   200-step trace with two causes per step, where the default backend takes 0.02 s. A large
   result could also end in `RuntimeError: Buffer manager exception`. Planning cost also grows
-  with the predicate count: 17.5 s for 32 predicates on a one-step trace, and a
-  `RuntimeError` at 1000. `LadybugStore` now runs a pattern as Cypher only if it has no gap
-  after its first predicate and at most six predicates (`MAX_NATIVE_PREDICATES`); every other pattern runs on the
-  pure-Python matcher, with the same matches, and `fell_back_to_python` is set.
+  with the predicate count: 17.5 s for 32 predicates on a one-step trace, and a `RuntimeError`
+  at 1000. `LadybugStore` now runs a pattern as Cypher only if it has no gap after its first
+  predicate and at most six predicates (`MAX_NATIVE_PREDICATES`); every other pattern runs on
+  the pure-Python matcher, with the same matches, and `fell_back_to_python` is set.
   `compile_to_cypher` is unchanged and still compiles bounded gaps.
   - `query tool-retry-failure-near --backend ladybug` now prints the fallback note on stderr.
     It used to run as Cypher without one. The other presets behave as before: the strict ones
@@ -147,17 +152,20 @@ explicitly.
   - Decoded documents still have no explicit depth cap: within the recursion limit they are read
     as before. The analysis functions are outside this guarantee.
 - **A copy written after an edit inside a LangGraph subgraph no longer returns through the edit**
-  (#158). A `__copy__` of a checkpoint that applied a subgraph's output returned through the last
-  subgraph checkpoint written before the copy, so an edit made in between, which the copied
-  checkpoint never saw, became its cause, with any error that edit wrote. A copy now returns
-  through that checkpoint only when every earlier return recorded from the same launcher into the
-  same subgraph namespace went through it too, or none was recorded. Otherwise nothing records which result it holds: it keeps its declared parent
+  (#158). 0.8.0 returned a `__copy__` of a checkpoint that applied a subgraph's output through
+  the invocation's last subgraph checkpoint when that checkpoint preceded the copy, so an edit
+  made in between, which the copied checkpoint never saw, could become its cause, with any error
+  that edit wrote. A copy now returns through that checkpoint only when every earlier return
+  recorded from the same launcher into the same subgraph namespace went through it too, or none
+  was recorded. Otherwise nothing records which result it holds: it keeps its declared parent
   without that return, and ingest records the new gap `langgraph.ambiguous_subgraph_return` (one
   per return left out), which makes `check`'s multi-step path rules and `topology-unchanged`
   insufficient evidence; the failure count rule is unaffected, since a copy records no new error.
   The rule applies only to copies: loop checkpoints, which run the subgraph on from its latest
   checkpoint, and `update_state` checkpoints, which apply the caller's values or the launcher's
-  stored output, are not withheld, though the other LangGraph entries here change how they return. A reader older than this release reads the new code as a gap of unknown effect.
+  stored output, are not withheld, though the other LangGraph entries here change how they
+  return. The gap needs no newer schema by itself, but a history that records it also has return
+  edges, so its artifact declares schema 9, which 0.8.0 and earlier refuse.
 - **A later run of a LangGraph persistent subgraph is in its continuation's ancestry** (#154). A
   subgraph compiled with `checkpointer=True` keeps one checkpoint namespace across the parent's
   runs, so a later run's input checkpoint declares the previous run's last checkpoint as its
@@ -166,17 +174,18 @@ explicitly.
   from its ancestry. A subgraph checkpoint whose `metadata.parents` names a launcher the
   namespace has not had yet now begins a new run, which gets that launcher as a second
   `checkpoint_parent` (an error the launcher held is not counted as inherited), and the
-  continuation returns through the run's own checkpoints with origin `checkpoint_subgraph_return`.
-  This also covers a loop calling the subgraph again, a resume after a root `update_state`, and
-  time travel into a subgraph checkpoint. One case is still missed: a run finished by editing a
-  subgraph checkpoint after a root `update_state` records the original launcher, so the
-  continuation, which declares the root edit, is not linked through the run. A persistent subgraph inside a plain subgraph has a
-  namespace without the enclosing call's task id (`mid|inner`); it is now linked to that call's
-  checkpoint, which launched it, instead of the root's, so the enclosing subgraph's continuation
-  returns through it, on the first run too. A replay or edit of a persistent subgraph's launcher
-  is judged by `versions_seen` as for other subgraphs (#155). Re-ingesting such a history adds these edges. A caller's edit of an
-  earlier run's checkpoint still joins the run in progress, since LangGraph resumes from the
-  namespace's latest checkpoint.
+  continuation returns through the run's own checkpoints with origin
+  `checkpoint_subgraph_return`. This also covers a loop calling the subgraph again, a resume
+  after a root `update_state`, and time travel into a subgraph checkpoint. One case is still
+  missed: a run finished by editing a subgraph checkpoint after a root `update_state` records
+  the original launcher, so the continuation, which declares the root edit, is not linked
+  through the run. A persistent subgraph inside a plain subgraph has a namespace without the
+  enclosing call's task id (`mid|inner`); it is now linked to that call's checkpoint, which
+  launched it, instead of the root's, so the enclosing subgraph's continuation returns through
+  it, on the first run too. A replay or edit of a persistent subgraph's launcher is judged by
+  `versions_seen` as for other subgraphs (#155). Re-ingesting such a history adds these edges. A
+  caller's edit of an earlier run's checkpoint still joins the run in progress, since LangGraph
+  resumes from the namespace's latest checkpoint.
 - **LangGraph time travel from a subgraph's launching checkpoint no longer gains the subgraph**
   (#155). An `update_state` of the checkpoint that launched a subgraph as another node, or the
   fork a replay from it writes, holds the state from before the subgraph ran, but ingest linked
