@@ -47,8 +47,8 @@
       checkpoint를 가리키면 새 실행을 시작하고 그 부모를 두 번째 `checkpoint_parent`로 받는다(이전 실행의 마지막
       checkpoint 뒤에도 이어진다. 오류 상속 계산에서는 이 진입 edge를 뺀다). 이미 본 부모를 가리키면 진행 중인 실행을
       잇는다. #155의 `versions_seen` 검사는 persistent namespace에도 적용된다. launcher 탐색(`_closest_parent_ns`)은
-      조상 namespace의 세그먼트를 노드 이름으로 비교하고, pull-task 판별(`_applied_subgraph_task`)은 마지막 세그먼트가
-      아니라 launcher namespace 바로 아래 첫 세그먼트(`mid|inner`와 `mid:<task_id>` 모두 `"mid"`)를 쓴다.
+      조상 namespace의 세그먼트를 노드 이름으로 비교하고(`mid`와 `mid:<task_id>`는 모두 `mid`), pull-task
+      판별(`_applied_subgraph_task`)은 마지막 세그먼트가 아니라 launcher namespace 바로 아래 첫 세그먼트를 쓴다.
     - **기록이 갈라지지 않는 `__copy__` subgraph 복귀 보류(#158, PR #160):** subgraph launcher에서 나온
       `__copy__`(`source="fork"`로 판별)는 #155 검사를 통과한 뒤, 같은 `(launcher, ns)`에서 앞선 step이 고른
       복귀 지점이 없거나 모두 그 후보 subgraph checkpoint일 때만 그 후보를 거친다(복귀하지 않은 앞선 step은 따지지
