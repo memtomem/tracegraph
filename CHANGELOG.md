@@ -53,8 +53,8 @@ explicitly.
   both levels, as the SyncMill and Toolgraph readers do, and a `ValidationError` from either model
   no longer prints the rejected input; `errors()` still includes it unless called with
   `include_input=False`. `export-review-candidates` output is unchanged, and the contract schema
-  is unchanged at version 1, still allowing additional fields. A candidate the exporter cannot
-  build still raises `ValidationError`, now titled with its trace, since the rejected
+  is unchanged at version 1, still allowing additional fields. A candidate that fails model
+  validation still raises `ValidationError`, now titled with its trace, since the rejected
   value is no longer shown.
 - **A LangGraph subgraph return is recorded on its edge** (#150). When the parent graph continues
   after a subgraph, LangGraph declares the checkpoint that launched the subgraph as the
@@ -66,8 +66,9 @@ explicitly.
   parent.
 - **Artifact schema 9.** An artifact with a `checkpoint_subgraph_return` edge declares
   `schema_version` 9, so 0.8.0 and earlier refuse it by version instead of failing on the new
-  origin value. An artifact written by an earlier release keeps its version and bytes when it is
-  loaded and saved again, and is read as before: its return edges still say `checkpoint_parent`.
+  origin value. An artifact written by 0.8.0 keeps its version and bytes when it is loaded and
+  saved again, and its return edges still say `checkpoint_parent`; a schema 1 artifact is still
+  migrated when it is loaded.
   This entry changes nothing else in a fresh ingest; the OTLP and LangGraph entries in this release
   can.
 - **`explain` and `query --explain` describe fan-in as "more than one recorded cause" for every
@@ -154,9 +155,9 @@ explicitly.
   without that return, and ingest records the new gap `langgraph.ambiguous_subgraph_return` (one
   per return left out), which makes `check`'s multi-step path rules and `topology-unchanged`
   insufficient evidence; the failure count rule is unaffected, since a copy records no new error.
-  Loop checkpoints, which run the subgraph on from its latest checkpoint, and `update_state`
-  checkpoints, which apply the caller's values or the launcher's stored output, are linked as
-  before. A reader older than this release reads the new code as a gap of unknown effect.
+  The rule applies only to copies: loop checkpoints, which run the subgraph on from its latest
+  checkpoint, and `update_state` checkpoints, which apply the caller's values or the launcher's
+  stored output, are not withheld, though the other LangGraph entries here change how they return. A reader older than this release reads the new code as a gap of unknown effect.
 - **A later run of a LangGraph persistent subgraph is in its continuation's ancestry** (#154). A
   subgraph compiled with `checkpointer=True` keeps one checkpoint namespace across the parent's
   runs, so a later run's input checkpoint declares the previous run's last checkpoint as its
@@ -186,7 +187,8 @@ explicitly.
   the error channel is therefore recorded as introducing the error even when the subgraph had
   failed. Such a checkpoint has no return edge, so it does not by itself make an artifact
   declare schema 9. `Send`-launched invocations, and nodes whose task id the adapter cannot
-  recompute (a plain-channel trigger, some barrier configurations), are linked as before.
+  recompute (a plain-channel trigger, some barrier configurations), skip this check; the
+  return-checkpoint choice in the #150 entry below still applies to them.
 - **A later edit of a subgraph checkpoint no longer rewrites an earlier return** (#150). The
   return used to go through the subgraph invocation's last checkpoint overall, so an
   `update_state` of one of its checkpoints after the run made the original continuation lose
