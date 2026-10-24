@@ -2925,7 +2925,7 @@ def test_query_ladybug_fallback_note_only_when_every_trace_succeeds(tmp_path, mo
     preset = "repeated-agent-failure"  # unbounded gap: the ladybug store falls back to Python
     res = runner.invoke(app, ["query", preset, *map(str, paths), "--backend", "ladybug"])
     assert res.exit_code == 1  # no match, but every trace was searched
-    assert "not Cypher-compilable" in res.output
+    assert "LadybugDB does not run patterns" in res.output
 
     real = store_cls.first_matches
     calls = []
@@ -2939,7 +2939,7 @@ def test_query_ladybug_fallback_note_only_when_every_trace_succeeds(tmp_path, mo
     monkeypatch.setattr(store_cls, "first_matches", second_fails)
     res = runner.invoke(app, ["query", preset, *map(str, paths), "--backend", "ladybug"])
     assert isinstance(res.exception, _Injected)
-    assert "not Cypher-compilable" not in res.output
+    assert "LadybugDB does not run patterns" not in res.output
 
 
 @pytest.mark.parametrize("backend", ["memory", "ladybug"])

@@ -400,6 +400,12 @@ uv run tracegraph explain --backend ladybug A.json <step_id>
 중요한 점은 JSON artifact가 항상 원본이라는 것입니다. LadybugDB DB는 다시 만들 수 있는
 캐시/가속기이고, 분석 의미는 기본 백엔드와 같아야 합니다.
 
+`query --backend ladybug`가 Cypher로 실행하는 패턴은 gap이 없고 predicate가 6개 이하인
+패턴뿐입니다. 그 밖의 패턴(`tool-retry-failure-near`처럼 gap이 있는 preset 포함)은 pure
+Python matcher로 실행하고, stderr에 `LadybugDB does not run patterns with a gap or more than 6
+predicates` 안내를 출력합니다. 결과는 같습니다. gap이 있으면 LadybugDB가 그 범위 안의 인과
+경로를 모두 열거하는데, step마다 원인이 여럿이면 경로 수가 지수적으로 늘기 때문입니다.
+
 ## 리뷰 후보·인시던트 메모 내보내기
 
 두 명령 모두 artifact를 읽기만 하고, 원본 대신 정해진 필드만 담은 파일을 새로 씁니다.

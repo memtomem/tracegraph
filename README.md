@@ -295,8 +295,10 @@ The official `tool-retry-failure@v2` matches three consecutive causal steps:
 retry marker and the endpoint must name the same tool. This strict pattern is review-exportable.
 `tool-repeat-failure-heuristic` uses an unbounded gap and
 `tool-retry-failure-near` a bounded gap (up to 30); both are query-only heuristics.
-The generic matcher still supports gaps and back-references. Unbounded or oversized
-Cypher patterns fall back to the Python matcher without truncating results.
+The generic matcher still supports gaps and back-references. With `--backend ladybug`, only
+patterns without a gap and of at most six predicates run as Cypher; every other pattern runs
+on the Python matcher, with the same results. A gap makes LadybugDB enumerate every causal
+path within it, which grows exponentially once steps have several causes.
 
 Every shipped preset has a stable `pattern_id` and positive integer `pattern_version`, shown
 as `pattern-id@vN` by `presets` and `query`. Increment the version when match semantics or
@@ -610,10 +612,12 @@ trace, too, it keeps only the matches that still fit under `--limit`, but it sti
 and counts every match to report the exact total, so time grows with the match count: one
 2500-step trace with 3.1M matches takes about 3 s at `--limit 1`, in 70 MiB. The search's own
 working state (steps reached at each distance of a gap) does not depend on `--limit`. With
-`--backend ladybug` on a pattern that compiles to Cypher, LadybugDB itself buffers the
+`--backend ladybug` on a pattern that runs as Cypher, LadybugDB itself buffers the
 query's full result set: a 3001-step trace with 2.25M `tool-retry-failure` matches peaked
 at 757 MiB, where the store alone takes about 300 MiB. A plain read, `count(*)` and
-`ORDER BY … LIMIT` all buffered it in our measurements.
+`ORDER BY … LIMIT` all buffered it in our measurements. The six-predicate limit on Cypher
+bounds the query's planning, not its result: a short strict pattern over a graph where steps
+have many effects can still have a large result, and LadybugDB buffers all of it.
 
 Both stores isolate returned mutable objects. InMemory node upsert replaces by ID;
 Ladybug's existing insertion semantics are unchanged. Use `is_isomorphic` or `diff` for

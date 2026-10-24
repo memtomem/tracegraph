@@ -100,12 +100,29 @@ explicitly.
 
 ### Fixed
 
+- **`--backend ladybug` no longer hangs on gap patterns or slows down on long ones** (#176,
+  #173). `LadybugStore` ran every pattern the Cypher compiler accepts as one native query.
+  A bounded gap compiles to a variable-length relationship, and LadybugDB enumerates every
+  causal path within it, exponentially many once steps have several causes: `query
+  tool-retry-failure-near --backend ladybug` (`gap=(2, 30)`) gave no result within 120 s on a
+  200-step trace with two causes per step, where the default backend takes 0.02 s. A large
+  result could also end in `RuntimeError: Buffer manager exception`. Planning cost also grows
+  with the predicate count: 17.5 s for 32 predicates on a one-step trace, and a
+  `RuntimeError` at 1000. `LadybugStore` now runs a pattern as Cypher only if it has no gap
+  and at most six predicates (`MAX_NATIVE_PREDICATES`); every other pattern runs on the
+  pure-Python matcher, with the same matches, and `fell_back_to_python` is set.
+  `compile_to_cypher` is unchanged and still compiles bounded gaps.
+  - `query tool-retry-failure-near --backend ladybug` now prints the fallback note on stderr.
+    It used to run as Cypher without one. The other presets behave as before: the strict ones
+    run as Cypher, and the two with an unbounded gap already fell back.
+  - The note now reads `LadybugDB does not run patterns with a gap or more than 6 predicates;
+    ran the pure-Python matcher over the raw causal graph — the results are the same.` It
+    said `pattern not Cypher-compilable (unbounded gap)`.
 - **A `PathPattern` of about 1000 or more predicates no longer fails with `RecursionError`**
   (#170). The pure-Python matcher behind `find_matches`, `iter_matches` and `search` recursed
   once per predicate; it now walks the predicates with an explicit stack. Matches and the order
   `iter_matches` yields them in are unchanged. CLI `query` and `analyze` run short presets and
-  were not affected. `LadybugStore` runs patterns natively, which has its own limit on long
-  patterns (#173).
+  were not affected. `LadybugStore` runs long patterns on the same matcher (#173).
 - **Deeply nested input no longer crashes ingestion with `RecursionError`** (#168). An entry point
   that reads a document now reports a `RecursionError` raised while reading it as the
   `ValueError` it promises, so the CLI exits with a usage error (2) instead of a traceback.

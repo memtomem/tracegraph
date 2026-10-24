@@ -25,7 +25,8 @@ to a faithful ``CAUSED_BY*lo..hi`` Cypher query; an *unbounded* (or over-cap) ga
 expressed within LadybugDB's 30-hop variable-length ceiling, so :func:`compile_to_cypher` raises
 :class:`UncompilablePattern` rather than silently truncating — and the LadybugDB backend falls back
 to a whole-graph pull plus this same matcher (see ``store/ladybug.py``). Nothing is ever silently
-dropped.
+dropped. The backend also runs every other pattern with a gap, and every long one, on this
+matcher, because LadybugDB's cost for those grows much faster than the matcher's.
 """
 
 from __future__ import annotations

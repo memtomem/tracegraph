@@ -169,8 +169,9 @@ def test_pattern_matches_equivalent_to_pure_python(preset_name: str) -> None:
     # Every shipped preset, on every shape we test elsewhere, must agree across backends —
     # exact list equality (not set equality): if LadybugDB reorders matches relative to the
     # pure-Python traversal, that's a real divergence we want to catch, not paper over.
-    # The retry fixtures exercise the compatibility gap presets across BOTH backend modes: the
-    # bounded 'near' preset compiles to capped Cypher; the unbounded heuristic falls back.
+    # The retry fixtures exercise the compatibility gap presets, which LadybugStore runs on the
+    # pure-Python matcher (a gap is never run as Cypher), next to the strict presets it runs
+    # natively.
     pattern = PRESETS[preset_name]
     for nt in (
         _erroring_tool_trace(),
@@ -190,12 +191,24 @@ def test_gap_diamond_distinct_parity_one_row_per_endpoint_pair() -> None:
     # match that, WITHOUT RETURN DISTINCT, returns the (search, search) pair once PER path —
     # twice on this diamond — diverging from the deduped pure-Python matcher. With DISTINCT
     # both yield exactly one row. (If this regresses, the compiled query dropped DISTINCT.)
+    # The store no longer runs gaps as Cypher, so the compiled query is run directly here:
+    # compile_to_cypher is public, and its text tests do not execute it.
+    from tracegraph.analysis import compile_to_cypher
+    from tracegraph.store.ladybug import _rows
+
     nt = _retry_diamond()
     store = LadybugStore.from_trace(nt)
-    ku = store.find_matches(PRESETS["tool-retry-failure-near"])
+    q = compile_to_cypher(PRESETS["tool-retry-failure-near"])
+    result = store._conn.execute(q.cypher, q.params)
+    try:
+        native = list(_rows(result))
+    finally:
+        result.close()
     py = find_matches(nt, PRESETS["tool-retry-failure-near"])
-    assert ku == py == [["RD0", "RD3"]]
-    assert store.fell_back_to_python is False  # bounded gap → ran as real Cypher
+    assert native == py == [["RD0", "RD3"]]
+    assert store.find_matches(PRESETS["tool-retry-failure-near"]) == py
+    assert store.fell_back_to_python is True  # a gap → the pure-Python matcher
+    store.close()
 
 
 def test_unbounded_repeat_heuristic_falls_back_to_python_and_stays_equivalent() -> None:
@@ -225,13 +238,76 @@ def test_explicit_retry_runs_as_native_cypher_and_matches_python() -> None:
     assert store.fell_back_to_python is False
 
 
+def _chain_of(n: int) -> NormalizedTrace:
+    return _custom("CH", [(i, "s", StepKind.CHAIN, OK) for i in range(n)], [(i, i - 1) for i in range(1, n)])
+
+
+_S = StepPredicate(name="s")
+
+
+@pytest.mark.parametrize("pattern, native", [
+    (PathPattern((_S,) * 6), True),
+    (PathPattern((_S,) * 7), False),
+    (PathPattern((StepPredicate(name="s", gap=(1, 3)), _S)), True),  # predicate 0's gap is ignored
+    (PathPattern((_S, StepPredicate(name="s", gap=(1, 3)))), False),
+    (PathPattern((_S, _S, StepPredicate(name="s", gap=(1, 1)))), False),  # a gap, even of one hop
+], ids=["6-strict", "7-strict", "gap-on-first", "bounded-gap", "one-hop-gap"])
+def test_only_short_gap_free_patterns_run_as_cypher(pattern, native) -> None:
+    # Planning cost grows with the predicate count, and a gap makes LadybugDB enumerate every
+    # path within it; both run on the pure-Python matcher, with the same matches.
+    nt = _chain_of(9)
+    with LadybugStore.from_trace(nt) as store:
+        assert store.find_matches(pattern) == find_matches(nt, pattern)
+        assert store.fell_back_to_python is not native
+
+
+def test_the_near_preset_never_builds_a_cypher_query_on_a_dense_dag(monkeypatch) -> None:
+    # Two causes per step: the number of paths within the preset's 2..30-hop gap grows
+    # exponentially, and natively the query did not finish in 120 s on this trace (Python: 0.02 s).
+    import random
+
+    import tracegraph.store.ladybug as ladybug_store
+
+    def refuse(pattern):
+        raise AssertionError("a gap pattern must not be compiled to Cypher")
+
+    rng = random.Random(3)
+    specs = [(i, rng.choice(["search", "retry:search", "plan"]), rng.choice([StepKind.TOOL, StepKind.CHAIN]),
+              rng.choice([OK, ERR])) for i in range(200)]
+    edges = [(i, c) for i in range(1, 200) for c in rng.sample(range(max(0, i - 6), i), k=min(i, 2))]
+    nt = _custom("NE", specs, edges)
+    monkeypatch.setattr(ladybug_store, "compile_to_cypher", refuse)
+    with LadybugStore.from_trace(nt) as store:
+        found = store.find_matches(PRESETS["tool-retry-failure-near"])
+        assert store.fell_back_to_python is True
+    assert found == find_matches(nt, PRESETS["tool-retry-failure-near"])
+    assert found  # the trace has matches, so the comparison is not vacuous
+
+
+def test_a_thousand_predicate_pattern_falls_back_instead_of_raising() -> None:
+    # Natively this raised RuntimeError ("unordered_map::at: key not found") after 3.4 s.
+    with LadybugStore.from_trace(_chain_of(1)) as store:
+        assert store.find_matches(PathPattern((_S,) * 1000)) == []
+        assert store.fell_back_to_python is True
+
+
+@pytest.mark.parametrize("pattern", [
+    PathPattern((_S, StepPredicate(gap=(1, 2), same_name_as=1))),
+    PathPattern((_S,) * 7 + (StepPredicate(same_name_as=7),)),
+], ids=["gap", "long"])
+def test_a_fallback_pattern_with_a_bad_back_reference_still_raises_value_error(pattern) -> None:
+    # compile_to_cypher validated back-references for these before; the fallback validates them.
+    with LadybugStore.from_trace(_chain_of(3)) as store, pytest.raises(ValueError, match="same_name_as"):
+        store.find_matches(pattern)
+
+
 def test_fell_back_flag_resets_between_calls() -> None:
-    # The flag reflects the MOST RECENT call: a fallback then a compilable call must clear it,
+    # The flag reflects the MOST RECENT call: a fallback then a native call must clear it,
     # or the CLI honesty note would cry wolf on a subsequent native-Cypher query.
     store = LadybugStore.from_trace(_retry_trace())
     store.find_matches(PRESETS["tool-repeat-failure-heuristic"])  # unbounded → fallback
     assert store.fell_back_to_python is True
-    store.find_matches(PRESETS["tool-retry-failure-near"])  # bounded → native Cypher
+    store.find_matches(PRESETS["tool-retry-failure"])  # strict → native Cypher
     assert store.fell_back_to_python is False
 
 
@@ -483,17 +559,29 @@ def test_cli_query_ladybug_repeat_heuristic_prints_honest_fallback_note(tmp_path
     )
     assert res.exit_code == 0, res.output
     assert "1 match(es)" in res.output  # correct result ...
-    assert "not Cypher-compilable" in res.output  # ... plus the honest deferral note
+    assert "LadybugDB does not run patterns" in res.output  # ... plus the honest deferral note
 
 
-def test_cli_query_ladybug_bounded_marquee_runs_native_no_fallback_note(tmp_path) -> None:
-    # The bounded variant DOES compile, so the fallback note must NOT appear (no crying wolf).
+def test_cli_query_ladybug_bounded_marquee_prints_the_fallback_note(tmp_path) -> None:
+    # A bounded gap compiles, but LadybugDB would enumerate every path within it, so the store
+    # runs it on the pure-Python matcher and the CLI says so.
     p = tmp_path / "retry.json"
     artifact.save(_retry_trace(), p)
     res = runner.invoke(app, ["query", "tool-retry-failure-near", "--backend", "ladybug", str(p)])
     assert res.exit_code == 0, res.output
     assert "1 match(es)" in res.output
-    assert "not Cypher-compilable" not in res.output
+    assert "LadybugDB does not run patterns" in res.output
+
+
+def test_cli_query_ladybug_strict_marquee_runs_native_no_fallback_note(tmp_path) -> None:
+    # A strict preset runs as Cypher, so the fallback note must NOT appear (no crying wolf).
+    p = tmp_path / "retry.json"
+    artifact.save(_custom("EX", [(0, "search", StepKind.TOOL, OK), (1, "retry:search", StepKind.CHAIN, OK),
+                                 (2, "search", StepKind.TOOL, ERR)], [(1, 0), (2, 1)]), p)
+    res = runner.invoke(app, ["query", "tool-retry-failure", "--backend", "ladybug", str(p)])
+    assert res.exit_code == 0, res.output
+    assert "1 match(es)" in res.output
+    assert "LadybugDB does not run patterns" not in res.output
 
 
 # --- lifecycle: the store owns a live DB connection and must release it ---
@@ -827,20 +915,15 @@ def _dense_dag(seed: int, n: int = 9) -> NormalizedTrace:
 
 @pytest.mark.parametrize("seed", range(20))
 def test_first_matches_is_a_prefix_of_the_python_matches_on_both_paths(seed) -> None:
-    # Native Cypher and the unbounded-gap fallback both return exactly the pure-Python
+    # Native Cypher and the pure-Python fallback both return exactly the pure-Python
     # find_matches()[:n] and its full count, for every n including 0.
-    from tracegraph.analysis import UncompilablePattern, compile_to_cypher
-
     nt = _dense_dag(seed)
     extra = PathPattern((StepPredicate(), StepPredicate(gap=(1, 3)), StepPredicate(same_name_as=0)))
+    strict = PathPattern((StepPredicate(), StepPredicate(), StepPredicate(same_name_as=0)))
     store = LadybugStore.from_trace(nt)
     try:
-        for pattern in [*PRESETS.values(), extra]:
-            try:
-                compile_to_cypher(pattern)
-                native = True
-            except UncompilablePattern:
-                native = False
+        for pattern in [*PRESETS.values(), extra, strict]:
+            native = all(p.gap is None for p in pattern.steps[1:])  # every pattern here is short
             expected = find_matches(nt, pattern)
             for n in sorted({0, 1, 2, max(len(expected) - 1, 0), len(expected), len(expected) + 1}):
                 assert store.first_matches(pattern, n) == (expected[:n], len(expected))
@@ -851,7 +934,7 @@ def test_first_matches_is_a_prefix_of_the_python_matches_on_both_paths(seed) -> 
         store.close()
 
 
-def test_first_matches_orders_equal_seq_steps_by_step_id_in_cypher() -> None:
+def test_first_matches_orders_equal_seq_steps_by_step_id_on_both_paths() -> None:
     steps = [
         Step(step_id=sid, trace_id="EQ", seq=seq, name="t", kind=StepKind.TOOL)
         for sid, seq in [("r", 0), ("b", 1), ("a", 1), ("d", 2), ("c", 2)]
@@ -862,12 +945,16 @@ def test_first_matches_orders_equal_seq_steps_by_step_id_in_cypher() -> None:
     ]
     nt = normalize(RawTrace(trace=Trace(trace_id="EQ", source_kind="x"), steps=steps,
                             causal_edges=edges))
-    pattern = PathPattern((StepPredicate(), StepPredicate(gap=(1, 2))))
-    expected = [["r", "a"], ["r", "b"], ["r", "c"], ["r", "d"], ["a", "c"], ["a", "d"],
-                ["b", "c"], ["b", "d"]]
+    gap = PathPattern((StepPredicate(), StepPredicate(gap=(1, 2))))
+    gap_expected = [["r", "a"], ["r", "b"], ["r", "c"], ["r", "d"], ["a", "c"], ["a", "d"],
+                    ["b", "c"], ["b", "d"]]
+    strict = PathPattern((StepPredicate(), StepPredicate()))
+    strict_expected = [["r", "a"], ["r", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"]]
     with LadybugStore.from_trace(nt) as store:
-        assert store.first_matches(pattern, 3) == (expected[:3], 8)
-        assert store.fell_back_to_python is False
+        assert store.first_matches(gap, 3) == (gap_expected[:3], 8)
+        assert store.fell_back_to_python is True  # a gap → the pure-Python matcher
+        assert store.first_matches(strict, 3) == (strict_expected[:3], 6)
+        assert store.fell_back_to_python is False  # rows sorted from Cypher
 
 
 @pytest.mark.parametrize("fail", [None, "before-iteration", "after-one-row", "in-sort-key"])

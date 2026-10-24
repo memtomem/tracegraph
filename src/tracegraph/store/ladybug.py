@@ -50,6 +50,28 @@ from tracegraph.model import (
 )
 from tracegraph.normalize import ProjectionRule, normalize, validate_normalized
 
+#: The longest gap-free pattern run as Cypher; longer ones, and every pattern with a gap, run on
+#: the pure-Python matcher (see :func:`_runs_natively`). LadybugDB 0.21.2's cost for a strict
+#: pattern grows with its predicate count whatever the trace size (0.07 s at 8 predicates, 0.9 s
+#: at 24, 17.5 s at 32 on a one-step trace; ``RuntimeError`` at 1000), while the fallback pays
+#: for pulling the trace once. On 3000-step traces Cypher was faster up to 6 predicates on both
+#: a chain and a DAG with up to three causes per step, and slower on one of them from 8.
+MAX_NATIVE_PREDICATES = 6
+
+
+def _runs_natively(pattern: PathPattern) -> bool:
+    """Whether :meth:`LadybugStore.first_matches` runs ``pattern`` as Cypher.
+
+    Not every pattern the compiler can express: a bounded gap compiles to a variable-length
+    relationship, and LadybugDB enumerates every path within its bounds before ``RETURN
+    DISTINCT``, which is exponential in the upper bound once steps have several causes. The
+    pure-Python matcher de-duplicates on ``(node, distance)`` instead. Predicate 0's gap is
+    ignored, as the matcher and the compiler ignore it.
+    """
+    return len(pattern.steps) <= MAX_NATIVE_PREDICATES and all(
+        p.gap is None for p in pattern.steps[1:]
+    )
+
 # Property layout for the Step node table. Kept beside the schema so adding a model field
 # is a single-source change; the constructor reads this list to bind ``$params`` for INSERT.
 _STEP_FIELDS: tuple[str, ...] = (
@@ -123,9 +145,10 @@ class LadybugStore:
         self._steps_cache: list[Step] | None = None
         self._causes_cache: dict[str, list[str]] | None = None
         self._trace_cache: NormalizedTrace | None = None
-        #: True iff the most recent find_matches() could not compile to faithful Cypher
-        #: (unbounded/over-cap gap) and ran the pure-Python matcher instead. Lets the CLI
-        #: tell the user the accelerator deferred — the results are identical either way.
+        #: True iff the most recent find_matches() did not run as Cypher (the pattern has a
+        #: gap or more than MAX_NATIVE_PREDICATES predicates) and ran the pure-Python matcher
+        #: instead. Lets the CLI tell the user the accelerator deferred — the results are
+        #: identical either way.
         self.fell_back_to_python = False
 
     # --- lifecycle ---
@@ -340,13 +363,12 @@ class LadybugStore:
         Ladybug returns. (Cypher itself gives no row-order guarantee; without this sort the
         backends would silently disagree.)
 
-        Honest fallback: a pattern with an unbounded (or over-30-hop) gap cannot be expressed
-        within the compiler's verified variable-length cap, so ``compile_to_cypher`` raises
-        :class:`~tracegraph.analysis.UncompilablePattern`. Rather than emit a query that would
-        silently truncate, we fall back to a whole-graph pull (:meth:`trace`) plus the *same*
-        pure-Python matcher — equivalence by identity, exactly the load-then-traverse posture
-        :meth:`ancestors` already uses for the same cap. The accelerator degrades to *slower*,
-        never to *wrong*; ``fell_back_to_python`` records that it happened.
+        Honest fallback: only a gap-free pattern of at most :data:`MAX_NATIVE_PREDICATES`
+        predicates runs as Cypher (see :func:`_runs_natively`). Any other pattern — including
+        an unbounded or over-30-hop gap, which ``compile_to_cypher`` could not express anyway —
+        runs on a whole-graph pull (:meth:`trace`) plus the *same* pure-Python matcher:
+        equivalence by identity, the load-then-traverse posture :meth:`ancestors` already uses
+        for the same cap. ``fell_back_to_python`` records that it happened.
         """
         return self.first_matches(pattern, None)[0]
 
@@ -364,13 +386,12 @@ class LadybugStore:
             # Match the pure-Python convention so callers can be backend-agnostic; the
             # compile step would raise, but raising here would break that contract.
             return [], 0
+        if not _runs_natively(pattern):
+            return self._first_matches_in_python(pattern, n)
         try:
             q = compile_to_cypher(pattern)
-        except UncompilablePattern:
-            self.fell_back_to_python = True
-            nt = self.trace()
-            index = build_index(nt)
-            return first_matches(iter_matches(nt, pattern, index=index), index[0], n)
+        except UncompilablePattern:  # the compiler's own refusals (only gaps today) fall back too
+            return self._first_matches_in_python(pattern, n)
         steps_by_id = {s.step_id: s for s in self._load_all_steps()}
         result = self._conn.execute(q.cypher, q.params)
         try:
@@ -379,6 +400,14 @@ class LadybugStore:
             close = getattr(result, "close", None)
             if callable(close):
                 close()
+
+    def _first_matches_in_python(
+        self, pattern: PathPattern, n: int | None
+    ) -> tuple[list[list[str]], int]:
+        self.fell_back_to_python = True
+        nt = self.trace()
+        index = build_index(nt)
+        return first_matches(iter_matches(nt, pattern, index=index), index[0], n)
 
     # --- internals ---
 

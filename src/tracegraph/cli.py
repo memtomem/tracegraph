@@ -1085,12 +1085,15 @@ def _match_trace(
 
 
 def _note_fallback() -> None:
-    # Honesty signal (off result stdout): the ladybug accelerator couldn't compile this
-    # pattern under LadybugDB's 30-hop cap and ran the pure-Python matcher instead. Results
-    # are identical — this just tells the user the accelerator deferred.
+    # Honesty signal (off result stdout): the ladybug accelerator did not run this pattern as
+    # Cypher and ran the pure-Python matcher instead. Results are identical — this just tells
+    # the user the accelerator deferred. Only reached with the ladybug backend, so it imports.
+    from tracegraph.store.ladybug import MAX_NATIVE_PREDICATES
+
     err_console.print(
-        "[dim]⚠ pattern not Cypher-compilable (unbounded gap); ran the pure-Python "
-        "matcher over the raw causal graph — results are identical to --backend ladybug's.[/]"
+        "[dim]⚠ LadybugDB does not run patterns with a gap or more than "
+        f"{MAX_NATIVE_PREDICATES} predicates; ran the pure-Python matcher over the raw "
+        "causal graph — the results are the same.[/]"
     )
 
 
