@@ -687,14 +687,15 @@ def test_inert_serde_still_round_trips_ordinary_values():
         assert serde.loads_typed(serde.dumps_typed(value)) == value
 
 
-def test_declared_floor_covers_the_serializer_api_we_depend_on():
-    """The hardening in `ingest` is only as real as the version floor that guarantees the API.
+def test_declared_floor_covers_the_serializer_behaviour_we_depend_on():
+    """The hardening in `ingest` is only as real as the version floor that guarantees it.
 
     `JsonPlusSerializer(allowed_msgpack_modules=...)` does not exist before
     langgraph-checkpoint 4.1 — 4.0.0 raises `TypeError` — so leaving that dependency
-    transitive would make the guarantee another package's metadata. Behind the
-    `langgraph-checkpoint-sqlite>=2` floor declared before, a resolver could pick a version
-    where `ingest` raises instead of ingesting, and where nothing blocks a hostile payload.
+    transitive would make the guarantee another package's metadata. Before 4.3.0 the
+    serializer also read an allowed value it could not rebuild as `None`, which dropped a
+    failure stored in the error channel (#184). langgraph-checkpoint-sqlite 3.1.2 is the first
+    release without GHSA-6hmw-9432-67qq and itself requires langgraph-checkpoint 4.3.0.
     """
     import tomllib
     from importlib.metadata import version
@@ -715,9 +716,12 @@ def test_declared_floor_covers_the_serializer_api_we_depend_on():
     assert floors.get("langgraph-checkpoint") is not None, (
         "langgraph-checkpoint must be declared directly: this package calls its serializer API"
     )
-    assert floors["langgraph-checkpoint"] >= Version("4.1")
-    # And the environment actually running the suite honours it.
-    assert Version(version("langgraph-checkpoint")) >= floors["langgraph-checkpoint"]
+    assert floors["langgraph-checkpoint"] >= Version("4.3.0")
+    assert floors.get("langgraph-checkpoint-sqlite") is not None
+    assert floors["langgraph-checkpoint-sqlite"] >= Version("3.1.2")
+    # And the environment actually running the suite honours both.
+    for name in ("langgraph-checkpoint", "langgraph-checkpoint-sqlite"):
+        assert Version(version(name)) >= floors[name], name
 
 
 def test_derived_ids_colliding_with_each_other_are_rejected():
