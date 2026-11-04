@@ -225,9 +225,9 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포"�
      `WindowsPath`로 바꿔 측정하면, sqlite 3.1.1을 고정한 채 checkpoint 4.2.0에서는 trace가 `ok`(실패 소실, capture gap 없음),
      4.3.0에서는 `fetch`가 error다. 하한을 `langgraph-checkpoint>=4.3.0`(sqlite advisory를 고친 첫
      `langgraph-checkpoint-sqlite` 3.1.2가 요구하는 하한과 같다)과 `langgraph-checkpoint-sqlite>=3.1.2`로 올렸고,
-     `tests/test_langgraph_unrebuildable_error.py`가 이 경우(msgpack 값)를 고정한다. 남은 한계: 다시 만들지 못한 payload
-     자체가 비어 있거나 falsey이면(예: `Decimal`의 `""`), 그리고 예전 `json` 형식 checkpoint의 `lc:2` 값이면 4.3.1에서도
-     falsey·`None`으로 읽혀 오류가 아닌 것으로 나온다(`json` 형식의 `WindowsPath`는 4.3.1에서 `None`, 측정). 0.9.0은 `langgraph-checkpoint==4.1.1`·
+     `tests/test_langgraph_unrebuildable_error.py`가 이 경우(msgpack의 허용 생성자 호출)를 고정한다. 바뀐 것은 이 경우뿐이다.
+     다른 방식으로 디코딩에 실패한 값(예전 `json` 형식 checkpoint의 `WindowsPath`는 4.3.1에서도 `None`, 측정)과, 저장된
+     인자 자체가 비어 있거나 falsey인 값(예: `Decimal`의 `""`)은 여전히 오류가 아닌 것으로 나온다. 0.9.0은 `langgraph-checkpoint==4.1.1`·
      `==4.2.0` pin과 함께 설치되지만 새 하한으로 빌드한 wheel은 그렇지 않다(`uv pip compile` 측정). 0.6.1의 sqlite 하한과
      같은 종류의 설치 호환성 변경이고, 소유자가 0.6.1처럼 patch(0.9.1)로 정했다. 남은 한계와 "다시 만들지 못함"의
      공시는 #188로 옮겼다.
