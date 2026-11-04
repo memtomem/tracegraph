@@ -1,10 +1,12 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준, 열린 이슈는 2026-11-04 갱신 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준, 열린 이슈와 lock은 2026-11-04 갱신 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `c9cd600`(PR #177 병합)이다. 시작 전에
-  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0) 이후 `uv.lock`의 의존성은 바뀌지 않았고,
-  0.9.0 준비 PR(#178, `c3c3896`)은 그 안의 프로젝트 버전만 0.9.0으로 바꿨다.
+  `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0)부터 0.9.0까지 `uv.lock`의 의존성은 바뀌지
+  않았고, 0.9.0 준비 PR(#178, `c3c3896`)은 그 안의 프로젝트 버전만 0.9.0으로 바꿨다. 0.9.0 뒤에는 Dependabot 경고 5건을
+  `uv.lock`만 바꿔 고쳤다(#183, #185). `pyproject.toml`과 배포 패키지는 그대로이고, 2026-11-04 병합 뒤 열린 Dependabot 경고는
+  0건이다. 새 lock으로 venv를 맞추려면 `uv sync --locked --extra cypher --group dev`.
 - **0.9.0 공개 완료(2026-10-24).** `agent-tracegraph` 0.9.0이 PyPI 최신이다. `test-v0.9.0`과 `v0.9.0`이 모두
   `c3c3896`(PR #178)을 가리킨다. 업그레이드 주의는
   [GitHub Release v0.9.0](https://github.com/memtomem/tracegraph/releases/tag/v0.9.0)의 "Before you upgrade"에 있다.
@@ -95,8 +97,8 @@
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
-- **열린 이슈 2개(#180·#181, 2026-11-04 등록).** 이전 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
-  항목" 1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+- **열린 이슈 3개(#180·#181·#184, 2026-11-04 등록).** #180·#181은 이전 구간의 미등록 후속 항목을 옮긴 것이고, #184는
+  #183의 lock 갱신 중에 찾았다(아래 "남은 결정과 후속 항목" 1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
   이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
   #173 측정 중에 찾아 등록했다.
 
@@ -125,6 +127,10 @@
 | #175 | `64f6cae` | 이 전달 상태 절(문서만)과 `.gitignore`의 memtomem 로컬 디렉터리 |
 | #177 | `c9cd600` | #173·#176: `LadybugStore`가 첫 predicate 뒤에 gap이 없고 predicate 6개 이하인 패턴만 Cypher로 실행하고 나머지는 순수 Python fallback으로 보낸다. CLI fallback 안내 문구를 고쳤다 |
 | #178 | `c3c3896` | 0.9.0 준비: 버전·lock, CHANGELOG 날짜와 릴리스 단위 claims review 4라운드 반영, 이 절의 #177 기록 |
+| #179 | `2595b9b` | 이 절에 0.9.0 배포 기록(문서만) |
+| #182 | `c7d84af` | 이 절의 열린 이슈를 #180·#181로 갱신(문서만) |
+| #183 | `be85ad4` | Dependabot 2건(GHSA-6q48-6c7w-9gw2 critical, GHSA-6hmw-9432-67qq medium): `uv.lock`만 `certifi` 2026.10.23, `langgraph-checkpoint-sqlite` 3.1.3으로 올렸다. sqlite 3.1.2 이상이 `langgraph-checkpoint>=4.3.0`을 요구해 `langgraph-checkpoint`도 4.1.1→4.3.1. `pyproject.toml` 하한은 그대로(아래 "남은 결정과 후속 항목" 1번의 #184) |
+| #185 | `4e44e82` | Dependabot 3건(GHSA-pcg2-g6cj-q92c, GHSA-r4j5-9xpp-3985 medium, GHSA-pw9p-v7r6-gx4p low): `uv.lock`만 `tornado` 6.5.10→6.6. tornado는 `ipykernel`·`nbclient`를 거친 dev group 의존성이라 배포 패키지와 무관하다 |
 
 ### 이번 구간의 결정(2026-10-20~24, PR #148~#178)
 
@@ -195,12 +201,14 @@
 
 ### 검증 증거
 
-PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 행은 배포 run과 배포 후 측정에서 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
+PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포"와 "0.9.0 뒤 lock 갱신"을 뺀 행은 PR #147~#178 구간만 다룬다.
+"0.9.0 배포" 행은 배포 run과 배포 후 측정에서 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
 
 | 검증 | 결과 |
 | --- | --- |
 | 전체 테스트 `pytest` | PR별 통과 수(#163·#166 전체 스위트는 skipped 수 미기재, 나머지는 모두 12 skipped): #148·#149 2791, #151·#153 2792, #156 2809, #157 2816, #159 2829, #160 2837, #161 2841, #162 2850, #163 2852(Python 3.12·3.13·3.14 `[cypher]`, 3.14 core는 2762), #165 2850(경합 테스트를 3.12·3.13·3.14 각각 SQLite 600회 + in-memory 600회, 버전마다 1200회 모두 통과), #166 2852, #169 2898, #171 2912(3.13.2·3.14.4에서도 신규 14개 통과), #172 2912(최신 upstream `langgraph 1.2.16`·`langgraph-checkpoint 4.3.0`·`langgraph-checkpoint-sqlite 3.1.2`에서 `-m "not perf"` 2900 passed), #174 3217(신규 305개, `tests/test_patterns.py`는 3.13.2·3.14.4에서 각 1232 passed), #177 **3227 passed, 12 skipped**(Ladybug·CLI·compile 테스트는 3.13.2·3.14.4에서 각 378 passed) |
 | lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153·#175를 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#175·#177에 적혀 있다 |
+| 0.9.0 뒤 lock 갱신 | PR 본문 기준. #183: 새 lock의 venv에서 `suite-run` 3227 passed / 12 skipped CLEAN, 같은 코드를 이전·새 환경에서 돌린 golden 265개 바이트 단위 일치(각 실행이 의존성 버전을 출력하고 이 worktree의 `src`를 import), 리뷰 1라운드 SHIP. #185: `suite-run` 3227 passed / 12 skipped CLEAN, `tests/test_notebooks.py` 2 passed(skip 아님), golden은 CLI가 tornado를 import하지 않아 생략, 리뷰 1라운드 SHIP |
 | 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174·#177(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
 | 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개), #177(4개) 모두 신규 테스트가 검출 |
 | 0.9.0 배포 | 리허설 run [40063647251](https://github.com/memtomem/tracegraph/actions/runs/40063647251), 배포 run [40064065262](https://github.com/memtomem/tracegraph/actions/runs/40064065262). wheel `441d704f5ce901c61db4de566b11064f58fae9a76887da1e9a9184d86bf711b5`, sdist `103a9411cb55d63b636b7c89d6a1c6c53013bce8da0c5fcafe6ec3cb22d92b28`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200, 설명은 각 태그의 `README.md`와 같다. 깨끗한 Python 3.12.11 core·cypher 설치에서 `verify_wheel` PASS(cypher는 backend parity도 PASS), `uvx --refresh --from agent-tracegraph==0.9.0 tracegraph --version`도 0.9.0을 출력했다. 배포된 0.8.0 `validate`는 0.9.0 코드가 쓴 schema 1·2·7 artifact를 받고, `graph_parent_heuristic`·`checkpoint_subgraph_return` artifact는 `unsupported artifact schema_version 8`/`9 (this build reads 1, 2, 3, 4, 5, 6, 7)`로 거부한다 |
@@ -208,12 +216,19 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 
 
 ### 남은 결정과 후속 항목
 
-1. **열린 이슈(2026-11-04 등록, 둘 다 소유자 결정 전):**
+1. **열린 이슈(2026-11-04 등록, 셋 다 소유자 결정 전):**
+   - #184: `langgraph-checkpoint` 4.3부터 `JsonPlusSerializer`가 다시 만들 수 없는 값을 `None` 대신 직렬화된 payload로
+     돌려준다. tracegraph의 엄격 serializer(`allowed_msgpack_modules=()`)에서는 허용 타입의 생성자가 실패할 때만 해당하고,
+     serializer 수준에서 4.1.1은 `None`, 4.3.1은 payload임을 측정했다. `_error_introduced`가 오류 채널 값의 truthiness로
+     판정하므로 같은 checkpoint가 설치 버전에 따라 오류 없음/오류로 갈릴 것으로 보인다(end-to-end 미측정). 하한
+     `langgraph-checkpoint>=4.1`에 상한이 없어 0.9.0 새 설치는 이미 4.3.1을 받는다. `langgraph-checkpoint-sqlite` 하한을
+     `>=3.1.2`로 올리는 결정도 `langgraph-checkpoint>=4.3.0`을 함께 강제하므로 이 이슈에 묶었다(`uv pip compile` 측정:
+     `>=3.1.2`는 `langgraph-checkpoint==4.1.1`·`==4.2.0` pin과 같이 풀리지 않는다). 하한을 바꾸면 그 변경은 다음 릴리스부터 사용자에게 닿는다.
    - #180: `export-review-candidates`의 `tool_key`가 raw span 이름이다(아래 3번의 나머지 절반). SyncMill·Toolgraph
      reader가 `tool_key`를 `^\S+::\S+$`로 검증하고 candidate UUIDv5 id에 넣으므로, 값 전체를 `safe-v1` alias로
      바꾸면 두 reader가 거부하고 id도 바뀐다. 선택지 3개가 이슈 본문에 있다.
    - #181: `summarize` 후속(gap preset 3개 거부, `--backend` 없음, time-to-prioritize 가설 미검증). 우선순위 낮음.
-2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다(이 배포 기록 문서만 있다). 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
+2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다(이 절의 문서 갱신과 `uv.lock`만 바꾼 #183·#185뿐이다). 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
    소유자만 할 수 있다.
 3. **기존 보류 항목 정리 상태:**
    - 아래 `2026-10-14` 절 5번과 `2026-09-15` 절 3·4·5·7·8번 가운데 이슈로 옮긴 #122(`phoenix diagnose` 종료 코드),
