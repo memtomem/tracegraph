@@ -1,6 +1,6 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준, 열린 이슈는 2026-11-04 갱신 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `c9cd600`(PR #177 병합)이다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0) 이후 `uv.lock`의 의존성은 바뀌지 않았고,
@@ -95,7 +95,8 @@
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
-- **열린 이슈 없음.** `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+- **열린 이슈 2개(#180·#181, 2026-11-04 등록).** 이전 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
+  항목" 1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
   이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
   #173 측정 중에 찾아 등록했다.
 
@@ -207,7 +208,11 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 
 
 ### 남은 결정과 후속 항목
 
-1. **열린 이슈:** 없다.
+1. **열린 이슈(2026-11-04 등록, 둘 다 소유자 결정 전):**
+   - #180: `export-review-candidates`의 `tool_key`가 raw span 이름이다(아래 3번의 나머지 절반). SyncMill·Toolgraph
+     reader가 `tool_key`를 `^\S+::\S+$`로 검증하고 candidate UUIDv5 id에 넣으므로, 값 전체를 `safe-v1` alias로
+     바꾸면 두 reader가 거부하고 id도 바뀐다. 선택지 3개가 이슈 본문에 있다.
+   - #181: `summarize` 후속(gap preset 3개 거부, `--backend` 없음, time-to-prioritize 가설 미검증). 우선순위 낮음.
 2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다(이 배포 기록 문서만 있다). 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
    소유자만 할 수 있다.
 3. **기존 보류 항목 정리 상태:**
@@ -215,8 +220,10 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 
      #123(`from_file` 크기 제한 문서화), #124·#136(Phoenix 숫자 타임스탬프와 loop 부모), #125(`--redact-errors`),
      #126(review-candidates `extra="ignore"`), #127(`analyze`·memo의 기록된 task 표식), #128(Python 3.13·3.14 CI),
      #129(Phoenix E2E 서버 20.24.0 핀)는 모두 해결됐다.
-   - Review candidate의 `tool_key` redaction 여부(PR #161에서 분리된 나머지 절반), 알려진 한계(#90·#96), `summarize`
-     후속(아래 `2026-10-19` 절 3번)은 그대로다.
+   - Review candidate의 `tool_key` redaction 여부(PR #161에서 분리된 나머지 절반)는 #180, `summarize` 후속(아래
+     `2026-10-19` 절 3번)은 #181로 옮겼다.
+   - 알려진 한계 #90·#96은 2026-10-19에 고치지 않고 문서화하기로 결정해 닫혔다(PR #97·#98). README의
+     `Analysis and output guarantees` 절에 있다.
 
 ---
 
