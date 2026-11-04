@@ -1,6 +1,6 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준, 열린 이슈는 2026-11-04 갱신 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `c9cd600`(PR #177 병합)이다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0) 이후 `uv.lock`의 의존성은 바뀌지 않았고,
@@ -95,7 +95,8 @@
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
-- **열린 이슈 없음.** `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+- **열린 이슈 2개(#180·#181, 2026-11-04 등록).** 이전 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
+  항목" 1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
   이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
   #173 측정 중에 찾아 등록했다.
 
