@@ -98,8 +98,9 @@
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
-- **열린 이슈 2개(#180·#181, 2026-11-04 등록).** 이전 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
-  항목" 1번). 같은 날 #183의 lock 갱신 중에 찾은 #184는 하한 상향으로 고쳤다(1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+- **열린 이슈 2개(#180·#181, 2026-11-04 등록), #184 수정 병합 후 기준.** #180·#181은 이전 구간의 미등록 후속 항목을
+  옮긴 것이다(아래 "남은 결정과 후속 항목" 1번). 같은 날 #183의 lock 갱신 중에 찾은 #184는 하한 상향으로 고쳤고, 그 수정
+  PR의 병합으로 닫힌다(1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
   이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
   #173 측정 중에 찾아 등록했다.
 
@@ -217,8 +218,8 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포"�
 
 ### 남은 결정과 후속 항목
 
-1. **#184는 고쳤고(미릴리스), 열린 이슈 #180·#181은 소유자 결정 전이다:**
-   - #184(해결): `langgraph-checkpoint` 4.3.0 전의 `JsonPlusSerializer`는 허용 타입인데 다시 만들 수 없는 값(macOS·Linux에서
+1. **#184는 고쳤고(수정 PR 병합으로 닫힘, 미릴리스), 열린 이슈 #180·#181은 소유자 결정 전이다:**
+   - #184: `langgraph-checkpoint` 4.3.0 전의 `JsonPlusSerializer`는 허용 타입인데 다시 만들 수 없는 값(macOS·Linux에서
      읽은 Windows 경로 등)을 `None`으로 읽었다. 실제 `StateGraph`와 `SqliteSaver`로 만든 checkpoint의 오류 채널 값을
      `WindowsPath`로 바꿔 측정하면, sqlite 3.1.1을 고정한 채 checkpoint 4.2.0에서는 trace가 `ok`(실패 소실, capture gap 없음),
      4.3.0에서는 `fetch`가 error다. 하한을 `langgraph-checkpoint>=4.3.0`(sqlite advisory를 고친 첫
