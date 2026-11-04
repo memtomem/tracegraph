@@ -10,15 +10,18 @@ explicitly.
 
 ### Fixed
 
-- **A LangGraph failure stored as a value this machine cannot rebuild is no longer dropped**
-  (#184). The error channel can hold an object of a type the checkpoint serializer allows,
-  such as a `pathlib.WindowsPath` written on Windows and read on macOS or Linux, where its
-  constructor raises. langgraph-checkpoint before 4.3.0 read such a value as `None`, so the
+- **A LangGraph failure stored as a msgpack value this machine cannot rebuild is no longer
+  dropped** (#184). The error channel can hold an object of a type the checkpoint serializer
+  allows, such as a `pathlib.WindowsPath` written on Windows and read on macOS or Linux, where
+  its constructor raises. langgraph-checkpoint before 4.3.0 read such a value as `None`, so the
   failing step came out `ok`, the trace `ok`, with no capture gap. The new
   `langgraph-checkpoint>=4.3.0` floor (below) means the serializer returns the stored payload
   instead: the step is recorded as an error whose message is that payload's text
-  (`['C:\\', 'data', 'failed-input.csv']` for the path above). A payload that is itself empty
-  or otherwise falsey is still read as no error.
+  (`['C:\\', 'data', 'failed-input.csv']` for the path above). Still not covered (#188): a
+  payload that is itself empty or otherwise falsey, and a checkpoint stored in the older
+  `json` format, whose unrebuildable values langgraph-checkpoint 4.3 still reads as `None`;
+  both are still read as no error. Where the error is recorded, nothing in the artifact says
+  the value could not be rebuilt, so the payload text reads like any other error message.
 
 ### Dependencies
 
