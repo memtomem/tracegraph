@@ -207,7 +207,11 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 
 
 ### 남은 결정과 후속 항목
 
-1. **열린 이슈:** 없다.
+1. **열린 이슈(2026-11-04 등록, 둘 다 소유자 결정 전):**
+   - #180: `export-review-candidates`의 `tool_key`가 raw span 이름이다(아래 3번의 나머지 절반). SyncMill·Toolgraph
+     reader가 `tool_key`를 `^\S+::\S+$`로 검증하고 candidate UUIDv5 id에 넣으므로, 값 전체를 `safe-v1` alias로
+     바꾸면 두 reader가 거부하고 id도 바뀐다. 선택지 3개가 이슈 본문에 있다.
+   - #181: `summarize` 후속(gap preset 3개 거부, `--backend` 없음, time-to-prioritize 가설 미검증). 우선순위 낮음.
 2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다(이 배포 기록 문서만 있다). 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
    소유자만 할 수 있다.
 3. **기존 보류 항목 정리 상태:**
@@ -215,8 +219,10 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 
      #123(`from_file` 크기 제한 문서화), #124·#136(Phoenix 숫자 타임스탬프와 loop 부모), #125(`--redact-errors`),
      #126(review-candidates `extra="ignore"`), #127(`analyze`·memo의 기록된 task 표식), #128(Python 3.13·3.14 CI),
      #129(Phoenix E2E 서버 20.24.0 핀)는 모두 해결됐다.
-   - Review candidate의 `tool_key` redaction 여부(PR #161에서 분리된 나머지 절반), 알려진 한계(#90·#96), `summarize`
-     후속(아래 `2026-10-19` 절 3번)은 그대로다.
+   - Review candidate의 `tool_key` redaction 여부(PR #161에서 분리된 나머지 절반)는 #180, `summarize` 후속(아래
+     `2026-10-19` 절 3번)은 #181로 옮겼다.
+   - 알려진 한계 #90·#96은 2026-10-19에 고치지 않고 문서화하기로 결정해 닫혔다(PR #97·#98). README의
+     `Analysis and output guarantees` 절에 있다.
 
 ---
 
