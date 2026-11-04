@@ -6,19 +6,24 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.9.1 - 2026-11-04
 
 ### Fixed
 
-- **A LangGraph failure stored as a value this machine cannot rebuild is no longer dropped**
-  (#184). The error channel can hold an object of a type the checkpoint serializer allows,
-  such as a `pathlib.WindowsPath` written on Windows and read on macOS or Linux, where its
-  constructor raises. langgraph-checkpoint before 4.3.0 read such a value as `None`, so the
-  failing step came out `ok`, the trace `ok`, with no capture gap. The new
-  `langgraph-checkpoint>=4.3.0` floor (below) means the serializer returns the stored payload
-  instead: the step is recorded as an error whose message is that payload's text
-  (`['C:\\', 'data', 'failed-input.csv']` for the path above). A payload that is itself empty
-  or otherwise falsey is still read as no error.
+- **A LangGraph failure stored as an allowed constructor call this machine cannot run is no
+  longer dropped** (#184). The checkpoint serializer stores some objects as a call to rebuild
+  them, such as a `pathlib.WindowsPath` written on Windows; read on macOS or Linux, that call
+  raises. langgraph-checkpoint before 4.3.0 read such a value in the error channel as `None`,
+  so the failing step came out `ok`, the trace `ok`, with no capture gap. The new
+  `langgraph-checkpoint>=4.3.0` floor (below) means the serializer returns the call's stored
+  argument instead: the step is recorded as an error whose message is that argument's text
+  (`['C:\\', 'data', 'failed-input.csv']` for the path above).
+
+  Only that case changed. An error value that fails to decode any other way can still read
+  as `None` and be dropped — measured on langgraph-checkpoint 4.3.1 for a `WindowsPath` in an
+  older `json`-format checkpoint — and so can a stored argument that is itself empty or
+  otherwise falsey. Where the error is recorded, nothing in the artifact says the value could
+  not be rebuilt. These are tracked in #188.
 
 ### Dependencies
 
