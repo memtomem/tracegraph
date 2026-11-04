@@ -201,12 +201,14 @@
 
 ### 검증 증거
 
-PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 행은 배포 run과 배포 후 측정에서 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
+PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포"와 "0.9.0 뒤 lock 갱신"을 뺀 행은 PR #147~#178 구간만 다룬다.
+"0.9.0 배포" 행은 배포 run과 배포 후 측정에서 옮겼다. 측정 환경은 PR 본문마다 다르고(#166의 원격 E2E는 linux/amd64), 상세 수치와 변이(mutation)·리뷰 표는 해당 PR 본문에 있다.
 
 | 검증 | 결과 |
 | --- | --- |
 | 전체 테스트 `pytest` | PR별 통과 수(#163·#166 전체 스위트는 skipped 수 미기재, 나머지는 모두 12 skipped): #148·#149 2791, #151·#153 2792, #156 2809, #157 2816, #159 2829, #160 2837, #161 2841, #162 2850, #163 2852(Python 3.12·3.13·3.14 `[cypher]`, 3.14 core는 2762), #165 2850(경합 테스트를 3.12·3.13·3.14 각각 SQLite 600회 + in-memory 600회, 버전마다 1200회 모두 통과), #166 2852, #169 2898, #171 2912(3.13.2·3.14.4에서도 신규 14개 통과), #172 2912(최신 upstream `langgraph 1.2.16`·`langgraph-checkpoint 4.3.0`·`langgraph-checkpoint-sqlite 3.1.2`에서 `-m "not perf"` 2900 passed), #174 3217(신규 305개, `tests/test_patterns.py`는 3.13.2·3.14.4에서 각 1232 passed), #177 **3227 passed, 12 skipped**(Ladybug·CLI·compile 테스트는 3.13.2·3.14.4에서 각 378 passed) |
 | lint·타입 | PR 본문 기준: `ruff` 통과는 #147·#153·#175를 뺀 모든 PR, `mypy` 통과는 #148·#156·#157·#159·#160·#161·#162·#163·#169·#171·#174·#177, `git diff --check` 통과는 #149·#169·#174·#175·#177에 적혀 있다 |
+| 0.9.0 뒤 lock 갱신 | PR 본문 기준. #183: 새 lock의 venv에서 `suite-run` 3227 passed / 12 skipped CLEAN, 같은 코드를 이전·새 환경에서 돌린 golden 265개 바이트 단위 일치(각 실행이 의존성 버전과 import 경로를 출력), 리뷰 1라운드 SHIP. #185: `suite-run` 3227 passed / 12 skipped CLEAN, `tests/test_notebooks.py` 2 passed(skip 아님), golden은 CLI가 tornado를 import하지 않아 생략, 리뷰 1라운드 SHIP |
 | 골든·A/B 하네스 | #148·#156·#157(252개), #159·#160(golden 252개 + `ab-explain` 426개), #161·#162·#169·#171·#174·#177(265개) 바이트 단위 일치. #151은 의도된 lossy fan-in 한 줄만 변경(28개 `explain` + 6개 `query --explain`) |
 | 회귀 테스트 판별력 | #148(7개 변이), #156(5개), #157(6개), #159(6개), #160(수정 전 코드 + 변이 4개), #161(4개), #162(4개), #169(13개), #171(데코레이터 8개 개별 제거), #174(6개), #177(4개) 모두 신규 테스트가 검출 |
 | 0.9.0 배포 | 리허설 run [40063647251](https://github.com/memtomem/tracegraph/actions/runs/40063647251), 배포 run [40064065262](https://github.com/memtomem/tracegraph/actions/runs/40064065262). wheel `441d704f5ce901c61db4de566b11064f58fae9a76887da1e9a9184d86bf711b5`, sdist `103a9411cb55d63b636b7c89d6a1c6c53013bce8da0c5fcafe6ec3cb22d92b28`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200, 설명은 각 태그의 `README.md`와 같다. 깨끗한 Python 3.12.11 core·cypher 설치에서 `verify_wheel` PASS(cypher는 backend parity도 PASS), `uvx --refresh --from agent-tracegraph==0.9.0 tracegraph --version`도 0.9.0을 출력했다. 배포된 0.8.0 `validate`는 0.9.0 코드가 쓴 schema 1·2·7 artifact를 받고, `graph_parent_heuristic`·`checkpoint_subgraph_return` artifact는 `unsupported artifact schema_version 8`/`9 (this build reads 1, 2, 3, 4, 5, 6, 7)`로 거부한다 |
@@ -221,7 +223,7 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼고, "0.9.0 배포" 
      판정하므로 같은 checkpoint가 설치 버전에 따라 오류 없음/오류로 갈릴 것으로 보인다(end-to-end 미측정). 하한
      `langgraph-checkpoint>=4.1`에 상한이 없어 0.9.0 새 설치는 이미 4.3.1을 받는다. `langgraph-checkpoint-sqlite` 하한을
      `>=3.1.2`로 올리는 결정도 `langgraph-checkpoint>=4.3.0`을 함께 강제하므로 이 이슈에 묶었다(`uv pip compile` 측정:
-     `>=3.1.2`는 `langgraph-checkpoint==4.1.1`·`==4.2.0` pin과 같이 풀리지 않는다). 다음 릴리스 전에 정한다.
+     `>=3.1.2`는 `langgraph-checkpoint==4.1.1`·`==4.2.0` pin과 같이 풀리지 않는다). 하한을 바꾸면 그 변경은 다음 릴리스부터 사용자에게 닿는다.
    - #180: `export-review-candidates`의 `tool_key`가 raw span 이름이다(아래 3번의 나머지 절반). SyncMill·Toolgraph
      reader가 `tool_key`를 `^\S+::\S+$`로 검증하고 candidate UUIDv5 id에 넣으므로, 값 전체를 `safe-v1` alias로
      바꾸면 두 reader가 거부하고 id도 바뀐다. 선택지 3개가 이슈 본문에 있다.
