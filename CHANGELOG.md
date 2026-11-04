@@ -6,6 +6,29 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Fixed
+
+- **A LangGraph failure stored as a value this machine cannot rebuild is no longer dropped**
+  (#184). The error channel can hold an object of a type the checkpoint serializer allows,
+  such as a `pathlib.WindowsPath` written on Windows and read on macOS or Linux, where its
+  constructor raises. langgraph-checkpoint before 4.3.0 read such a value as `None`, so the
+  failing step came out `ok`, the trace `ok`, with no capture gap. The new
+  `langgraph-checkpoint>=4.3.0` floor (below) means the serializer returns the stored payload
+  instead: the step is recorded as an error whose message is that payload's text
+  (`['C:\\', 'data', 'failed-input.csv']` for the path above). A payload that is itself empty
+  or otherwise falsey is still read as no error.
+
+### Dependencies
+
+- `langgraph-checkpoint` now requires `>=4.3.0` (was `>=4.1`), for the fix above, and
+  `langgraph-checkpoint-sqlite` requires `>=3.1.2` (was `>=3.1.1`), the first release with the
+  fix for GHSA-6hmw-9432-67qq, where store namespace labels containing `.` reached other
+  namespaces. Tracegraph never uses the store. 3.1.2 itself requires `langgraph-checkpoint>=4.3.0`.
+  The install range is narrower: an environment that pins `langgraph-checkpoint==4.1.1` or
+  `==4.2.0` resolves with 0.9.0 and not with this release.
+
 ## 0.9.0 - 2026-10-24
 
 ### Changed

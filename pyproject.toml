@@ -32,15 +32,16 @@ classifiers = [
 
 dependencies = [
     "pydantic>=2,<3",
-    # 3.1.1 fixes GHSA-47pj-3jcm-6whg (store namespace prefixes crossing segment boundaries).
-    # Tracegraph reads only SqliteSaver, never the store; the floor keeps installs off the
-    # flagged versions.
-    "langgraph-checkpoint-sqlite>=3.1.1",
-    # Declared directly, not left transitive, because `ingest` now calls its serializer API:
+    # 3.1.2 fixes GHSA-6hmw-9432-67qq (store namespace labels containing `.`), as 3.1.1 fixed
+    # GHSA-47pj-3jcm-6whg. Tracegraph reads only SqliteSaver, never the store; the floor keeps
+    # installs off the flagged versions. 3.1.2 itself requires langgraph-checkpoint>=4.3.0.
+    "langgraph-checkpoint-sqlite>=3.1.2",
+    # Declared directly, not left transitive, because `ingest` calls its serializer API:
     # `JsonPlusSerializer(allowed_msgpack_modules=...)` is what stops a checkpoint payload
-    # invoking arbitrary callables, and it does not exist before 4.1 (4.0.0 raises TypeError,
-    # verified). A transitive dependency is not a contract.
-    "langgraph-checkpoint>=4.1",
+    # invoking arbitrary callables (absent before 4.1). 4.3.0 is the floor because before it
+    # the serializer read an allowed value it could not rebuild (a Windows path read here) as
+    # `None`, so a failure stored in the error channel was dropped without disclosure (#184).
+    "langgraph-checkpoint>=4.3.0",
     "typer>=0.12",
     "rich>=13",
     # Recomputes a LangGraph task id to name the node behind a native failure. LangGraph

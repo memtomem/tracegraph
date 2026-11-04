@@ -1,12 +1,13 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준, 열린 이슈와 lock은 2026-11-04 갱신 (Asia/Seoul)
+## 현재 전달 상태 — 2026-10-24, `c3c3896`(v0.9.0) 기준, 열린 이슈·lock·의존성 하한은 2026-11-04 갱신 (Asia/Seoul)
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `c9cd600`(PR #177 병합)이다. 시작 전에
   `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. `c4be406`(v0.8.0)부터 0.9.0까지 `uv.lock`의 의존성은 바뀌지
   않았고, 0.9.0 준비 PR(#178, `c3c3896`)은 그 안의 프로젝트 버전만 0.9.0으로 바꿨다. 0.9.0 뒤에는 Dependabot 경고 5건을
-  `uv.lock`만 바꿔 고쳤다(#183, #185). `pyproject.toml`과 배포 패키지는 그대로이고, 2026-11-04 병합 뒤 열린 Dependabot 경고는
-  0건이다. 새 lock으로 venv를 맞추려면 `uv sync --locked --extra cypher --group dev`.
+  `uv.lock`만 바꿔 고쳤다(#183, #185). 2026-11-04 병합 뒤 열린 Dependabot 경고는 0건이다. 그 뒤 #184 수정이
+  `pyproject.toml`의 하한을 `langgraph-checkpoint>=4.3.0`, `langgraph-checkpoint-sqlite>=3.1.2`로 올렸다(`CHANGELOG.md`의
+  `## Unreleased`, 아직 릴리스 안 됨). 새 lock으로 venv를 맞추려면 `uv sync --locked --extra cypher --group dev`.
 - **0.9.0 공개 완료(2026-10-24).** `agent-tracegraph` 0.9.0이 PyPI 최신이다. `test-v0.9.0`과 `v0.9.0`이 모두
   `c3c3896`(PR #178)을 가리킨다. 업그레이드 주의는
   [GitHub Release v0.9.0](https://github.com/memtomem/tracegraph/releases/tag/v0.9.0)의 "Before you upgrade"에 있다.
@@ -97,8 +98,9 @@
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
-- **열린 이슈 3개(#180·#181·#184, 2026-11-04 등록).** #180·#181은 이전 구간의 미등록 후속 항목을 옮긴 것이고, #184는
-  #183의 lock 갱신 중에 찾았다(아래 "남은 결정과 후속 항목" 1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+- **열린 이슈 2개(#180·#181, 2026-11-04 등록), #184 수정 병합 후 기준.** #180·#181은 이전 구간의 미등록 후속 항목을
+  옮긴 것이다(아래 "남은 결정과 후속 항목" 1번). 같은 날 #183의 lock 갱신 중에 찾은 #184는 하한 상향으로 고쳤고, 그 수정
+  PR의 병합으로 닫힌다(1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
   이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
   #173 측정 중에 찾아 등록했다.
 
@@ -216,19 +218,22 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포"�
 
 ### 남은 결정과 후속 항목
 
-1. **열린 이슈(2026-11-04 등록, 셋 다 소유자 결정 전):**
-   - #184: `langgraph-checkpoint` 4.3부터 `JsonPlusSerializer`가 다시 만들 수 없는 값을 `None` 대신 직렬화된 payload로
-     돌려준다. tracegraph의 엄격 serializer(`allowed_msgpack_modules=()`)에서는 허용 타입의 생성자가 실패할 때만 해당하고,
-     serializer 수준에서 4.1.1은 `None`, 4.3.1은 payload임을 측정했다. `_error_introduced`가 오류 채널 값의 truthiness로
-     판정하므로 같은 checkpoint가 설치 버전에 따라 오류 없음/오류로 갈릴 것으로 보인다(end-to-end 미측정). 하한
-     `langgraph-checkpoint>=4.1`에 상한이 없어 0.9.0 새 설치는 이미 4.3.1을 받는다. `langgraph-checkpoint-sqlite` 하한을
-     `>=3.1.2`로 올리는 결정도 `langgraph-checkpoint>=4.3.0`을 함께 강제하므로 이 이슈에 묶었다(`uv pip compile` 측정:
-     `>=3.1.2`는 `langgraph-checkpoint==4.1.1`·`==4.2.0` pin과 같이 풀리지 않는다). 하한을 바꾸면 그 변경은 다음 릴리스부터 사용자에게 닿는다.
+1. **#184는 고쳤고(수정 PR 병합으로 닫힘, 미릴리스), 열린 이슈 #180·#181은 소유자 결정 전이다:**
+   - #184: `langgraph-checkpoint` 4.3.0 전의 `JsonPlusSerializer`는 허용 타입인데 다시 만들 수 없는 값(macOS·Linux에서
+     읽은 Windows 경로 등)을 `None`으로 읽었다. 실제 `StateGraph`와 `SqliteSaver`로 만든 checkpoint의 오류 채널 값을
+     `WindowsPath`로 바꿔 측정하면, sqlite 3.1.1을 고정한 채 checkpoint 4.2.0에서는 trace가 `ok`(실패 소실, capture gap 없음),
+     4.3.0에서는 `fetch`가 error다. 하한을 `langgraph-checkpoint>=4.3.0`(sqlite advisory를 고친 첫
+     `langgraph-checkpoint-sqlite` 3.1.2가 요구하는 하한과 같다)과 `langgraph-checkpoint-sqlite>=3.1.2`로 올렸고,
+     `tests/test_langgraph_unrebuildable_error.py`가 이 경우를 고정한다. 남은 한계: 다시 만들지 못한 payload 자체가 비어
+     있거나 falsey이면(예: `Decimal`의 `""`) 4.3.x에서도 오류가 아닌 것으로 읽힌다. 0.9.0은 `langgraph-checkpoint==4.1.1`·
+     `==4.2.0` pin과 함께 설치되지만 새 하한으로 빌드한 wheel은 그렇지 않다(`uv pip compile` 측정). 0.6.1의 sqlite 하한과
+     같은 종류의 설치 호환성 변경이고, 다음 릴리스의 버전은 소유자가 정한다.
    - #180: `export-review-candidates`의 `tool_key`가 raw span 이름이다(아래 3번의 나머지 절반). SyncMill·Toolgraph
      reader가 `tool_key`를 `^\S+::\S+$`로 검증하고 candidate UUIDv5 id에 넣으므로, 값 전체를 `safe-v1` alias로
      바꾸면 두 reader가 거부하고 id도 바뀐다. 선택지 3개가 이슈 본문에 있다.
    - #181: `summarize` 후속(gap preset 3개 거부, `--backend` 없음, time-to-prioritize 가설 미검증). 우선순위 낮음.
-2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다(이 절의 문서 갱신과 `uv.lock`만 바꾼 #183·#185뿐이다). 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
+2. **다음 릴리스:** 0.9.0 이후 제품 코드 변경은 없다. 바뀐 것은 이 절의 문서, `uv.lock`만 바꾼 #183·#185, 그리고
+   #184의 의존성 하한·회귀 테스트·`CHANGELOG.md` `## Unreleased`다. 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은
    소유자만 할 수 있다.
 3. **기존 보류 항목 정리 상태:**
    - 아래 `2026-10-14` 절 5번과 `2026-09-15` 절 3·4·5·7·8번 가운데 이슈로 옮긴 #122(`phoenix diagnose` 종료 코드),

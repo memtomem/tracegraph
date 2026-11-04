@@ -36,8 +36,8 @@ typing = [
 [package.metadata]
 requires-dist = [
     { name = "ladybug", marker = "extra == 'cypher'", specifier = ">=0.18,<0.22" },
-    { name = "langgraph-checkpoint", specifier = ">=4.1" },
-    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.1" },
+    { name = "langgraph-checkpoint", specifier = ">=4.3.0" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.2" },
     { name = "pydantic", specifier = ">=2,<3" },
     { name = "rich", specifier = ">=13" },
     { name = "typer", specifier = ">=0.12" },
