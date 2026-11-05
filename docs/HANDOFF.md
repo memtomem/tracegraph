@@ -106,9 +106,9 @@ v0.9.1은 0.9.0 위에 의존성 하한만 바꾼 patch다. 이 절의 0.9.0 기
     fallback으로 보내고 `fell_back_to_python`을 켠다. 결과는 같다. `compile_to_cypher`는 그대로다. `query
     tool-retry-failure-near --backend ladybug`는 이제 stderr에 fallback 안내를 내고, 안내 문구는 `LadybugDB does not run
     patterns with a gap or more than 6 predicates; …`로 바뀌었다(이전에는 `pattern not Cypher-compilable (unbounded gap)`).
-- **열린 이슈 3개(#180·#181·#188, 2026-11-04 등록).** #180·#181은 이전 구간의 미등록 후속 항목을 옮긴 것이다(아래
-  "남은 결정과 후속 항목" 1번). 같은 날 #183의 lock 갱신 중에 찾은 #184는 하한 상향으로 고쳐 PR #187로 닫았고, 그
-  수정이 남긴 한계를 #188로 옮겼다(1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
+- **열린 이슈 2개(#180·#181, 2026-11-04 등록).** 이전 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
+  항목" 1번). 같은 날 #183의 lock 갱신 중에 찾은 #184는 하한 상향으로 고쳐 PR #187로 닫았고, 그 수정이 남긴 한계를
+  옮긴 #188은 2026-11-05에 문서화된 한계로 닫았다(not planned, 1번). 0.9.0 시점(2026-10-24)에는 열린 이슈가 없었다: `2026-10-20`에 남아 있던 보류 결정·후속 이슈(#126~#129, #142, #143)와 이번 구간에 등록한
   이슈(#150, #152, #154, #155, #158, #164, #167, #168, #170, #173, #176)는 모두 닫혔다. #173은 #170 계획 리뷰에서, #176은
   #173 측정 중에 찾아 등록했다.
 
@@ -229,7 +229,7 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포",
 
 ### 남은 결정과 후속 항목
 
-1. **#184는 PR #187(`afcf7f7`)로 고쳐 닫혔고 0.9.1로 배포했다. 열린 이슈 #180·#181·#188은 소유자 결정 전이다:**
+1. **#184는 PR #187(`afcf7f7`)로 고쳐 닫혔고 0.9.1로 배포했다. #188은 닫았고, 열린 이슈 #180·#181은 소유자 결정 전이다:**
    - #184: `langgraph-checkpoint` 4.3.0 전의 `JsonPlusSerializer`는 허용 타입인데 다시 만들 수 없는 값(macOS·Linux에서
      읽은 Windows 경로 등)을 `None`으로 읽었다. 실제 `StateGraph`와 `SqliteSaver`로 만든 checkpoint의 오류 채널 값을
      `WindowsPath`로 바꿔 측정하면, sqlite 3.1.1을 고정한 채 checkpoint 4.2.0에서는 trace가 `ok`(실패 소실, capture gap 없음),
@@ -241,9 +241,14 @@ PR별 검증 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.9.0 배포",
      `==4.2.0` pin과 함께 설치되지만 새 하한으로 빌드한 wheel은 그렇지 않다(`uv pip compile` 측정). 0.6.1의 sqlite 하한과
      같은 종류의 설치 호환성 변경이고, 소유자가 0.6.1처럼 patch(0.9.1)로 정했다. 남은 한계와 "다시 만들지 못함"의
      공시는 #188로 옮겼다.
-   - #188: falsey payload·`json` 형식 한계와 공시(#184의 선택지 B). 4.3.1의 `_reconstruction_fallback`은 serde event를 내지 않고
-     `_warn_once` 로그만 남기므로(타입마다 프로세스당 한 번), 감지하려면 serializer 내부에 기대야 한다. 선택지 3개가 이슈
-     본문에 있다.
+   - #188(닫음, not planned, 2026-11-05): falsey payload·`json` 형식 한계와 공시(#184의 선택지 B). 소유자가 선택지 1(문서화된
+     한계로 둠)을 골랐다. 선택지 2는 계획 리뷰 전에 프로토타입으로 시험했다(stock strict hook을 감싸 결과가 허용 클래스의
+     인스턴스가 아니면 표시, `lc:2` reviver override). 재현한 결함: 정상 상태 값 `re.compile("abc")`에서 ingest가
+     `ValueError: ext_hook failed`로 중단되고(`re.compile`은 클래스가 아니라 허용된 함수), 바깥 허용 생성자 안의 실패는
+     upstream 재귀를 타서 표시되지 않는다. 리뷰가 4.3.1 소스에서 짚은 나머지(결과 타입으로 복원 성공을 판별할 수 없음,
+     메서드 허용 목록 분리, 대체 메시지의 `unknown_fields` 필요)까지 막으면 upstream ext hook을 다시 구현하게 되고, 그래도
+     `ingest --sqlite`만 덮는다. 다시 다룬다면 upstream의 serde event(`register_serde_event_listener`)를 받아 capture gap으로
+     공시하는 길이다. 경위는 #188의 닫는 코멘트에 있다.
    - #180: `export-review-candidates`의 `tool_key`가 raw span 이름이다(아래 3번의 나머지 절반). SyncMill·Toolgraph
      reader가 `tool_key`를 `^\S+::\S+$`로 검증하고 candidate UUIDv5 id에 넣으므로, 값 전체를 `safe-v1` alias로
      바꾸면 두 reader가 거부하고 id도 바뀐다. 선택지 3개가 이슈 본문에 있다.
