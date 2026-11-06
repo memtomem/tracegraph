@@ -563,3 +563,75 @@ def test_int64_string_token_count_is_still_read():
 def test_phoenix_unrepresentable_score_is_unavailable():
     raw = PhoenixExportAdapter(_phoenix_span(annotations=[{"name": "q", "score": 10**400}])).ingest("t")
     assert [e.score for e in raw.steps[0].evidence.evaluations] == [None]
+
+
+def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
+    loop = tmp_path / "loop.json"
+    loop.symlink_to(loop)
+    valid = tmp_path / "valid.json"
+    artifact.save(trace(), valid)
+    hardlink = tmp_path / "hardlink.json"
+    hardlink.hardlink_to(valid)
+    runner = CliRunner()
+    for args in (
+        ["analyze", str(valid), "--json-out", str(loop)],
+        ["ingest-otlp", "--file", str(valid), "--out", str(loop)],
+        ["export-incident-memo", str(valid), "--out", str(loop)],
+        ["summarize", "error", str(valid), "--out", str(loop)],
+        ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(loop)],
+        ["summarize", "error", str(valid), "--out", str(hardlink)],
+        ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(hardlink)],
+    ):
+        res = runner.invoke(app, list(args))
+        assert res.exit_code == 2, (args, res.output)
+        assert isinstance(res.exception, SystemExit)
+
+    # A broken/looping *.json in a directory is skipped with a warning even when --out is given.
+    cohort = tmp_path / "cohort"
+    cohort.mkdir()
+    artifact.save(trace(), cohort / "ok.json")
+    (cohort / "bad.json").symlink_to(cohort / "bad.json")
+    out_summary = tmp_path / "summary.json"
+    res = runner.invoke(app, ["summarize", "error", str(cohort), "--out", str(out_summary)])
+    assert res.exit_code == 0, res.output
+    assert out_summary.exists()
+
+
+def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, monkeypatch):
+    from tracegraph import sqlite_snapshot
+
+    loop = tmp_path / "loop.sqlite"
+    loop.symlink_to(loop)
+    with pytest.raises(OSError):
+        ingest_snapshot(loop, "t", error_channel="error")
+
+    db = tmp_path / "db.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE t(x)")
+    conn.close()
+    with pytest.raises(ValueError, match="deadline"):
+        ingest_snapshot(db, "t", error_channel="error", timeout=float("nan"))
+
+    # If the deadline expires after _check_json_depth, during saver.list(), it still reports
+    # "SQLite snapshot deadline exceeded".
+    fixture = ROOT / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
+    real_check = sqlite_snapshot._check_json_depth
+
+    def expire_after_check(c, thread, deadline):
+        real_check(c, thread, deadline)
+        monkeypatch.setattr(
+            sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: deadline + 1)
+        )
+
+    monkeypatch.setattr(sqlite_snapshot, "_check_json_depth", expire_after_check)
+    with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded"):
+        ingest_snapshot(fixture, "t", error_channel="error")
+
+
+def test_build_incident_memo_rejects_non_string_digest():
+    from tracegraph.analysis.memo import build_incident_memo
+
+    nt = trace()
+    for bad in (None, 123, ["sha256:" + "0" * 64]):
+        with pytest.raises(ValueError, match="Invalid artifact_digest"):
+            build_incident_memo(nt, bad)  # type: ignore[arg-type]
