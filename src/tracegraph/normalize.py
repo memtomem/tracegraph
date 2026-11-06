@@ -134,7 +134,11 @@ def validate_normalized(nt: NormalizedTrace) -> ProjectionRule:
     on the next save. Rejecting here keeps every loader (InMemoryStore, LadybugStore, future
     caches) honest about "the JSON is what normalize() produces, full stop."
     """
-    validate_structure(nt)
+    _check_steps(nt.trace.trace_id, nt.steps)
+    steps_by_id = nt.steps_by_id()
+    caused_by = nt.edges_of(EdgeType.CAUSED_BY)
+    _check_caused_by(steps_by_id, caused_by)
+    validate_tree(nt)
 
     # The trace header is part of the system of record: a stored status that disagrees with
     # the steps would let a "clean" artifact hide a failed run. normalize() derives it, so an
@@ -149,11 +153,10 @@ def validate_normalized(nt: NormalizedTrace) -> ProjectionRule:
         )
 
     # Reconstruct what the canonical form should look like from the raw layer alone.
-    raw = raw_layer(nt)
-    if normalize(raw, origin_priority=True) != nt:
+    if _project(nt.trace, nt.steps, caused_by, steps_by_id, origin_priority=True) != nt:
         # Backward compatibility: accept authentic legacy artifacts produced under
         # the previous temporal-only parent selection rule.
-        if normalize(raw, origin_priority=False) != nt:
+        if _project(nt.trace, nt.steps, caused_by, steps_by_id, origin_priority=False) != nt:
             raise ValueError(
                 "normalized trace is not in canonical form: derived edges, projection_lossy "
                 "flags, or step/edge ordering do not match what normalize() produces from "
@@ -218,6 +221,45 @@ def _primary_parent(
     return chosen_edge.dst
 
 
+def _project(
+    trace_header,
+    steps: list[Step],
+    causal_edges: list[Edge],
+    steps_by_id: dict[str, Step],
+    *,
+    origin_priority: bool = True,
+) -> NormalizedTrace:
+    # Canonicalize the raw inputs ONCE; derived edges then fall out in canonical order
+    # naturally because they're emitted per-step in the same loop.
+    steps_canonical = sorted(steps, key=lambda s: (s.seq, s.step_id))
+    caused_by = sorted(
+        causal_edges,
+        key=lambda e: (steps_by_id[e.src].seq, steps_by_id[e.dst].seq, e.src, e.dst),
+    )
+
+    edges: list[Edge] = list(caused_by)  # carry the raw layer through unchanged
+    incoming_by_step = incoming_edges_by_step(caused_by)
+    new_steps: list[Step] = []
+    for step in steps_canonical:
+        incoming = incoming_by_step.get(step.step_id, [])
+        # Flag lossiness on a copy so we never mutate the caller's objects.
+        step = step.model_copy(update={"projection_lossy": len(incoming) > 1})
+        new_steps.append(step)
+
+        edges.append(Edge(type=EdgeType.BELONGS_TO, src=step.step_id, dst=trace_header.trace_id))
+        if incoming:
+            chosen = _primary_parent(incoming, steps_by_id, origin_priority=origin_priority)
+            edges.append(Edge(type=EdgeType.TREE_PARENT, src=step.step_id, dst=chosen))
+
+    # The trace-level status is a derived view of its steps, not independent data: make it
+    # canonical here so the artifact header can never lie about whether the run errored.
+    any_error = any(s.status is StepStatus.ERROR for s in new_steps)
+    trace = trace_header.model_copy(
+        update={"status": StepStatus.ERROR if any_error else StepStatus.OK}
+    )
+    return NormalizedTrace(trace=trace, steps=new_steps, edges=edges)
+
+
 def normalize(raw: RawTrace, *, origin_priority: bool = True) -> NormalizedTrace:
     """Validate a raw trace and return its normalized form (raw + derived layers).
 
@@ -235,38 +277,12 @@ def normalize(raw: RawTrace, *, origin_priority: bool = True) -> NormalizedTrace
     the optional LadybugDB cache a true accelerator: any backend that rebuilds a trace from
     its raw layer lands on the same artifact bytes.
     """
-    validate_raw(raw)
+    _check_steps(raw.trace.trace_id, raw.steps)
     steps_by_id = raw.steps_by_id()
-
-    # Canonicalize the raw inputs ONCE; derived edges then fall out in canonical order
-    # naturally because they're emitted per-step in the same loop.
-    steps_canonical = sorted(raw.steps, key=lambda s: (s.seq, s.step_id))
-    caused_by = sorted(
-        raw.causal_edges,
-        key=lambda e: (steps_by_id[e.src].seq, steps_by_id[e.dst].seq, e.src, e.dst),
+    _check_caused_by(steps_by_id, raw.causal_edges)
+    nt = _project(
+        raw.trace, raw.steps, raw.causal_edges, steps_by_id, origin_priority=origin_priority
     )
-
-    edges: list[Edge] = list(caused_by)  # carry the raw layer through unchanged
-    incoming_by_step = incoming_edges_by_step(caused_by)
-    new_steps: list[Step] = []
-    for step in steps_canonical:
-        incoming = incoming_by_step.get(step.step_id, [])
-        # Flag lossiness on a copy so we never mutate the caller's objects.
-        step = step.model_copy(update={"projection_lossy": len(incoming) > 1})
-        new_steps.append(step)
-
-        edges.append(Edge(type=EdgeType.BELONGS_TO, src=step.step_id, dst=raw.trace.trace_id))
-        if incoming:
-            chosen = _primary_parent(incoming, steps_by_id, origin_priority=origin_priority)
-            edges.append(Edge(type=EdgeType.TREE_PARENT, src=step.step_id, dst=chosen))
-
-    # The trace-level status is a derived view of its steps, not independent data: make it
-    # canonical here so the artifact header can never lie about whether the run errored.
-    any_error = any(s.status is StepStatus.ERROR for s in new_steps)
-    trace = raw.trace.model_copy(
-        update={"status": StepStatus.ERROR if any_error else StepStatus.OK}
-    )
-    nt = NormalizedTrace(trace=trace, steps=new_steps, edges=edges)
     validate_tree(nt)
     return nt
 
@@ -315,13 +331,25 @@ def requires_origin_priority_projection(nt: NormalizedTrace) -> bool:
     nor lets an origin-priority tree pass behind a lower envelope in ``artifact.from_obj``.
     """
     try:
-        raw = raw_layer(nt)
-        legacy = _tree_parents(normalize(raw, origin_priority=False))
-        origin = _tree_parents(normalize(raw, origin_priority=True))
+        _check_steps(nt.trace.trace_id, nt.steps)
+        steps_by_id = nt.steps_by_id()
+        caused_by = nt.edges_of(EdgeType.CAUSED_BY)
+        _check_caused_by(steps_by_id, caused_by)
     except ValueError:
         # If the trace is malformed, do not fail during serialization stamping.
         # Store loading and validate_normalized remain the validation gate.
         return False
+    incoming_by_step = incoming_edges_by_step(caused_by)
+    if not any(len(inc) > 1 for inc in incoming_by_step.values()):
+        return False
+    origin = sorted(
+        (sid, _primary_parent(inc, steps_by_id, origin_priority=True))
+        for sid, inc in incoming_by_step.items()
+    )
+    legacy = sorted(
+        (sid, _primary_parent(inc, steps_by_id, origin_priority=False))
+        for sid, inc in incoming_by_step.items()
+    )
     return origin != legacy and _tree_parents(nt) == origin
 
 

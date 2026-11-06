@@ -49,6 +49,7 @@ Documented MVP assumptions:
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 import heapq
 import json
@@ -455,6 +456,11 @@ class OTLPSpanAdapter:
         attrs = {sid: _attributes(by_id[sid]) for sid in by_id}
         run_id = self._run_id(trace_id, attrs)
 
+        start_nanos = {
+            sid: _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano"))
+            for sid, span in by_id.items()
+        }
+
         # prerank is a deterministic *temporal* pre-order (real start time, then span-tree
         # depth and spanId only as tiebreaks). It is used solely to decide which spans
         # count as "preceding" when resolving a logical parent or a link cause — NOT as the
@@ -462,7 +468,14 @@ class OTLPSpanAdapter:
         prerank = {
             sid: i
             for i, sid in enumerate(
-                sorted(by_id, key=lambda s: (self._start_nano(by_id[s]), depth[s], s))
+                sorted(
+                    by_id,
+                    key=lambda s: (
+                        0 if start_nanos[s] is None else start_nanos[s],
+                        depth[s],
+                        s,
+                    ),
+                )
             )
         }
 
@@ -473,11 +486,7 @@ class OTLPSpanAdapter:
         # Spans whose start time is missing or unreadable sort as time 0 in prerank. That is
         # fine as a tiebreak for ordering, but it is not evidence of which execution came
         # first, so it must never pick a causal parent.
-        untimed = {
-            sid
-            for sid, span in by_id.items()
-            if _parse_nanos(_first(span, "startTimeUnixNano", "start_time_unix_nano")) is None
-        }
+        untimed = {sid for sid, ns in start_nanos.items() if ns is None}
         # A unit-unknown start number orders spans that all carry one, with prerank's
         # tiebreaks; it says nothing about how they relate to a span with a readable time.
         channel = self._start_order_channel
@@ -546,13 +555,14 @@ class OTLPSpanAdapter:
         )
         unreadable = sum(
             1
-            for span in by_id.values()
-            if any(
-                value is not None and _parse_nanos(value) is None
-                for value in (
-                    _first(span, "startTimeUnixNano", "start_time_unix_nano"),
-                    _first(span, "endTimeUnixNano", "end_time_unix_nano"),
-                )
+            for sid, span in by_id.items()
+            if (
+                start_nanos[sid] is None
+                and _first(span, "startTimeUnixNano", "start_time_unix_nano") is not None
+            )
+            or (
+                (end_val := _first(span, "endTimeUnixNano", "end_time_unix_nano")) is not None
+                and _parse_nanos(end_val) is None
             )
         )
         if unreadable:
@@ -563,7 +573,7 @@ class OTLPSpanAdapter:
                 "unavailable.",
                 unreadable,
             )
-        dropped = [_unreadable_telemetry(attrs[sid]) for sid in by_id]
+        dropped = [found for sid in by_id if (found := _unreadable_telemetry(attrs[sid]))]
         for kind, code, consequence in (
             ("token count", "otlp.unreadable_token_count", "that count is reported as unavailable"),
             ("prompt or completion cost", "otlp.unreadable_component_cost",
@@ -764,11 +774,33 @@ class OTLPSpanAdapter:
         ``otlp.graph_parent_fallback``; a link to that parent changes neither.
         """
         node_index: dict[str, list[str]] = {}
+        node_lookup: dict[
+            str,
+            tuple[list[str], list[int], int, list[str], list[tuple[Any, int, str]]],
+        ] = {}
         if self._prefer_graph_parent:
             for sid in sorted(by_id, key=lambda s: prerank[s]):  # prerank order
                 nid = attrs[sid].get(_GRAPH_NODE_ID)
                 if nid is not None:
                     node_index.setdefault(str(nid), []).append(sid)
+            for key, group in node_index.items():
+                ranks = [prerank[c] for c in group]
+                untimed_count = sum(1 for c in group if c in untimed) if untimed else 0
+                if order_key:
+                    order_group = sorted(
+                        (c for c in group if c in order_key), key=order_key.__getitem__
+                    )
+                    order_keys = [order_key[c] for c in order_group]
+                else:
+                    order_group = []
+                    order_keys = []
+                node_lookup[key] = (
+                    group,
+                    ranks,
+                    untimed_count,
+                    order_group,
+                    order_keys,
+                )
 
         causes: dict[str, list[str]] = {sid: [] for sid in by_id}
         seen: set[tuple[str, str]] = set()
@@ -794,7 +826,14 @@ class OTLPSpanAdapter:
         resolutions: dict[str, str] = {}
         for sid in by_id:
             parent, parent_origin, resolution = self._resolve_parent(
-                sid, attrs, node_index, prerank, parent_span, untimed, order_key
+                sid,
+                attrs,
+                node_index,
+                prerank,
+                parent_span,
+                untimed,
+                order_key,
+                _node_lookup=node_lookup,
             )
             if resolution is not None:
                 resolutions[sid] = resolution
@@ -881,6 +920,12 @@ class OTLPSpanAdapter:
         parent_span: dict[str, str | None],
         untimed: set[str],
         order_key: dict[str, tuple[Any, int, str]],
+        *,
+        _node_lookup: dict[
+            str,
+            tuple[list[str], list[int], int, list[str], list[tuple[Any, int, str]]],
+        ]
+        | None = None,
     ) -> tuple[str | None, EdgeOrigin, str | None]:
         """The single chosen parent cause: the logical graph parent if resolvable, else the
         declared span parent.
@@ -909,7 +954,50 @@ class OTLPSpanAdapter:
         if self._prefer_graph_parent:
             pnode = attrs[sid].get(_GRAPH_NODE_PARENT_ID)
             if pnode is not None:
-                candidates = [c for c in node_index.get(str(pnode), []) if c != sid]
+                key = str(pnode)
+                if _node_lookup is not None:
+                    entry = _node_lookup.get(key)
+                    if entry is not None:
+                        group, ranks, untimed_count, order_group, order_keys = entry
+                        idx = bisect_left(ranks, prerank[sid])
+                        sid_in_group = idx < len(group) and group[idx] == sid
+                        n_candidates = len(group) - (1 if sid_in_group else 0)
+                        if n_candidates == 1:
+                            single = group[0] if not sid_in_group else group[1 - idx]
+                            return single, EdgeOrigin.GRAPH_PARENT, None
+                        if n_candidates > 1:
+                            untimed_cands = untimed_count - (
+                                1 if sid_in_group and sid in untimed else 0
+                            )
+                            timed = sid not in untimed and untimed_cands == 0
+                            if timed and idx > 0:
+                                return group[idx - 1], heuristic, "by_timing"
+                            ordered_cands = len(order_group) - (
+                                1 if sid_in_group and sid in order_key else 0
+                            )
+                            if (
+                                not timed
+                                and sid in order_key
+                                and ordered_cands == n_candidates
+                            ):
+                                oidx = bisect_left(order_keys, order_key[sid])
+                                if oidx > 0:
+                                    return order_group[oidx - 1], heuristic, "by_order"
+                    else:
+                        n_candidates = 0
+                    if pid is None:
+                        detail = (
+                            "no in-trace span"
+                            if not n_candidates
+                            else "multiple ambiguous spans"
+                        )
+                        raise ValueError(
+                            f"span {sid!r} declares graph.node.parent_id={pnode!r} that resolves to "
+                            f"{detail} and has no parentSpanId fallback; tracegraph will not "
+                            "fabricate a root for a declared logical parent it cannot honor"
+                        )
+                    return pid, EdgeOrigin.SPAN_PARENT_FALLBACK, "fallback"
+                candidates = [c for c in node_index.get(key, []) if c != sid]
                 if len(candidates) == 1:
                     return candidates[0], EdgeOrigin.GRAPH_PARENT, None
                 timed = sid not in untimed and not any(c in untimed for c in candidates)

@@ -180,3 +180,94 @@ def test_unbounded_two_step_does_not_rescan_a_high_fan_out_cause_per_endpoint():
         timings.append(median(samples))
     for before, after in zip(timings, timings[1:], strict=False):
         assert after <= 3 * before + 0.05, timings
+
+
+def test_otlp_loop_parent_resolution_scales_subquadratically():
+    # A two-node loop ("agent" <-> "tool") where every span declares graph.node.id and
+    # graph.node.parent_id. Before, _resolve_parent filtered and scanned all n/2 candidate
+    # spans linearly for each of the n spans (O(n²)).
+    from tracegraph.adapters import OTLPSpanAdapter
+
+    timings = []
+    for n in (1000, 2000, 4000):
+        spans = []
+        for i in range(n):
+            node = "agent" if i % 2 == 0 else "tool"
+            parent_node = "tool" if i % 2 == 0 else "agent"
+            attrs = [{"key": "graph.node.id", "value": {"stringValue": node}}]
+            if i > 0:
+                attrs.append(
+                    {"key": "graph.node.parent_id", "value": {"stringValue": parent_node}}
+                )
+            spans.append(
+                {
+                    "traceId": "t",
+                    "spanId": f"s{i:05d}",
+                    "parentSpanId": "root" if i > 0 else "",
+                    "name": node,
+                    "startTimeUnixNano": str(1_700_000_000_000_000_000 + (i + 1) * 1000),
+                    "endTimeUnixNano": str(1_700_000_000_000_000_000 + (i + 1) * 1000 + 500),
+                    "attributes": attrs,
+                }
+            )
+        spans[0]["spanId"] = "root"
+        doc = {"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}
+        adapter = OTLPSpanAdapter(doc)
+        samples = []
+        for _ in range(3):
+            start = time.perf_counter()
+            raw = adapter.ingest("t")
+            samples.append(time.perf_counter() - start)
+            assert len(raw.steps) == n
+        timings.append(median(samples))
+    for before, after in zip(timings, timings[1:], strict=False):
+        assert after <= 3 * before + 0.05, timings
+
+
+def test_langgraph_many_send_task_writes_scale_linearly():
+    # One fan-out checkpoint with n Send push tasks (1 failed + n-1 cancelled) and 50
+    # candidate nodes in versions_seen/channel_versions. Before per-checkpoint caching,
+    # _resolve_task_name recomputed _trigger_targets, _pull_task_ids, and _push_task_ids
+    # from scratch for every task in writes (O(n²)).
+    from types import SimpleNamespace
+    from langgraph.types import Send
+    from tracegraph.adapters import LangGraphCheckpointAdapter
+
+    cid = "1f1ae6ea-e7d8-6c28-8001-03afbf35e17c"
+    timings = []
+    for n in (150, 300, 600):
+        sends = [Send("worker", {"i": i}) for i in range(n)]
+        push_ids = LangGraphCheckpointAdapter._push_task_ids(
+            {"id": cid, "v": 4, "channel_values": {"__pregel_tasks": sends}}, "", 1
+        )
+        task_ids = list(push_ids)
+        writes = [(task_ids[0], "__error__", "RuntimeError('boom')")]
+        writes.extend((tid, "__error__", "CancelledError()") for tid in task_ids[1:])
+        cp = {
+            "id": cid,
+            "ts": "2026-01-01T00:00:00+00:00",
+            "v": 4,
+            "channel_values": {
+                "__pregel_tasks": sends,
+                **{f"branch:to:node_{k}": True for k in range(50)},
+            },
+            "channel_versions": {f"branch:to:node_{k}": 1 for k in range(50)},
+            "versions_seen": {f"node_{k}": {} for k in range(50)},
+        }
+        tup = SimpleNamespace(
+            config={"configurable": {"thread_id": "t", "checkpoint_ns": "", "checkpoint_id": cid}},
+            checkpoint=cp,
+            metadata={"source": "loop", "step": 1, "parents": {}},
+            parent_config=None,
+            pending_writes=writes,
+        )
+        saver = SimpleNamespace(list=lambda _cfg, t=tup: iter([t]))
+        samples = []
+        for _ in range(3):
+            start = time.perf_counter()
+            raw = LangGraphCheckpointAdapter(saver).ingest("t")
+            samples.append(time.perf_counter() - start)
+            assert len(raw.steps) == n + 1
+        timings.append(median(samples))
+    for before, after in zip(timings, timings[1:], strict=False):
+        assert after <= 3 * before + 0.05, timings

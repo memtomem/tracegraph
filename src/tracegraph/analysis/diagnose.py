@@ -243,11 +243,17 @@ def _shown(step: Step) -> DiagnosticStep:
     )
 
 
-def _cause_adjacency(nt: NormalizedTrace) -> dict[str, list[str]]:
+def _cause_adjacency(
+    nt: NormalizedTrace,
+    *,
+    steps: dict[str, Step] | None = None,
+    caused_by: list | None = None,
+) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
-    for edge in nt.edges_of(EdgeType.CAUSED_BY):
+    for edge in caused_by if caused_by is not None else nt.edges_of(EdgeType.CAUSED_BY):
         out.setdefault(edge.src, []).append(edge.dst)
-    steps = nt.steps_by_id()
+    if steps is None:
+        steps = nt.steps_by_id()
     for causes in out.values():
         causes.sort(key=lambda sid: (steps[sid].seq, sid))
     return out
@@ -255,21 +261,23 @@ def _cause_adjacency(nt: NormalizedTrace) -> dict[str, list[str]]:
 
 def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[DiagnosticStep]]:
     steps = nt.steps_by_id()
+    caused_by = nt.edges_of(EdgeType.CAUSED_BY)
     errors = {step.step_id for step in nt.steps if step.status is StepStatus.ERROR}
-    adjacency = _cause_adjacency(nt)
+    adjacency = _cause_adjacency(nt, steps=steps, caused_by=caused_by)
     explicit: dict[str, list[str]] = {}
     depth: dict[str, int] = {}
-    for edge in nt.edges_of(EdgeType.CAUSED_BY):
+    for edge in caused_by:
         if edge.origin in EXPLICIT_ORIGINS:
             explicit.setdefault(edge.src, []).append(edge.dst)
-    for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
+    steps_sorted = sorted(nt.steps, key=lambda s: (s.seq, s.step_id))
+    for step in steps_sorted:
         depth[step.step_id] = 1 + max((depth[c] for c in adjacency.get(step.step_id, [])), default=-1)
     # Candidate vs context in one pass: only explicit-origin paths establish
     # error ancestry. Containment or legacy/unknown paths cannot suppress candidates. cause.seq < effect.seq (validate_raw guarantees it), so
     # walking steps in ascending seq computes each node's flag after all its causes' —
     # O(V+E) total instead of a full ancestor BFS per error.
     has_error_ancestor: dict[str, bool] = {}
-    for step in sorted(nt.steps, key=lambda s: (s.seq, s.step_id)):
+    for step in steps_sorted:
         has_error_ancestor[step.step_id] = any(
             cause in errors or has_error_ancestor[cause]
             for cause in explicit.get(step.step_id, [])
@@ -282,7 +290,7 @@ def _failures(nt: NormalizedTrace) -> tuple[list[FailureFinding], list[Diagnosti
 
     # Edges indexed by effect: each finding then touches only its own nodes' edges
     # (output-proportional) instead of re-scanning the whole edge list per finding.
-    edges_by_effect = incoming_edges_by_step(nt.edges_of(EdgeType.CAUSED_BY))
+    edges_by_effect = incoming_edges_by_step(caused_by)
 
     findings: list[FailureFinding] = []
     for step_id in primary_ids:

@@ -77,9 +77,14 @@ def build_incident_memo(
     - Never misrepresents containment or unverified edges as causation.
     - Validates digest format and restricts patterns to known supported presets.
     """
-    if not SHA256_DIGEST.fullmatch(artifact_digest):
+    if not isinstance(artifact_digest, str) or not SHA256_DIGEST.fullmatch(artifact_digest):
+        shown = (
+            repr(artifact_digest)
+            if isinstance(artifact_digest, str)
+            else type(artifact_digest).__name__
+        )
         raise ValueError(
-            f"Invalid artifact_digest: {artifact_digest!r}; must match 'sha256:<64 lowercase hex digits>'"
+            f"Invalid artifact_digest: {shown}; must match 'sha256:<64 lowercase hex digits>'"
         )
 
     nt = _validated_copy(nt)

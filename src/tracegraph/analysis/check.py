@@ -297,7 +297,12 @@ def _satisfies_known(pred: StepPredicate, step: Step) -> bool:
     return True
 
 
-def _could_be_hidden(nt: NormalizedTrace, pattern: PathPattern) -> bool:
+def _could_be_hidden(
+    nt: NormalizedTrace,
+    pattern: PathPattern,
+    *,
+    _constrained_fields: list[set[str]] | None = None,
+) -> bool:
     """Whether resolving something unknown on this side could add a match.
 
     A step is relevant only when a predicate constrains a field that is unknown on it and the
@@ -307,7 +312,9 @@ def _could_be_hidden(nt: NormalizedTrace, pattern: PathPattern) -> bool:
     """
     if _gap_hides(nt, _MAY_HIDE_FAILURES):
         return True
-    constrained = _constrained(pattern)
+    constrained = (
+        _constrained_fields if _constrained_fields is not None else _constrained(pattern)
+    )
     for step in nt.steps:
         for pred, fields in zip(pattern.steps, constrained, strict=True):
             unknown = {field for field in fields if not _known(step, field)}
@@ -455,13 +462,21 @@ def _failures_rule(current: NormalizedTrace, baseline: NormalizedTrace) -> tuple
     return outcome, reasons, evidence
 
 
-def _pattern_matches(nt: NormalizedTrace, pattern: PathPattern) -> tuple[Counter, dict, int]:
+def _pattern_matches(
+    nt: NormalizedTrace,
+    pattern: PathPattern,
+    *,
+    _index: tuple[dict[str, Step], dict[str, list[str]]] | None = None,
+    _constrained_fields: list[set[str]] | None = None,
+) -> tuple[Counter, dict, int]:
     """Confirmed matches per signature, their step ids, and confirmed matches whose signature
     is unknown. A match is confirmed when no field a predicate constrains is unknown on the step
     it binds: a substituted value (a defaulted CHAIN) can satisfy a predicate it should not."""
-    index = build_index(nt)
+    index = _index if _index is not None else build_index(nt)
     steps = index[0]
-    constrained = _constrained(pattern)
+    constrained = (
+        _constrained_fields if _constrained_fields is not None else _constrained(pattern)
+    )
     by_signature: Counter = Counter()
     ids: dict[tuple | None, list[list[str]]] = {}
     unknown_signature = 0
@@ -483,12 +498,26 @@ def _pattern_matches(nt: NormalizedTrace, pattern: PathPattern) -> tuple[Counter
 
 
 def _pattern_rule(
-    current: NormalizedTrace, baseline: NormalizedTrace, pattern: PathPattern
+    current: NormalizedTrace,
+    baseline: NormalizedTrace,
+    pattern: PathPattern,
+    *,
+    _cur_index: tuple[dict[str, Step], dict[str, list[str]]] | None = None,
+    _base_index: tuple[dict[str, Step], dict[str, list[str]]] | None = None,
 ) -> tuple[Outcome, list[str], list[PatternEvidence]]:
-    cur, cur_ids, cur_unknown = _pattern_matches(current, pattern)
-    base, _, base_unknown = _pattern_matches(baseline, pattern)
-    cur_open = cur_unknown > 0 or _could_be_hidden(current, pattern)
-    base_open = base_unknown > 0 or _could_be_hidden(baseline, pattern)
+    constrained = _constrained(pattern)
+    cur, cur_ids, cur_unknown = _pattern_matches(
+        current, pattern, _index=_cur_index, _constrained_fields=constrained
+    )
+    base, _, base_unknown = _pattern_matches(
+        baseline, pattern, _index=_base_index, _constrained_fields=constrained
+    )
+    cur_open = cur_unknown > 0 or _could_be_hidden(
+        current, pattern, _constrained_fields=constrained
+    )
+    base_open = base_unknown > 0 or _could_be_hidden(
+        baseline, pattern, _constrained_fields=constrained
+    )
     increased = sorted((key for key in cur if cur[key] > base[key]), key=lambda key: json.dumps(key))
     total_increased = sum(cur.values()) + cur_unknown > sum(base.values()) + base_unknown
     outcome = _decide(bool(increased) or total_increased, base_open, cur_open)
@@ -552,6 +581,8 @@ def evaluate(current: NormalizedTrace, baseline: NormalizedTrace, rules: list[Ru
     contexts = (_context(current), _context(baseline))
     common = _common_reasons(current, baseline)
     langgraph = "langgraph" in (current.trace.source_kind, baseline.trace.source_kind)
+    cur_index: tuple[dict[str, Step], dict[str, list[str]]] | None = None
+    base_index: tuple[dict[str, Step], dict[str, list[str]]] | None = None
     results: list[RuleResult] = []
     for spec in rules:
         params = dict(spec.params)
@@ -569,7 +600,16 @@ def evaluate(current: NormalizedTrace, baseline: NormalizedTrace, rules: list[Ru
             if reasons:
                 outcome = "INSUFFICIENT_EVIDENCE"
             else:
-                outcome, reasons, evidence = _pattern_rule(current, baseline, pattern)
+                if cur_index is None:
+                    cur_index = build_index(current)
+                    base_index = build_index(baseline)
+                outcome, reasons, evidence = _pattern_rule(
+                    current,
+                    baseline,
+                    pattern,
+                    _cur_index=cur_index,
+                    _base_index=base_index,
+                )
         else:
             same_projection = contexts[0].projection_rule == contexts[1].projection_rule
             outcome, reasons, evidence = _topology_rule(
