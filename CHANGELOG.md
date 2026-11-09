@@ -8,6 +8,22 @@ explicitly.
 
 ## Unreleased
 
+### Changed
+
+- **A LangGraph trace read without `--graph` now says that a stopped run may go undetected**
+  (#195). Tasks scheduled at the newest root checkpoint that recorded nothing are listed only
+  when `ingest --graph` names the compiled graph. Such tasks come from stops like the recursion
+  limit, a killed process, or an `interrupt_before`/`interrupt_after` breakpoint. Without a
+  graph, such a run can look like a finished one: a root-graph recursion-limit stop and an
+  `interrupt_before` stop both gave the same trace status and the same `analyze` warnings as
+  the finished run. Now:
+  - `ingest` without `--graph` prints a `note:` to stderr naming `--graph`.
+  - `analyze` adds one warning after the existing LangGraph warning, for each of the current
+    run and the baseline whose trace records no schedule graph.
+
+  The artifact bytes do not change, and the report schema version is unchanged. Only the
+  report's `warnings` list gains those entries.
+
 ### Fixed
 
 - **An output path that is the file stdin reads from is refused** (#193). Commands already

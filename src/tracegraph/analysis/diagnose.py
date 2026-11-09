@@ -53,6 +53,14 @@ LANGGRAPH_FIDELITY_WARNING = (
     "LangGraph failure capture covers the configured error channel and task pending writes "
     "for recognized checkpoint layouts; absence of an observed failure does not prove execution success."
 )
+#: Added next to the warning above when a LangGraph trace records no schedule graph, i.e. it was
+#: ingested without ``--graph`` (or by a build that had no such option).
+LANGGRAPH_NO_SCHEDULE_GRAPH_WARNING = (
+    "LangGraph tasks scheduled at the newest root checkpoint that recorded nothing (as after the "
+    "recursion limit, a killed process, or an interrupt_before/interrupt_after breakpoint) are "
+    "listed only by `ingest --graph`, and this trace records no graph, so a run stopped that way "
+    "can read like a finished one."
+)
 LINKS_PRESERVED_FIDELITY_WARNING = (
     "Link preservation covers valid in-trace links only; foreign or unresolved links are omitted."
 )
@@ -725,6 +733,10 @@ def analyze(nt: NormalizedTrace, *, baseline: NormalizedTrace | None = None) -> 
             # is therefore still not evidence of success, and nothing in the artifact says
             # which case applies — so the disclosure cannot be made conditional.
             warnings.append(f"{label}: {LANGGRAPH_FIDELITY_WARNING}")
+            if trace.trace.schedule_graph is None:
+                # The scheduled-task check needs the compiled graph; without one, a stopped run
+                # and a finished one produce the same trace, so say which case this is.
+                warnings.append(f"{label}: {LANGGRAPH_NO_SCHEDULE_GRAPH_WARNING}")
         if trace.trace.links_preserved:
             # Mid-sentence after the label, so the shared sentence starts in lower case here.
             warnings.append(f"{label}: {_clause(LINKS_PRESERVED_FIDELITY_WARNING)}")
