@@ -6,6 +6,25 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Fixed
+
+- **An output path that is the file stdin reads from is refused** (#193). Commands already
+  refuse an output that is one of their input paths, but two ways of naming stdin slipped past
+  that check, and the input was replaced with exit 0:
+  - An input given as `-` has no path. This affected `analyze`, `check`, `ingest-otlp` and
+    `ingest-phoenix`, e.g. `tracegraph analyze - --json-out input.json < input.json`.
+  - A descriptor path such as `/dev/stdin` or `/dev/fd/0`. This affected those four commands
+    and also `export-incident-memo`, `summarize` and `export-review-candidates`. On macOS that
+    path's `stat()` reports a virtual device, so `samefile` never matched the redirected file.
+
+  Each input is now also compared by the device and inode of the file its descriptor reaches,
+  and for `-` by the file stdin is redirected from. This also catches a hardlink or a symlink
+  to the input. The command exits 2 with the usual "must not overwrite" error and leaves the
+  input unchanged. A pipe or a terminal has no file to compare, so piped input behaves as
+  before.
+
 ## 0.9.1 - 2026-11-04
 
 ### Fixed
