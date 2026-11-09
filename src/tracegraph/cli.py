@@ -1317,6 +1317,13 @@ _REDACT_ERRORS_HELP = (
     "Leave error messages out of the artifact: a failed step keeps its error status and "
     "lists its message as unknown. Step names are still recorded as given."
 )
+#: Printed by `ingest` without --graph: the artifact may not tell a stopped run from a finished one.
+_NO_GRAPH_NOTE = (
+    "no --graph given, so tasks scheduled at the newest root checkpoint that recorded nothing "
+    "(as after the recursion limit, a killed process, or an interrupt_before/interrupt_after "
+    "breakpoint) are not listed, and a run stopped that way can read like a finished one; pass "
+    "--graph path/to/file.py:attr to list them."
+)
 
 
 @app.command()
@@ -1364,6 +1371,8 @@ def ingest(
     except (OSError, ValueError, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest checkpoint: {_load_reason(exc)}") from exc
     console.print(f"[green]ingested {len(nt.steps)} steps[/] → {escape(str(target))}")
+    if graph is None:
+        err_console.print(f"[yellow]note:[/] {escape(_NO_GRAPH_NOTE)}")
 
 
 @app.command(name="ingest-otlp")

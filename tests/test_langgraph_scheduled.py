@@ -1036,6 +1036,50 @@ def test_cli_ingest_without_graph_is_unchanged(killed_run, tmp_path):
     assert payload["trace"]["trace"]["trace_id"] == "k"
 
 
+def test_without_a_graph_ingest_and_analyze_say_a_stopped_run_is_not_detected(killed_run, tmp_path):
+    # Without --graph, a run killed mid-step and a finished one produce the same kind of trace,
+    # so ingest prints a note and analyze adds a warning naming --graph. Neither appears once
+    # the graph is given, and the artifact bytes do not change either way.
+    from tracegraph.analysis.diagnose import (
+        LANGGRAPH_FIDELITY_WARNING,
+        LANGGRAPH_NO_SCHEDULE_GRAPH_WARNING,
+        analyze,
+    )
+
+    module, db = killed_run
+    plain, graphed = tmp_path / "plain.json", tmp_path / "graphed.json"
+    res = runner.invoke(cli_app, ["ingest", "--sqlite", str(db), "-t", "k", "-o", str(plain)])
+    assert res.exit_code == 0, res.output
+    assert "note: no --graph given" in " ".join(res.stderr.split())
+    assert "--graph path/to/file.py:attr" in " ".join(res.stderr.split())
+    res = runner.invoke(
+        cli_app,
+        ["ingest", "--sqlite", str(db), "-t", "k", "-o", str(graphed), "--graph", f"{module}:graph"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "no --graph" not in res.stderr
+
+    no_graph = f"{LANGGRAPH_NO_SCHEDULE_GRAPH_WARNING}"
+    for path, expected in ((plain, True), (graphed, False)):
+        report = tmp_path / f"{path.stem}.report.json"
+        res = runner.invoke(
+            cli_app, ["analyze", str(path), "--baseline", str(plain), "--json-out", str(report)]
+        )
+        assert report.exists(), res.output
+        warnings = json.loads(report.read_text())["warnings"]
+        assert f"current: {LANGGRAPH_FIDELITY_WARNING}" in warnings
+        assert (f"current: {no_graph}" in warnings) is expected
+        assert f"baseline: {no_graph}" in warnings  # the baseline is the graphless ingest
+
+    # Only LangGraph traces carry it.
+    otlp = Path(__file__).parent / "fixtures" / "syncmill" / "route-success.otlp.json"
+    from tracegraph.adapters import OTLPSpanAdapter
+
+    adapter = OTLPSpanAdapter.from_file(otlp)
+    other = normalize(adapter.ingest(adapter.discover()[0]))
+    assert not any(no_graph in w for w in analyze(other).warnings)
+
+
 def test_scheduled_label_escapes_the_name_and_keeps_the_lossy_suffix():
     step = Step(
         step_id="s",

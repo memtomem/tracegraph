@@ -489,6 +489,9 @@ LangGraph 노드가 `interrupt()`로 멈춘 뒤 resume도 결과도 기록되지
 checkpoint만으로는 아직 멈춰 있는지 알 수 없으므로 step을 만들지 않고 ingest 때 공시합니다.
 recursion limit, 프로세스 종료, `interrupt_before`/`interrupt_after` breakpoint처럼 예약된
 task가 아무것도 기록하지 않은 경우는 그래프 없이는 보고되지 않습니다(아래 scheduled step).
+그래프 없이 수집하면 `ingest`가 stderr에 이 사실을 알리는 `note:`를 출력합니다. `analyze`도
+그래프를 기록하지 않은 LangGraph trace에 대해 같은 내용을 경고로 덧붙입니다. 이렇게 멈춘
+실행은 끝까지 실행된 실행과 같은 모습으로 읽힐 수 있기 때문입니다.
 interrupt step이 있는 artifact는 `schema_version` 5를 선언하므로 0.3.1 이하 버전은 이 파일을
 읽지 않습니다.
 

@@ -392,9 +392,11 @@ Known limits:
 - A LangGraph task that was scheduled but recorded nothing (a run stopped by the recursion
   limit, killed, or held at an `interrupt_before`/`interrupt_after` breakpoint) leaves no
   write. It is reported only when `ingest --graph` names the compiled graph (below); without
-  it such a run reads `ok` unless some other step recorded an error. Trace status stays `ok`
-  either way. A task paused by `interrupt()` is reported without a graph. Both are reported
-  only at the root graph: the subgraph node is named, not the node inside it.
+  it such a run reads `ok` unless some other step recorded an error. Without a graph, `ingest`
+  prints a note saying so, and `analyze` adds a warning for a LangGraph trace that records no
+  graph. Trace status stays `ok` either way. A task paused by `interrupt()` is reported
+  without a graph. Both are reported only at the root graph: the subgraph node is named, not
+  the node inside it.
 - Trace status reports whether a recorded step failed, not whether the run completed: a
   paused or stopped run reads `ok` unless a step failed. Next to it, `analyze` (as a warning,
   also in `--json-out`) and `export-incident-memo` show the recorded task markers:
