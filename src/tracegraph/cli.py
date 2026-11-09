@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -894,6 +895,9 @@ def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
 def _resolves_to(path: Path, target: Path | None) -> bool:
     if target is None:
         return False
+    ident = _file_identity(path)
+    if ident is not None and ident == _file_identity(target):
+        return True
     try:
         return path.resolve() == target or (
             path.exists() and target.exists() and path.samefile(target)
@@ -1384,7 +1388,7 @@ def ingest_otlp(
     except (*_LOAD_ERRORS, KeyError) as exc:
         raise typer.BadParameter(f"cannot ingest OTLP export {file}: {_load_reason(exc)}") from exc
     target = out or artifact.default_path(trace)
-    _distinct_paths([Path(file)] if file != "-" else [], [target])
+    _distinct_paths([Path(file)] if file != "-" else [], [target], stdin=file == "-")
     _save_ingested(nt, target, explicit=out is not None)
     console.print(f"[green]ingested {len(nt.steps)} spans[/] → {escape(str(target))}")
 
@@ -1416,7 +1420,7 @@ def ingest_phoenix(
     if is_artifact:
         _require_selected_trace(nt, file, trace, "--trace")
     target = out or artifact.default_path(nt.trace.trace_id)
-    _distinct_paths([Path(file)] if file != "-" else [], [target])
+    _distinct_paths([Path(file)] if file != "-" else [], [target], stdin=file == "-")
     _save_ingested(nt, target, explicit=out is not None)
     console.print(f"[green]ingested {len(nt.steps)} Phoenix spans[/] → {escape(str(target))}")
 
@@ -1433,7 +1437,11 @@ def analyze_command(
     """Automatically diagnose failures, retries, telemetry, and an optional baseline."""
     if limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer")
-    _distinct_paths([Path(p) for p in (source, baseline) if p and p != "-"], [json_out] if json_out else [])
+    _distinct_paths(
+        [Path(p) for p in (source, baseline) if p and p != "-"],
+        [json_out] if json_out else [],
+        stdin="-" in (source, baseline),
+    )
     loaded = _load_analysis_input(source, trace)
     nt = loaded.trace
     baseline_nt = (
@@ -1500,7 +1508,11 @@ def check_command(
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--rule") from exc
     try:
-        _distinct_paths([Path(p) for p in (current, baseline) if p != "-"], [json_out] if json_out else [])
+        _distinct_paths(
+            [Path(p) for p in (current, baseline) if p != "-"],
+            [json_out] if json_out else [],
+            stdin="-" in (current, baseline),
+        )
     except (OSError, RuntimeError) as exc:
         # Resolving a path can fail on its own (a symlink loop, a name too long to stat); that
         # is a usage error, not a crash a gate would read as FAIL.
@@ -2054,8 +2066,56 @@ def main() -> None:
     app()
 
 
-def _distinct_paths(inputs: list[Path], outputs: list[Path]) -> None:
+def _stdin_file() -> os.stat_result | None:
+    """The regular file stdin is redirected from, or ``None`` for a pipe, a terminal, or a
+    stream with no descriptor (``io.UnsupportedOperation`` is both an ``OSError`` and a
+    ``ValueError``)."""
+    try:
+        st = os.fstat(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        return None
+    return st if stat.S_ISREG(st.st_mode) else None
+
+
+_FD_ALIAS = re.compile(r"/dev/fd/(\d+)")
+
+
+def _file_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the regular file a read of ``path`` would reach, else ``None``.
+
+    Metadata only: nothing is opened, since opening a FIFO wakes its writer and opening a
+    terminal can make it the controlling one. A path that resolves to ``/dev/fd/N`` (which
+    ``/dev/stdin`` and symlinks to it do on macOS) is a virtual node whose ``stat()`` reports a
+    device unrelated to the file behind it, so descriptor N, already open in this process, is
+    ``fstat``'ed instead. On Linux ``/proc/self/fd/N`` resolves to the file itself. A path that
+    cannot be stat'ed is ``None``: the caller's own checks report it.
+    """
+    try:
+        real = os.path.realpath(path)
+        alias = _FD_ALIAS.fullmatch(real)
+        st = os.fstat(int(alias.group(1))) if alias else os.stat(real)
+    except (OSError, ValueError, OverflowError):  # a missing path, a NUL byte, a huge fd number
+        return None
+    return (st.st_dev, st.st_ino) if stat.S_ISREG(st.st_mode) else None
+
+
+def _distinct_paths(inputs: list[Path], outputs: list[Path], *, stdin: bool = False) -> None:
+    """Refuse an output that is an input or an earlier output.
+
+    Paths are compared resolved and with ``samefile`` first, so their errors keep their
+    precedence, and then by the identity of the file each one reaches
+    (:func:`_file_identity`), which a descriptor alias such as ``/dev/stdin`` needs. With
+    ``stdin``, one input was read from ``-``: it has no path, so when stdin is redirected from a
+    regular file that file joins the inputs by device and inode. Either way a hardlink or a
+    symlink to an input is caught too.
+    """
+    if not outputs:
+        return
     seen = list(inputs)
+    taken = {ident for path in inputs if (ident := _file_identity(path)) is not None}
+    stdin_file = _stdin_file() if stdin else None
+    if stdin_file is not None:
+        taken.add((stdin_file.st_dev, stdin_file.st_ino))
     try:
         for output in outputs:
             for previous in seen:
@@ -2063,7 +2123,12 @@ def _distinct_paths(inputs: list[Path], outputs: list[Path]) -> None:
                     output.exists() and previous.exists() and output.samefile(previous)
                 ):
                     raise typer.BadParameter("output must not overwrite an input or another output")
+            ident = _file_identity(output)
+            if ident is not None and ident in taken:
+                raise typer.BadParameter("output must not overwrite an input or another output")
             seen.append(output)
+            if ident is not None:
+                taken.add(ident)
     except (OSError, RuntimeError) as exc:
         # Resolving a path can fail on its own (a symlink loop, a name too long to stat); that
         # is a usage error, not a crash a gate would read as FAIL.

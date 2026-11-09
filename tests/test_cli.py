@@ -3250,3 +3250,133 @@ def test_export_review_candidates_strict_refusal_never_calls_the_writer(tmp_path
     assert res.exit_code == 2, res.output
     assert "could not be loaded as tracegraph artifacts" in _panel_text(res.stderr)
     assert not out.exists() and not out.parent.exists()
+
+
+_STDIN_ROOT = Path(__file__).parent / "fixtures"
+
+
+def _run_with_stdin(args, stdin_path):
+    """The real entry point with stdin redirected from a file, as ``cmd - < file`` does.
+
+    CliRunner's stdin is an in-memory stream with no descriptor, so it cannot show this.
+    """
+    with open(stdin_path, "rb") as stdin:
+        return subprocess.run(
+            [sys.executable, "-c", "from tracegraph.cli import main; main()", *map(str, args)],
+            stdin=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=120,
+        )
+
+
+def _stdin_cases(tmp_path):
+    art = tmp_path / "artifact.json"
+    _investigation_artifact(art, count=1)
+    other = tmp_path / "other.json"
+    _investigation_artifact(other, count=1)
+    otlp = tmp_path / "export.otlp.json"
+    otlp.write_bytes((_STDIN_ROOT / "syncmill" / "route-success.otlp.json").read_bytes())
+    phoenix = tmp_path / "export.phoenix.json"
+    phoenix.write_text(json.dumps(_phoenix_export()))
+    return {
+        "analyze": (art, lambda out: ["analyze", "-", "--json-out", out]),
+        "analyze --baseline -": (art, lambda out: ["analyze", other, "--baseline", "-", "--json-out", out]),
+        "check": (art, lambda out: ["check", "-", "--baseline", other, "--rule", "failures-not-increased", "--json-out", out]),
+        "ingest-otlp": (otlp, lambda out: ["ingest-otlp", "--file", "-", "--out", out]),
+        "ingest-phoenix": (phoenix, lambda out: ["ingest-phoenix", "--file", "-", "--out", out]),
+    }
+
+
+@pytest.mark.parametrize(
+    "command", ["analyze", "analyze --baseline -", "check", "ingest-otlp", "ingest-phoenix"]
+)
+@pytest.mark.parametrize("alias", ["same", "hardlink", "symlink"])
+def test_output_must_not_overwrite_the_file_stdin_reads(tmp_path, command, alias):
+    source, args_of = _stdin_cases(tmp_path)[command]
+    before = source.read_bytes()
+    out = source
+    if alias == "hardlink":
+        out = tmp_path / "hardlink.json"
+        out.hardlink_to(source)
+    elif alias == "symlink":
+        out = tmp_path / "symlink.json"
+        out.symlink_to(source)
+    res = _run_with_stdin(args_of(out), source)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "output must not overwrite an input" in _panel_text(res.stderr)
+    assert source.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "command", ["analyze", "analyze --baseline -", "check", "ingest-otlp", "ingest-phoenix"]
+)
+def test_a_file_on_stdin_still_writes_a_different_output(tmp_path, command):
+    source, args_of = _stdin_cases(tmp_path)[command]
+    out = tmp_path / "written.json"
+    res = _run_with_stdin(args_of(out), source)
+    assert res.returncode in (0, 1, 3), (res.stdout, res.stderr)  # check may FAIL or be INSUFFICIENT
+    assert out.exists()
+
+
+def _alias_cases(tmp_path):
+    art = tmp_path / "artifact.json"
+    _investigation_artifact(art, count=1)
+    base = tmp_path / "baseline.json"
+    _investigation_artifact(base, count=1)
+    otlp = tmp_path / "export.otlp.json"
+    otlp.write_bytes((_STDIN_ROOT / "syncmill" / "route-success.otlp.json").read_bytes())
+    phoenix = tmp_path / "export.phoenix.json"
+    phoenix.write_text(json.dumps(_phoenix_export()))
+    return {
+        "analyze": (art, lambda src: ["analyze", src, "--json-out", art]),
+        "check": (art, lambda src: ["check", src, "--baseline", base, "--rule", "failures-not-increased", "--json-out", art]),
+        "ingest-otlp": (otlp, lambda src: ["ingest-otlp", "--file", src, "--out", otlp]),
+        "ingest-phoenix": (phoenix, lambda src: ["ingest-phoenix", "--file", src, "--out", phoenix]),
+        "export-incident-memo": (art, lambda src: ["export-incident-memo", src, "--out", art]),
+        "summarize": (art, lambda src: ["summarize", "error", src, "--out", art]),
+        "export-review-candidates": (art, lambda src: ["export-review-candidates", "tool-retry-failure", src, "--out", art]),
+    }
+
+
+@pytest.mark.parametrize("alias", ["/dev/stdin", "/dev/fd/0"])
+@pytest.mark.parametrize(
+    "command",
+    ["analyze", "check", "ingest-otlp", "ingest-phoenix", "export-incident-memo", "summarize",
+     "export-review-candidates"],
+)
+def test_output_must_not_overwrite_the_file_behind_a_descriptor_alias(tmp_path, command, alias):
+    # On macOS stat("/dev/stdin") reports a virtual device, so neither resolve() nor samefile()
+    # matches the redirected file; the guard compares the file the open descriptor reaches.
+    if not Path(alias).exists():
+        pytest.skip(f"{alias} is not available here")
+    source, args_of = _alias_cases(tmp_path)[command]
+    before = source.read_bytes()
+    res = _run_with_stdin(args_of(alias), source)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "must not overwrite" in _panel_text(res.stderr)
+    assert source.read_bytes() == before
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+@pytest.mark.parametrize("with_output", [False, True])
+def test_the_overwrite_guard_does_not_open_a_fifo_input(tmp_path, with_output):
+    # Opening a FIFO wakes a writer waiting on it; closing it again then breaks the writer's
+    # pipe and the real read sees EOF. The guard must work from metadata alone.
+    art = tmp_path / "artifact.json"
+    _investigation_artifact(art, count=1)
+    payload = art.read_bytes()
+    for attempt in range(3):
+        fifo = tmp_path / f"input-{attempt}.fifo"
+        os.mkfifo(fifo)
+        writer = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys; open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())", str(fifo)],
+            stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        writer.stdin.write(payload)
+        writer.stdin.close()
+        time.sleep(0.2)  # let the writer block in open() before the CLI starts
+        args = ["analyze", fifo] + (["--json-out", tmp_path / f"report-{attempt}.json"] if with_output else [])
+        res = _run_with_stdin(args, os.devnull)
+        writer_err = writer.stderr.read().decode()
+        assert writer.wait(timeout=30) == 0, writer_err
+        assert res.returncode == 0, (attempt, res.stdout, res.stderr)
