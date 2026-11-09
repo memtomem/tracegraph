@@ -574,6 +574,9 @@ def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
     valid_bytes = valid.read_bytes()
     hardlink = tmp_path / "hardlink.json"
     hardlink.hardlink_to(valid)
+    otlp = tmp_path / "export.otlp.json"
+    otlp.write_bytes((ROOT / "tests" / "fixtures" / "syncmill" / "route-success.otlp.json").read_bytes())
+    otlp_bytes = otlp.read_bytes()
     runner = CliRunner()
 
     # Before 3.13, Path.resolve() raises RuntimeError on a symlink loop, and the path guards
@@ -581,7 +584,8 @@ def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
     # written by replacing the dangling link. Either way: no traceback, and no input touched.
     for args in (
         ["analyze", str(valid), "--json-out", str(loop)],
-        ["ingest-otlp", "--file", str(valid), "--out", str(loop)],
+        # A real OTLP export, so the command gets past parsing to its path guard.
+        ["ingest-otlp", "--file", str(otlp), "--out", str(loop)],
         ["export-incident-memo", str(valid), "--out", str(loop)],
         ["summarize", "error", str(valid), "--out", str(loop)],
         ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(loop)],
@@ -596,6 +600,7 @@ def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
             assert res.exit_code in (0, 2), (args, res.output)
         assert res.exception is None or isinstance(res.exception, SystemExit), (args, res.exception)
         assert valid.read_bytes() == valid_bytes, args
+        assert otlp.read_bytes() == otlp_bytes, args
 
     for args in (
         ["summarize", "error", str(valid), "--out", str(hardlink)],
@@ -639,9 +644,42 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     with pytest.raises(ValueError, match="deadline"):
         ingest_snapshot(db, "t", error_channel="error", timeout=float("nan"))
 
-    # If the deadline expires after _check_json_depth, during saver.list(), it still reports
-    # "SQLite snapshot deadline exceeded".
+    # The deadline also bounds the adapter's own queries (saver.list, get_state), not only
+    # _check_json_depth. Every connection records its progress-handler calls, and the handler
+    # runs on every VM step instead of every 10 000, so even this small fixture's queries
+    # reach it.
     fixture = ROOT / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
+    handler_calls: list[tuple[bool, int]] = []
+
+    class RecordingConnection(sqlite3.Connection):
+        def set_progress_handler(self, handler, n):
+            handler_calls.append((handler is not None, n))
+            super().set_progress_handler(handler, 1 if handler is not None else n)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: real_connect(*a, **{"factory": RecordingConnection, **kw})
+    )
+    adapter_finished: list[bool] = []
+    real_ingest = sqlite_snapshot.LangGraphCheckpointAdapter.ingest
+
+    def spy_ingest(self, thread):
+        raw = real_ingest(self, thread)
+        adapter_finished.append(True)
+        return raw
+
+    monkeypatch.setattr(sqlite_snapshot.LangGraphCheckpointAdapter, "ingest", spy_ingest)
+    installed_then_removed = [(True, 10_000), (False, 0)] * 2  # _check_json_depth, then ingest
+
+    # Within the deadline: the read completes and both handlers are removed afterwards.
+    assert ingest_snapshot(fixture, "t", error_channel="error").steps
+    assert adapter_finished == [True]
+    assert handler_calls == installed_then_removed
+
+    # Expiring right after _check_json_depth interrupts the adapter's first query (it never
+    # returns), reports the deadline, and still removes the handler.
+    adapter_finished.clear()
+    handler_calls.clear()
     real_check = sqlite_snapshot._check_json_depth
 
     def expire_after_check(c, thread, deadline):
@@ -653,6 +691,8 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     monkeypatch.setattr(sqlite_snapshot, "_check_json_depth", expire_after_check)
     with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded"):
         ingest_snapshot(fixture, "t", error_channel="error")
+    assert adapter_finished == []
+    assert handler_calls == installed_then_removed
 
 
 def test_build_incident_memo_rejects_non_string_digest():

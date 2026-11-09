@@ -224,7 +224,7 @@ def test_otlp_loop_parent_resolution_scales_subquadratically():
         assert after <= 3 * before + 0.05, timings
 
 
-def test_langgraph_many_send_task_writes_scale_linearly():
+def test_langgraph_many_send_task_writes_scale_linearly(monkeypatch):
     # One fan-out checkpoint with n Send push tasks (1 failed + n-1 cancelled) and 50
     # candidate nodes in versions_seen/channel_versions. Before per-checkpoint caching,
     # _resolve_task_name recomputed _trigger_targets, _pull_task_ids, and _push_task_ids
@@ -235,6 +235,20 @@ def test_langgraph_many_send_task_writes_scale_linearly():
 
     cid = "1f1ae6ea-e7d8-6c28-8001-03afbf35e17c"
     timings = []
+    # The timing bound alone does not reject the uncached code at these sizes, so the
+    # per-checkpoint helpers are also counted: uncached, both grow with n.
+    helper_calls: dict[int, dict[str, int]] = {}
+    real_targets = LangGraphCheckpointAdapter._trigger_targets
+    real_push = LangGraphCheckpointAdapter._push_task_ids
+    counts = {"_trigger_targets": 0, "_push_task_ids": 0}
+
+    def counted_targets(cp):
+        counts["_trigger_targets"] += 1
+        return real_targets(cp)
+
+    def counted_push(cls, cp, ns, md_step):
+        counts["_push_task_ids"] += 1
+        return real_push(cp, ns, md_step)
     for n in (150, 300, 600):
         sends = [Send("worker", {"i": i}) for i in range(n)]
         push_ids = LangGraphCheckpointAdapter._push_task_ids(
@@ -262,6 +276,12 @@ def test_langgraph_many_send_task_writes_scale_linearly():
             pending_writes=writes,
         )
         saver = SimpleNamespace(list=lambda _cfg, t=tup: iter([t]))
+        with monkeypatch.context() as m:
+            m.setattr(LangGraphCheckpointAdapter, "_trigger_targets", staticmethod(counted_targets))
+            m.setattr(LangGraphCheckpointAdapter, "_push_task_ids", classmethod(counted_push))
+            counts.update(dict.fromkeys(counts, 0))
+            assert len(LangGraphCheckpointAdapter(saver).ingest("t").steps) == n + 1
+            helper_calls[n] = dict(counts)
         samples = []
         for _ in range(3):
             start = time.perf_counter()
@@ -269,5 +289,6 @@ def test_langgraph_many_send_task_writes_scale_linearly():
             samples.append(time.perf_counter() - start)
             assert len(raw.steps) == n + 1
         timings.append(median(samples))
+    assert len({tuple(c.values()) for c in helper_calls.values()}) == 1, helper_calls
     for before, after in zip(timings, timings[1:], strict=False):
         assert after <= 3 * before + 0.05, timings
