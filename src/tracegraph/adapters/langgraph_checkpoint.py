@@ -1025,12 +1025,12 @@ class LangGraphCheckpointAdapter:
             if channel == _ERROR_SOURCE_NODE and isinstance(value, str) and value:
                 return value
         if _cache is None:
-            targets = cls._trigger_targets(cp)
-            for name in cls._candidate_names(cp, targets=targets):
-                if task_id in cls._pull_task_ids(cp, ns, md_step, name, targets=targets):
+            uncached = cls._trigger_targets(cp)
+            for name in cls._candidate_names(cp, targets=uncached):
+                if task_id in cls._pull_task_ids(cp, ns, md_step, name, targets=uncached):
                     return name
             return cls._push_task_ids(cp, ns, md_step).get(task_id)
-        targets = _cache.get("targets")
+        targets: dict[str, set[str]] | None = _cache.get("targets")
         if targets is None:
             targets = _cache["targets"] = cls._trigger_targets(cp)
             _cache["candidates"] = cls._candidate_names(cp, targets=targets)

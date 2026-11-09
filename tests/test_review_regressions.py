@@ -1,10 +1,12 @@
 """Reproductions for the September implementation review, F01–F09."""
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -567,24 +569,42 @@ def test_phoenix_unrepresentable_score_is_unavailable():
 
 def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
     loop = tmp_path / "loop.json"
-    loop.symlink_to(loop)
     valid = tmp_path / "valid.json"
     artifact.save(trace(), valid)
+    valid_bytes = valid.read_bytes()
     hardlink = tmp_path / "hardlink.json"
     hardlink.hardlink_to(valid)
     runner = CliRunner()
+
+    # Before 3.13, Path.resolve() raises RuntimeError on a symlink loop, and the path guards
+    # turn that into a usage error. From 3.13 it returns the path unchanged, so the output is
+    # written by replacing the dangling link. Either way: no traceback, and no input touched.
     for args in (
         ["analyze", str(valid), "--json-out", str(loop)],
         ["ingest-otlp", "--file", str(valid), "--out", str(loop)],
         ["export-incident-memo", str(valid), "--out", str(loop)],
         ["summarize", "error", str(valid), "--out", str(loop)],
         ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(loop)],
+    ):
+        loop.unlink(missing_ok=True)
+        loop.symlink_to(loop)
+        res = runner.invoke(app, list(args))
+        if sys.version_info < (3, 13):
+            assert res.exit_code == 2, (args, res.output)
+            assert loop.is_symlink(), args
+        else:
+            assert res.exit_code in (0, 2), (args, res.output)
+        assert res.exception is None or isinstance(res.exception, SystemExit), (args, res.exception)
+        assert valid.read_bytes() == valid_bytes, args
+
+    for args in (
         ["summarize", "error", str(valid), "--out", str(hardlink)],
         ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(hardlink)],
     ):
         res = runner.invoke(app, list(args))
         assert res.exit_code == 2, (args, res.output)
         assert isinstance(res.exception, SystemExit)
+        assert valid.read_bytes() == valid_bytes, args
 
     # A broken/looping *.json in a directory is skipped with a warning even when --out is given.
     cohort = tmp_path / "cohort"
@@ -600,10 +620,17 @@ def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
 def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, monkeypatch):
     from tracegraph import sqlite_snapshot
 
+    # Before 3.13, resolve() raises RuntimeError on the loop and it is reported as ELOOP; from
+    # 3.13 resolve() passes the loop through and SQLite fails to open it. Both are clean errors.
     loop = tmp_path / "loop.sqlite"
     loop.symlink_to(loop)
-    with pytest.raises(OSError):
-        ingest_snapshot(loop, "t", error_channel="error")
+    if sys.version_info < (3, 13):
+        with pytest.raises(OSError) as raised:
+            ingest_snapshot(loop, "t", error_channel="error")
+        assert raised.value.errno == errno.ELOOP
+    else:
+        with pytest.raises(ValueError, match="cannot read SQLite checkpoint snapshot"):
+            ingest_snapshot(loop, "t", error_channel="error")
 
     db = tmp_path / "db.sqlite"
     conn = sqlite3.connect(db)
