@@ -1,10 +1,12 @@
 """Reproductions for the September implementation review, F01–F09."""
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -563,3 +565,222 @@ def test_int64_string_token_count_is_still_read():
 def test_phoenix_unrepresentable_score_is_unavailable():
     raw = PhoenixExportAdapter(_phoenix_span(annotations=[{"name": "q", "score": 10**400}])).ingest("t")
     assert [e.score for e in raw.steps[0].evidence.evaluations] == [None]
+
+
+def test_cli_symlink_loop_and_hardlink_guards(tmp_path):
+    loop = tmp_path / "loop.json"
+    valid = tmp_path / "valid.json"
+    artifact.save(trace(), valid)
+    valid_bytes = valid.read_bytes()
+    hardlink = tmp_path / "hardlink.json"
+    hardlink.hardlink_to(valid)
+    otlp = tmp_path / "export.otlp.json"
+    otlp.write_bytes((ROOT / "tests" / "fixtures" / "syncmill" / "route-success.otlp.json").read_bytes())
+    otlp_bytes = otlp.read_bytes()
+    runner = CliRunner()
+
+    # Before 3.13, Path.resolve() raises RuntimeError on a symlink loop, and the path guards
+    # turn that into a usage error. From 3.13 it returns the path unchanged, so the output is
+    # written by replacing the dangling link. Either way: no traceback, and no input touched.
+    for args in (
+        ["analyze", str(valid), "--json-out", str(loop)],
+        # A real OTLP export, so the command gets past parsing to its path guard.
+        ["ingest-otlp", "--file", str(otlp), "--out", str(loop)],
+        ["export-incident-memo", str(valid), "--out", str(loop)],
+        ["summarize", "error", str(valid), "--out", str(loop)],
+        ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(loop)],
+    ):
+        loop.unlink(missing_ok=True)
+        loop.symlink_to(loop)
+        res = runner.invoke(app, list(args))
+        if sys.version_info < (3, 13):
+            assert res.exit_code == 2, (args, res.output)
+            assert loop.is_symlink(), args
+        else:
+            assert res.exit_code in (0, 2), (args, res.output)
+        assert res.exception is None or isinstance(res.exception, SystemExit), (args, res.exception)
+        assert valid.read_bytes() == valid_bytes, args
+        assert otlp.read_bytes() == otlp_bytes, args
+
+    for args in (
+        ["summarize", "error", str(valid), "--out", str(hardlink)],
+        ["export-review-candidates", "tool-retry-failure", str(valid), "--out", str(hardlink)],
+    ):
+        res = runner.invoke(app, list(args))
+        assert res.exit_code == 2, (args, res.output)
+        assert isinstance(res.exception, SystemExit)
+        assert valid.read_bytes() == valid_bytes, args
+
+    # A broken/looping *.json in a directory is skipped with a warning even when --out is given.
+    cohort = tmp_path / "cohort"
+    cohort.mkdir()
+    artifact.save(trace(), cohort / "ok.json")
+    (cohort / "bad.json").symlink_to(cohort / "bad.json")
+    out_summary = tmp_path / "summary.json"
+    res = runner.invoke(app, ["summarize", "error", str(cohort), "--out", str(out_summary)])
+    assert res.exit_code == 0, res.output
+    assert out_summary.exists()
+
+
+def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, monkeypatch):
+    from tracegraph import sqlite_snapshot
+
+    # Before 3.13, resolve() raises RuntimeError on the loop and it is reported as ELOOP; from
+    # 3.13 resolve() passes the loop through and SQLite fails to open it. Both are clean errors.
+    loop = tmp_path / "loop.sqlite"
+    loop.symlink_to(loop)
+    if sys.version_info < (3, 13):
+        with pytest.raises(OSError) as raised:
+            ingest_snapshot(loop, "t", error_channel="error")
+        assert raised.value.errno == errno.ELOOP
+    else:
+        with pytest.raises(ValueError, match="cannot read SQLite checkpoint snapshot"):
+            ingest_snapshot(loop, "t", error_channel="error")
+
+    db = tmp_path / "db.sqlite"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE t(x)")
+    conn.close()
+    with pytest.raises(ValueError, match="deadline"):
+        ingest_snapshot(db, "t", error_channel="error", timeout=float("nan"))
+
+    # The deadline also bounds the adapter's own queries (saver.list, get_state), not only
+    # _check_json_depth. Every connection records its progress-handler calls, and the handler
+    # runs on every VM step instead of every 10 000, so even this small fixture's queries
+    # reach it.
+    fixture = ROOT / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
+    handler_calls: list[tuple[bool, int]] = []
+
+    class RecordingConnection(sqlite3.Connection):
+        def set_progress_handler(self, handler, n):
+            handler_calls.append((handler is not None, n))
+            super().set_progress_handler(handler, 1 if handler is not None else n)
+
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: real_connect(*a, **{"factory": RecordingConnection, **kw})
+    )
+    adapter_finished: list[bool] = []
+    real_ingest = sqlite_snapshot.LangGraphCheckpointAdapter.ingest
+    real_time = sqlite_snapshot.time
+    expire_after_ingest = False
+
+    def spy_ingest(self, thread):
+        raw = real_ingest(self, thread)
+        adapter_finished.append(True)
+        if expire_after_ingest:
+            monkeypatch.setattr(
+                sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: float("inf"))
+            )
+        return raw
+
+    monkeypatch.setattr(sqlite_snapshot.LangGraphCheckpointAdapter, "ingest", spy_ingest)
+    installed_then_removed = [(True, 10_000), (False, 0)] * 2  # _check_json_depth, then ingest
+
+    # Within the deadline: the read completes and both handlers are removed afterwards.
+    assert ingest_snapshot(fixture, "t", error_channel="error").steps
+    assert adapter_finished == [True]
+    assert handler_calls == installed_then_removed
+
+    # Expiring after the adapter's last query, while Python is still building the trace, is
+    # past every progress-handler callback; the read is still rejected rather than returned.
+    adapter_finished.clear()
+    handler_calls.clear()
+    expire_after_ingest = True
+    with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded"):
+        ingest_snapshot(fixture, "t", error_channel="error")
+    assert adapter_finished == [True]
+    assert handler_calls == installed_then_removed
+    expire_after_ingest = False
+    monkeypatch.setattr(sqlite_snapshot, "time", real_time)
+
+    # Expiring right after _check_json_depth interrupts the adapter's first query (it never
+    # returns), reports the deadline, and still removes the handler.
+    adapter_finished.clear()
+    handler_calls.clear()
+    real_check = sqlite_snapshot._check_json_depth
+
+    def expire_after_check(c, thread, deadline):
+        real_check(c, thread, deadline)
+        monkeypatch.setattr(
+            sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: deadline + 1)
+        )
+
+    monkeypatch.setattr(sqlite_snapshot, "_check_json_depth", expire_after_check)
+    with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded"):
+        ingest_snapshot(fixture, "t", error_channel="error")
+    assert adapter_finished == []
+    assert handler_calls == installed_then_removed
+
+
+def test_build_incident_memo_rejects_non_string_digest():
+    from tracegraph.analysis.memo import build_incident_memo
+
+    nt = trace()
+    for bad in (None, 123, ["sha256:" + "0" * 64]):
+        with pytest.raises(ValueError, match="Invalid artifact_digest"):
+            build_incident_memo(nt, bad)  # type: ignore[arg-type]
+
+
+def _plan_then_two_tool_failures():
+    from tracegraph.model import Capture, StepKind
+
+    return normalize(RawTrace(
+        trace=Trace(trace_id="t", source_kind="otlp", capture=Capture(gaps=[])),
+        steps=[
+            Step(step_id="a", trace_id="t", seq=0, name="plan"),
+            Step(step_id="b", trace_id="t", seq=1, name="tool_b", kind=StepKind.TOOL, status=StepStatus.ERROR),
+            Step(step_id="c", trace_id="t", seq=2, name="tool_c", kind=StepKind.TOOL, status=StepStatus.ERROR),
+        ],
+        causal_edges=[
+            Edge(type=EdgeType.CAUSED_BY, src=x, dst="a", origin=EdgeOrigin.GRAPH_PARENT) for x in ("b", "c")
+        ],
+    ))
+
+
+def test_motif_groups_do_not_share_step_shapes():
+    # Two groups bind the same "plan" step. Each group's signature is its own object, so editing
+    # one returned summary changes neither the other group nor a later summary.
+    from tracegraph.analysis import PRESETS
+    from tracegraph.analysis.motifs import MotifAggregator
+
+    agg = MotifAggregator(PRESETS["plan-then-tool-failure"])
+    agg.add(_plan_then_two_tool_failures(), "sha256:" + "0" * 64)
+    summary = agg.summary(discovered=1, valid=1, skipped=0)
+    assert len(summary.groups) == 2
+    summary.groups[0].signature.steps[0].name = "edited"
+    summary.groups[0].signature.steps[0].unknown.append("x")
+    other = summary.groups[1].signature.steps[0]
+    assert (other.name, other.unknown) == ("plan", [])
+
+
+def test_motif_unhashable_header_is_a_validation_error():
+    from pydantic import ValidationError
+    from tracegraph.analysis import PRESETS
+    from tracegraph.analysis.motifs import MotifAggregator
+
+    nt = _plan_then_two_tool_failures()
+    nt.trace.links_preserved = []  # type: ignore[assignment]  # pydantic does not revalidate
+    with pytest.raises(ValidationError, match="links_preserved"):
+        MotifAggregator(PRESETS["plan-then-tool-failure"]).add(nt, "sha256:" + "0" * 64)
+
+
+def test_projection_checks_still_validate_provenance_through_the_raw_layer():
+    from pydantic import ValidationError
+    from tracegraph.normalize import requires_origin_priority_projection, validate_normalized
+
+    # Origin priority picks b (GRAPH_PARENT) where the temporal rule picks a, so a valid trace
+    # needs the v4 projection; flags without a capture record make it invalid provenance.
+    nt = normalize(RawTrace(
+        trace=Trace(trace_id="t", source_kind="otlp"),
+        steps=[Step(step_id=x, trace_id="t", seq=i) for i, x in enumerate("abc")],
+        causal_edges=[
+            Edge(type=EdgeType.CAUSED_BY, src="c", dst="a", origin=EdgeOrigin.SPAN_LINK),
+            Edge(type=EdgeType.CAUSED_BY, src="c", dst="b", origin=EdgeOrigin.GRAPH_PARENT),
+        ],
+    ))
+    assert requires_origin_priority_projection(nt) is True
+    nt.steps[0].unknown_fields = ["name"]  # pydantic does not revalidate on assignment
+    assert requires_origin_priority_projection(nt) is False
+    with pytest.raises(ValidationError, match="validation error for RawTrace"):
+        validate_normalized(nt)

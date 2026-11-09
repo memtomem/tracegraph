@@ -11,6 +11,9 @@ data instead of being invoked.
 """
 
 from contextlib import closing
+import errno
+import math
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -99,6 +102,13 @@ def ingest_snapshot(
 ) -> RawTrace:
     from langgraph.checkpoint.sqlite import SqliteSaver
 
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or math.isnan(timeout):
+        raise ValueError("SQLite snapshot deadline exceeded")
+    source = Path(source)
+    try:
+        resolved_uri = source.resolve().as_uri()
+    except RuntimeError as exc:
+        raise OSError(errno.ELOOP, os.strerror(errno.ELOOP), str(source)) from exc
     deadline = time.monotonic() + timeout
 
     def progress(status: int, remaining: int, total: int) -> None:
@@ -108,7 +118,7 @@ def ingest_snapshot(
     try:
         with tempfile.TemporaryDirectory(prefix="tracegraph-snapshot-") as directory:
             snapshot = Path(directory) / "checkpoints.sqlite"
-            src = sqlite3.connect(source.resolve().as_uri() + "?mode=ro", timeout=timeout, uri=True)
+            src = sqlite3.connect(resolved_uri + "?mode=ro", timeout=timeout, uri=True)
             try:
                 dest = sqlite3.connect(snapshot)
                 try:
@@ -126,11 +136,29 @@ def ingest_snapshot(
                 # listing would, so a database without them still reads as "no checkpoints".
                 saver.setup()
                 _check_json_depth(conn, thread, deadline)
-                return LangGraphCheckpointAdapter(
-                    saver,
-                    error_channel=error_channel,
-                    schedule_graph=graph,
-                    include_error_messages=include_error_messages,
-                ).ingest(thread)
+                expired = False
+
+                def interrupt() -> int:
+                    nonlocal expired
+                    expired = time.monotonic() >= deadline
+                    return expired
+
+                conn.set_progress_handler(interrupt, 10_000)
+                try:
+                    raw = LangGraphCheckpointAdapter(
+                        saver,
+                        error_channel=error_channel,
+                        schedule_graph=graph,
+                        include_error_messages=include_error_messages,
+                    ).ingest(thread)
+                    if time.monotonic() >= deadline:
+                        raise ValueError("SQLite snapshot deadline exceeded")
+                    return raw
+                except ValueError as exc:
+                    if expired and isinstance(exc.__cause__, sqlite3.OperationalError):
+                        raise ValueError("SQLite snapshot deadline exceeded") from None
+                    raise
+                finally:
+                    conn.set_progress_handler(None, 0)
     except sqlite3.Error as exc:
         raise ValueError("cannot read SQLite checkpoint snapshot") from exc

@@ -837,11 +837,18 @@ def _render_analysis(report: AnalysisReport, *, limit: int) -> None:
         console.print(f"  [yellow]⚠ {escape(warning)}[/]")
 
 
+def _is_dir_safe(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def _artifact_files(paths: list[Path]) -> list[Path]:
     """Expand files and directories (``*.json``) into artifact paths."""
     files: list[Path] = []
     for path in paths:
-        files.extend(sorted(path.glob("*.json")) if path.is_dir() else [path])
+        files.extend(sorted(path.glob("*.json")) if _is_dir_safe(path) else [path])
     if not files:
         raise typer.BadParameter("no artifact files found")
     return files
@@ -884,21 +891,35 @@ def _warn_skipped(skipped: list[tuple[Path, str]]) -> None:
     )
 
 
+def _resolves_to(path: Path, target: Path | None) -> bool:
+    if target is None:
+        return False
+    try:
+        return path.resolve() == target or (
+            path.exists() and target.exists() and path.samefile(target)
+        )
+    except (OSError, RuntimeError):
+        return False
+
+
 def _discover_artifacts(
     paths: list[Path], *, exclude: Path | None = None
 ) -> list[tuple[Path, bool]]:
     """Expand files and directories into ``(path, explicitly_named)`` in load order."""
     discovered: list[tuple[Path, bool]] = []
-    excluded = exclude.resolve() if exclude is not None else None
+    try:
+        excluded = exclude.resolve() if exclude is not None else None
+    except (OSError, RuntimeError) as exc:
+        raise typer.BadParameter(f"cannot resolve a path: {_load_reason(exc)}") from exc
     for p in paths:
-        if p.is_dir():
+        if _is_dir_safe(p):
             discovered.extend(
                 (f, False)
                 for f in sorted(p.glob("*.json"))
-                if excluded is None or f.resolve() != excluded
+                if not _resolves_to(f, excluded)
             )
         else:
-            if excluded is not None and p.resolve() == excluded:
+            if _resolves_to(p, excluded):
                 raise typer.BadParameter("--out must not overwrite an input artifact")
             discovered.append((p, True))
     if not discovered:
@@ -2035,13 +2056,18 @@ def main() -> None:
 
 def _distinct_paths(inputs: list[Path], outputs: list[Path]) -> None:
     seen = list(inputs)
-    for output in outputs:
-        for previous in seen:
-            if output.resolve() == previous.resolve() or (
-                output.exists() and previous.exists() and output.samefile(previous)
-            ):
-                raise typer.BadParameter("output must not overwrite an input or another output")
-        seen.append(output)
+    try:
+        for output in outputs:
+            for previous in seen:
+                if output.resolve() == previous.resolve() or (
+                    output.exists() and previous.exists() and output.samefile(previous)
+                ):
+                    raise typer.BadParameter("output must not overwrite an input or another output")
+            seen.append(output)
+    except (OSError, RuntimeError) as exc:
+        # Resolving a path can fail on its own (a symlink loop, a name too long to stat); that
+        # is a usage error, not a crash a gate would read as FAIL.
+        raise typer.BadParameter(f"cannot resolve a path: {_load_reason(exc)}") from exc
 
 
 def _save_report(report: AnalysisReport, target: Path) -> None:

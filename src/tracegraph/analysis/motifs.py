@@ -166,6 +166,7 @@ class MotifAggregator:
         self._pattern = pattern
         self._constrained = _constrained(pattern)
         self._groups: dict[str, _Group] = {}
+        self._groups_by_key: dict[tuple, tuple[str, _Group]] = {}
         self._traces_matched = 0
         self._may_hide = 0
         self._disclosed = 0
@@ -180,7 +181,7 @@ class MotifAggregator:
             self._without_provenance += 1
         elif capture.gaps:
             self._disclosed += 1
-        if _could_be_hidden(nt, pattern):
+        if _could_be_hidden(nt, pattern, _constrained_fields=self._constrained):
             self._may_hide += 1
 
         index = build_index(nt)
@@ -194,6 +195,7 @@ class MotifAggregator:
         )
         header = (_safe(nt.trace.source_kind), nt.trace.causal_fidelity.value,
                   nt.trace.links_preserved, heuristic)
+        shapes_by_id: dict[str, tuple[StepShape, tuple]] = {}
         hit: set[str] = set()
         unconfirmed = 0
         for path in iter_matches(nt, pattern, index=index):
@@ -205,21 +207,54 @@ class MotifAggregator:
             ):
                 unconfirmed += 1
                 continue
-            signature = MotifSignature(
-                pattern_id=pattern.pattern_id,  # type: ignore[arg-type]
-                pattern_version=pattern.pattern_version,  # type: ignore[arg-type]
-                source_kind=header[0],
-                causal_fidelity=header[1],
-                links_preserved=header[2],
-                heuristic_edges=header[3],
-                steps=[_shape(step) for step in bound],
-                # Pattern order runs cause -> effect; a CAUSED_BY edge points effect -> cause.
-                edge_origins=[origins[(effect, cause)] for cause, effect in zip(path, path[1:], strict=False)],
-            )
-            key = json.dumps(signature.model_dump(mode="json"), sort_keys=True)
-            group = self._groups.get(key)
-            if group is None:
-                group = self._groups[key] = _Group(signature)
+            step_shapes: list[StepShape] = []
+            step_keys: list[tuple] = []
+            for step in bound:
+                cached = shapes_by_id.get(step.step_id)
+                if cached is None:
+                    shape = _shape(step)
+                    shape_key = (
+                        shape.kind,
+                        shape.name,
+                        shape.status,
+                        shape.source,
+                        tuple(shape.unknown),
+                    )
+                    cached = shapes_by_id[step.step_id] = (shape, shape_key)
+                step_shapes.append(cached[0])
+                step_keys.append(cached[1])
+            # Pattern order runs cause -> effect; a CAUSED_BY edge points effect -> cause.
+            edge_origins = [
+                origins[(effect, cause)] for cause, effect in zip(path, path[1:], strict=False)
+            ]
+            fast_key: tuple | None = (header, tuple(step_keys), tuple(edge_origins))
+            try:
+                entry = self._groups_by_key.get(fast_key)  # type: ignore[arg-type]
+            except TypeError:
+                # A header value changed after the trace was built can be unhashable; the
+                # signature below then refuses it with the model's ValidationError.
+                fast_key = entry = None
+            if entry is None:
+                signature = MotifSignature(
+                    pattern_id=pattern.pattern_id,  # type: ignore[arg-type]
+                    pattern_version=pattern.pattern_version,  # type: ignore[arg-type]
+                    source_kind=header[0],
+                    causal_fidelity=header[1],
+                    links_preserved=header[2],
+                    heuristic_edges=header[3],
+                    # Copies: a cached shape is reused across this trace's groups, and each
+                    # group's signature must stay its own object, as when it was built per match.
+                    steps=[shape.model_copy(deep=True) for shape in step_shapes],
+                    edge_origins=edge_origins,
+                )
+                key = json.dumps(signature.model_dump(mode="json"), sort_keys=True)
+                group = self._groups.get(key)
+                if group is None:
+                    group = self._groups[key] = _Group(signature)
+                if fast_key is not None:
+                    self._groups_by_key[fast_key] = (key, group)
+            else:
+                key, group = entry
             group.match_count += 1
             group.offer(digest, path)
             hit.add(key)

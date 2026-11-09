@@ -545,6 +545,7 @@ class LangGraphCheckpointAdapter:
                     "(langgraph is not installed), so a failure in one cannot be named.",
                     undecodable,
                 )
+            task_cache: dict[str, Any] = {}
             for task_id, task_writes in writes.items():
                 if task_id == _NULL_TASK_ID:
                     continue  # a graph-level write (e.g. a top-level resume), not a node task
@@ -554,7 +555,7 @@ class LangGraphCheckpointAdapter:
                 if error is _MISSING:
                     continue
                 name = cls._resolve_task_name(
-                    cp, ns, original_seq[step_id], task_id, task_writes
+                    cp, ns, original_seq[step_id], task_id, task_writes, _cache=task_cache
                 )
                 message = cls._error_message(error)
                 cancelled = message.startswith(_CANCELLED_PREFIX)
@@ -645,6 +646,7 @@ class LangGraphCheckpointAdapter:
         _, cid = key_by_step_id[head_id]
         disclosures = Disclosures()
         undecided = 0
+        task_cache: dict[str, Any] = {}
         for task_id, task_writes in (writes_by_step.get(head_id) or {}).items():
             if task_id == _NULL_TASK_ID:
                 continue
@@ -655,7 +657,9 @@ class LangGraphCheckpointAdapter:
                 if channels <= _UNDECIDED_WITH_INTERRUPT:
                     undecided += 1
                 continue
-            name = cls._resolve_task_name(cp, _ROOT_NS, original_seq[head_id], task_id, task_writes)
+            name = cls._resolve_task_name(
+                cp, _ROOT_NS, original_seq[head_id], task_id, task_writes, _cache=task_cache
+            )
             if name is None:
                 disclosures.add(
                     "langgraph.unattributed_interrupted_task",
@@ -912,14 +916,16 @@ class LangGraphCheckpointAdapter:
         return targets
 
     @classmethod
-    def _candidate_names(cls, cp: dict) -> list[str]:
+    def _candidate_names(
+        cls, cp: dict, *, targets: dict[str, set[str]] | None = None
+    ) -> list[str]:
         """Node names this checkpoint mentions, as naming candidates.
 
         Only names LangGraph itself recorded are considered. A name that never appears cannot
         be proposed, and a name that appears but does not hash to the recorded task id is
         rejected — so the candidate list only ever affects *coverage*, never correctness.
         """
-        names = set(cls._trigger_targets(cp))
+        names = set(targets if targets is not None else cls._trigger_targets(cp))
         names.update(
             name for name in cp.get("versions_seen", {}) if isinstance(name, str)
         )
@@ -927,7 +933,15 @@ class LangGraphCheckpointAdapter:
         return sorted(names)
 
     @classmethod
-    def _pull_task_ids(cls, cp: dict, ns: str, md_step: int, name: str) -> list[str]:
+    def _pull_task_ids(
+        cls,
+        cp: dict,
+        ns: str,
+        md_step: int,
+        name: str,
+        *,
+        targets: dict[str, set[str]] | None = None,
+    ) -> list[str]:
         """Every task id node ``name`` could have at this checkpoint, by trigger set.
 
         LangGraph hashes a node's *configured* triggers, which are not always visible here: a
@@ -943,7 +957,9 @@ class LangGraphCheckpointAdapter:
             trigger_sets: list[tuple[str, ...]] = [(_START,)]
         else:
             branch = f"{_BRANCH_PREFIX}{name}"
-            observed = cls._trigger_targets(cp).get(name, set())
+            observed = (
+                targets if targets is not None else cls._trigger_targets(cp)
+            ).get(name, set())
             configured = tuple(sorted(observed | {branch}))
             trigger_sets = [configured]
             if observed and configured != tuple(sorted(observed)):
@@ -995,16 +1011,43 @@ class LangGraphCheckpointAdapter:
 
     @classmethod
     def _resolve_task_name(
-        cls, cp: dict, ns: str, md_step: int, task_id: str, writes: list[tuple[str, Any]]
+        cls,
+        cp: dict,
+        ns: str,
+        md_step: int,
+        task_id: str,
+        writes: list[tuple[str, Any]],
+        *,
+        _cache: dict[str, Any] | None = None,
     ) -> str | None:
         """Name the node that ran as ``task_id``, or ``None`` when nothing proves which it was."""
         for channel, value in writes:
             if channel == _ERROR_SOURCE_NODE and isinstance(value, str) and value:
                 return value
-        for name in cls._candidate_names(cp):
-            if task_id in cls._pull_task_ids(cp, ns, md_step, name):
+        if _cache is None:
+            uncached = cls._trigger_targets(cp)
+            for name in cls._candidate_names(cp, targets=uncached):
+                if task_id in cls._pull_task_ids(cp, ns, md_step, name, targets=uncached):
+                    return name
+            return cls._push_task_ids(cp, ns, md_step).get(task_id)
+        targets: dict[str, set[str]] | None = _cache.get("targets")
+        if targets is None:
+            targets = _cache["targets"] = cls._trigger_targets(cp)
+            _cache["candidates"] = cls._candidate_names(cp, targets=targets)
+            _cache["pull"] = {}
+        pull_by_name: dict[str, list[str]] = _cache["pull"]
+        for name in _cache["candidates"]:
+            ids = pull_by_name.get(name)
+            if ids is None:
+                ids = pull_by_name[name] = cls._pull_task_ids(
+                    cp, ns, md_step, name, targets=targets
+                )
+            if task_id in ids:
                 return name
-        return cls._push_task_ids(cp, ns, md_step).get(task_id)
+        push_by_id = _cache.get("push")
+        if push_by_id is None:
+            push_by_id = _cache["push"] = cls._push_task_ids(cp, ns, md_step)
+        return push_by_id.get(task_id)
 
     @staticmethod
     def _error_message(value: Any) -> str:
