@@ -227,8 +227,13 @@ class MotifAggregator:
             edge_origins = [
                 origins[(effect, cause)] for cause, effect in zip(path, path[1:], strict=False)
             ]
-            fast_key = (header, tuple(step_keys), tuple(edge_origins))
-            entry = self._groups_by_key.get(fast_key)
+            fast_key: tuple | None = (header, tuple(step_keys), tuple(edge_origins))
+            try:
+                entry = self._groups_by_key.get(fast_key)  # type: ignore[arg-type]
+            except TypeError:
+                # A header value changed after the trace was built can be unhashable; the
+                # signature below then refuses it with the model's ValidationError.
+                fast_key = entry = None
             if entry is None:
                 signature = MotifSignature(
                     pattern_id=pattern.pattern_id,  # type: ignore[arg-type]
@@ -237,14 +242,17 @@ class MotifAggregator:
                     causal_fidelity=header[1],
                     links_preserved=header[2],
                     heuristic_edges=header[3],
-                    steps=step_shapes,
+                    # Copies: a cached shape is reused across this trace's groups, and each
+                    # group's signature must stay its own object, as when it was built per match.
+                    steps=[shape.model_copy(deep=True) for shape in step_shapes],
                     edge_origins=edge_origins,
                 )
                 key = json.dumps(signature.model_dump(mode="json"), sort_keys=True)
                 group = self._groups.get(key)
                 if group is None:
                     group = self._groups[key] = _Group(signature)
-                entry = self._groups_by_key[fast_key] = (key, group)
+                if fast_key is not None:
+                    self._groups_by_key[fast_key] = (key, group)
             else:
                 key, group = entry
             group.match_count += 1

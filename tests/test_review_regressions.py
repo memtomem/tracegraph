@@ -720,3 +720,67 @@ def test_build_incident_memo_rejects_non_string_digest():
     for bad in (None, 123, ["sha256:" + "0" * 64]):
         with pytest.raises(ValueError, match="Invalid artifact_digest"):
             build_incident_memo(nt, bad)  # type: ignore[arg-type]
+
+
+def _plan_then_two_tool_failures():
+    from tracegraph.model import Capture, StepKind
+
+    return normalize(RawTrace(
+        trace=Trace(trace_id="t", source_kind="otlp", capture=Capture(gaps=[])),
+        steps=[
+            Step(step_id="a", trace_id="t", seq=0, name="plan"),
+            Step(step_id="b", trace_id="t", seq=1, name="tool_b", kind=StepKind.TOOL, status=StepStatus.ERROR),
+            Step(step_id="c", trace_id="t", seq=2, name="tool_c", kind=StepKind.TOOL, status=StepStatus.ERROR),
+        ],
+        causal_edges=[
+            Edge(type=EdgeType.CAUSED_BY, src=x, dst="a", origin=EdgeOrigin.GRAPH_PARENT) for x in ("b", "c")
+        ],
+    ))
+
+
+def test_motif_groups_do_not_share_step_shapes():
+    # Two groups bind the same "plan" step. Each group's signature is its own object, so editing
+    # one returned summary changes neither the other group nor a later summary.
+    from tracegraph.analysis import PRESETS
+    from tracegraph.analysis.motifs import MotifAggregator
+
+    agg = MotifAggregator(PRESETS["plan-then-tool-failure"])
+    agg.add(_plan_then_two_tool_failures(), "sha256:" + "0" * 64)
+    summary = agg.summary(discovered=1, valid=1, skipped=0)
+    assert len(summary.groups) == 2
+    summary.groups[0].signature.steps[0].name = "edited"
+    summary.groups[0].signature.steps[0].unknown.append("x")
+    other = summary.groups[1].signature.steps[0]
+    assert (other.name, other.unknown) == ("plan", [])
+
+
+def test_motif_unhashable_header_is_a_validation_error():
+    from pydantic import ValidationError
+    from tracegraph.analysis import PRESETS
+    from tracegraph.analysis.motifs import MotifAggregator
+
+    nt = _plan_then_two_tool_failures()
+    nt.trace.links_preserved = []  # type: ignore[assignment]  # pydantic does not revalidate
+    with pytest.raises(ValidationError, match="links_preserved"):
+        MotifAggregator(PRESETS["plan-then-tool-failure"]).add(nt, "sha256:" + "0" * 64)
+
+
+def test_projection_checks_still_validate_provenance_through_the_raw_layer():
+    from pydantic import ValidationError
+    from tracegraph.normalize import requires_origin_priority_projection, validate_normalized
+
+    # Origin priority picks b (GRAPH_PARENT) where the temporal rule picks a, so a valid trace
+    # needs the v4 projection; flags without a capture record make it invalid provenance.
+    nt = normalize(RawTrace(
+        trace=Trace(trace_id="t", source_kind="otlp"),
+        steps=[Step(step_id=x, trace_id="t", seq=i) for i, x in enumerate("abc")],
+        causal_edges=[
+            Edge(type=EdgeType.CAUSED_BY, src="c", dst="a", origin=EdgeOrigin.SPAN_LINK),
+            Edge(type=EdgeType.CAUSED_BY, src="c", dst="b", origin=EdgeOrigin.GRAPH_PARENT),
+        ],
+    ))
+    assert requires_origin_priority_projection(nt) is True
+    nt.steps[0].unknown_fields = ["name"]  # pydantic does not revalidate on assignment
+    assert requires_origin_priority_projection(nt) is False
+    with pytest.raises(ValidationError, match="validation error for RawTrace"):
+        validate_normalized(nt)

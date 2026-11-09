@@ -152,11 +152,14 @@ def validate_normalized(nt: NormalizedTrace) -> ProjectionRule:
             f"{expected_status.value!r}: {'a' if any_error else 'no'} step has status=error)"
         )
 
-    # Reconstruct what the canonical form should look like from the raw layer alone.
-    if _project(nt.trace, nt.steps, caused_by, steps_by_id, origin_priority=True) != nt:
+    # Reconstruct what the canonical form should look like from the raw layer alone. Building
+    # the RawTrace is also the provenance check (a model changed after it was built is not
+    # revalidated), and its error is the one this function has always raised for that.
+    raw = raw_layer(nt)
+    if _project(raw.trace, raw.steps, caused_by, steps_by_id, origin_priority=True) != nt:
         # Backward compatibility: accept authentic legacy artifacts produced under
         # the previous temporal-only parent selection rule.
-        if _project(nt.trace, nt.steps, caused_by, steps_by_id, origin_priority=False) != nt:
+        if _project(raw.trace, raw.steps, caused_by, steps_by_id, origin_priority=False) != nt:
             raise ValueError(
                 "normalized trace is not in canonical form: derived edges, projection_lossy "
                 "flags, or step/edge ordering do not match what normalize() produces from "
@@ -331,6 +334,7 @@ def requires_origin_priority_projection(nt: NormalizedTrace) -> bool:
     nor lets an origin-priority tree pass behind a lower envelope in ``artifact.from_obj``.
     """
     try:
+        raw_layer(nt)  # the provenance check the RawTrace model runs, as before the fast path
         _check_steps(nt.trace.trace_id, nt.steps)
         steps_by_id = nt.steps_by_id()
         caused_by = nt.edges_of(EdgeType.CAUSED_BY)
