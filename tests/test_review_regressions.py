@@ -662,10 +662,16 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     )
     adapter_finished: list[bool] = []
     real_ingest = sqlite_snapshot.LangGraphCheckpointAdapter.ingest
+    real_time = sqlite_snapshot.time
+    expire_after_ingest = False
 
     def spy_ingest(self, thread):
         raw = real_ingest(self, thread)
         adapter_finished.append(True)
+        if expire_after_ingest:
+            monkeypatch.setattr(
+                sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: float("inf"))
+            )
         return raw
 
     monkeypatch.setattr(sqlite_snapshot.LangGraphCheckpointAdapter, "ingest", spy_ingest)
@@ -675,6 +681,18 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     assert ingest_snapshot(fixture, "t", error_channel="error").steps
     assert adapter_finished == [True]
     assert handler_calls == installed_then_removed
+
+    # Expiring after the adapter's last query, while Python is still building the trace, is
+    # past every progress-handler callback; the read is still rejected rather than returned.
+    adapter_finished.clear()
+    handler_calls.clear()
+    expire_after_ingest = True
+    with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded"):
+        ingest_snapshot(fixture, "t", error_channel="error")
+    assert adapter_finished == [True]
+    assert handler_calls == installed_then_removed
+    expire_after_ingest = False
+    monkeypatch.setattr(sqlite_snapshot, "time", real_time)
 
     # Expiring right after _check_json_depth interrupts the adapter's first query (it never
     # returns), reports the deadline, and still removes the handler.
