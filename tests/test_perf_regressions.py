@@ -9,6 +9,7 @@ order of magnitude, which is exactly what they're meant to catch.
 
 from __future__ import annotations
 
+import gc
 import time
 from statistics import median
 
@@ -188,8 +189,11 @@ def test_otlp_loop_parent_resolution_scales_subquadratically():
     # spans linearly for each of the n spans (O(n²)).
     from tracegraph.adapters import OTLPSpanAdapter
 
+    # Doubling n leaves too little room between linear (2x) and quadratic (4x) growth: one GC
+    # pause on a shared runner crossed a 3x bound. An 8x step separates them (8x vs 64x),
+    # and the fastest of five runs with the collector off filters what noise remains.
     timings = []
-    for n in (1000, 2000, 4000):
+    for n in (1000, 8000):
         spans = []
         for i in range(n):
             node = "agent" if i % 2 == 0 else "tool"
@@ -214,14 +218,17 @@ def test_otlp_loop_parent_resolution_scales_subquadratically():
         doc = {"resourceSpans": [{"scopeSpans": [{"spans": spans}]}]}
         adapter = OTLPSpanAdapter(doc)
         samples = []
-        for _ in range(3):
-            start = time.perf_counter()
-            raw = adapter.ingest("t")
-            samples.append(time.perf_counter() - start)
-            assert len(raw.steps) == n
-        timings.append(median(samples))
-    for before, after in zip(timings, timings[1:], strict=False):
-        assert after <= 3 * before + 0.05, timings
+        gc.disable()
+        try:
+            for _ in range(5):
+                start = time.perf_counter()
+                raw = adapter.ingest("t")
+                samples.append(time.perf_counter() - start)
+                assert len(raw.steps) == n
+        finally:
+            gc.enable()
+        timings.append(min(samples))
+    assert timings[1] <= 24 * timings[0] + 0.05, timings
 
 
 def test_langgraph_many_send_task_writes_scale_linearly(monkeypatch):
