@@ -713,6 +713,28 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     assert handler_calls == installed_then_removed
 
 
+@pytest.mark.parametrize(
+    "timeout",
+    [10**400, -(10**400), float("nan"), True, "30", None],
+    ids=["huge-int", "huge-negative-int", "nan", "bool", "str", "none"],
+)
+def test_sqlite_snapshot_unusable_timeout_is_a_value_error(timeout):
+    # An int too large for a float raised OverflowError from math.isnan, an ArithmeticError
+    # that a caller catching ValueError does not see (#194).
+    fixture = ROOT / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
+    with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$") as raised:
+        ingest_snapshot(fixture, "t", error_channel="error", timeout=timeout)
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), 1e308, 30, 30.0])
+def test_sqlite_snapshot_usable_timeout_still_reads(timeout):
+    # inf means no deadline; a finite int or float bounds the read as before.
+    fixture = ROOT / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
+    raw = ingest_snapshot(fixture, "t", error_channel="error", timeout=timeout)
+    assert len(raw.steps) == 4
+
+
 def test_build_incident_memo_rejects_non_string_digest():
     from tracegraph.analysis.memo import build_incident_memo
 
