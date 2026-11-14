@@ -1,14 +1,16 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-11-14, `263f980`(v0.10.0) 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-11-14, `263f980`(v0.10.0) 기준, lock은 `cd1b83b`, 열린 이슈는 #203~#205 등록 뒤로 갱신 (Asia/Seoul)
 
 0.9.1(`89c80c2`) 뒤에 제품 PR 4건(#192·#196·#197·#198), 문서 PR 3건(#190·#191·#199), 보안 권고 수정 1건이 착지했고,
 0.10.0 준비 PR(#200, `263f980`)로 배포했다. 이 절은 준비 PR이 쓴 내용에 배포 기록을 덧붙였다. 0.9.1 절은 아래 "이전 전달
 상태"로 내렸다.
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `0f03081`(GHSA-8hc3-mf6m-fh5r 수정 병합)이다.
-  시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. 0.9.1 뒤 `uv.lock`의 의존성은 바뀌지 않았고, 0.10.0
-  준비 PR(#200)은 그 안의 프로젝트 버전만 0.10.0으로 바꿨다.
+  시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. 0.9.1부터 0.10.0까지 `uv.lock`의 의존성은 바뀌지
+  않았고, 0.10.0 준비 PR(#200)은 그 안의 프로젝트 버전만 0.10.0으로 바꿨다. 0.10.0 뒤에는 Dependabot 경고 1건을 `uv.lock`만
+  바꿔 고쳤다(#202). 2026-11-14 병합 뒤 열린 Dependabot 경고는 0건이다. 새 lock으로 venv를 맞추려면
+  `uv sync --locked --extra cypher --group dev`.
 - **0.10.0 공개 완료(2026-11-14).** `agent-tracegraph` 0.10.0이 PyPI 최신이다. `test-v0.10.0`과 `v0.10.0`이 모두
   `263f980`(PR #200)을 가리킨다. 업그레이드 주의는
   [GitHub Release v0.10.0](https://github.com/memtomem/tracegraph/releases/tag/v0.10.0)의 "Before you upgrade"에 있다.
@@ -34,7 +36,8 @@
     usage error(exit 2)가 된다. 예외: `validate`는 너무 긴 이름을 `INVALID`(exit 1)로 보고하고, 디렉터리 안의 loop `*.json`은
     경고 후 건너뛰어 성공할 수 있다. `ingest_snapshot`은 쓸 수 없는 `timeout`(NaN·bool·숫자 아님·float으로 바꿀 수 없을
     만큼 큰 int)을 `ValueError`로 거부하고, 그 마감 시간이 어댑터 쿼리까지 덮는다. 측정한 경우 목록은 `CHANGELOG.md`의 해당 항목에 있다.
-- **열린 이슈 0개.** #194는 PR #198로 닫혔고, #180·#181은 2026-11-14에 소유자 결정으로 not planned로 닫았다(아래 "이번
+- **열린 이슈 3개(#203·#204·#205, 2026-11-14 등록).** 이 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
+  항목" 3번). 그 전에 #194는 PR #198로 닫혔고, #180·#181은 2026-11-14에 소유자 결정으로 not planned로 닫았다(아래 "이번
   구간의 결정" 4·5번).
 
 ### `89c80c2` 이후 착지한 변경
@@ -50,12 +53,14 @@
 | #199 | `67449a3` | #192의 CHANGELOG 항목(문서만). 문장마다 v0.9.1과 측정해 비교했다 |
 | 권고문 fork PR #1 | `0f03081` | GHSA-8hc3-mf6m-fh5r: `check_msgpack_depth`와 `_scanning_serde`. 권고문 화면에서 병합해 커밋 하나("Merge commit from fork")로 들어왔고, 트리는 리뷰한 브랜치 끝(`0124afa`)과 같다 |
 | #200 | `263f980` | 0.10.0 준비: 버전·lock, `CHANGELOG.md` `## 0.10.0 - 2026-11-14`(릴리스 claims review 4라운드, 3라운드 지적은 이 PR에서 반영), 이 절 |
+| #201 | `5999602` | 0.10.0 배포 기록(문서만) |
+| #202 | `cd1b83b` | Dependabot 1건(GHSA-5cjw-f85j-cv6r low): `uv.lock`만 `tornado` 6.6→6.6.1. #185와 같이 `ipykernel`·`nbclient`를 거친 dev group 의존성이라 배포 패키지와 무관하다 |
 
 ### 이번 구간의 결정(2026-11-09~14)
 
 1. **#193(PR #196):** 처음 버전은 경로를 열어 `fstat`했는데, FIFO를 열면 기다리던 writer가 깨어 pipe가 끊기고 terminal을
    열면 controlling terminal이 될 수 있어서, metadata만 보는 방식으로 바꿨다.
-2. **#195(PR #197):** 소유자가 선택지 A+B를 골랐다. C(opt-in `check` 규칙)는 후속으로 남기고(이슈 미등록), D(capture gap)는
+2. **#195(PR #197):** 소유자가 선택지 A+B를 골랐다. C(opt-in `check` 규칙)는 후속으로 남기고(2026-11-14 #205로 등록), D(capture gap)는
    하지 않는다.
 3. **#194(PR #198):** 소유자가 `inf`를 "마감 없음"으로 계속 받기로 했다. `float()`로 바꾸는 도우미를 두었더니 리뷰마다
    `__float__`·`__radd__`를 바꾼 숫자 subclass에서 새 지적이 나와(roadmap 계획 리뷰 2라운드와 그 설계의 diff 리뷰 2라운드
@@ -88,18 +93,18 @@ PR별 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.10.0 배포" 행은
 | 회귀 테스트 판별력 | #192·#196·#197·#198·GHSA 수정 모두 PR 본문에 변이 결과가 있다. GHSA 수정: 변이 17종(walker 9, 직렬화기 8)을 새 테스트가 모두 잡고, 수정을 뺀 코드에서는 CLI 테스트가 SIGSEGV(-11)를 잡는다 |
 | 리뷰 게이트 | #198: plan 2·diff 2, 최소 수정으로 바꾼 뒤 커밋 후 리뷰 **SHIP**. GHSA 수정: plan 2, diff 1라운드는 리뷰어 쪽 콘텐츠 필터로 중단(마지막 단계가 collation 문제로 이어짐), 재시도 1라운드 NEEDS-FIX, 2라운드 **SHIP**. #199: claims review 2라운드 **SHIP**. 릴리스 claims review: 4라운드, 마지막 **SHIP**. #192·#196·#197 본문에는 리뷰 기록이 없다 |
 | 0.10.0 배포 | 리허설 run [43568160808](https://github.com/memtomem/tracegraph/actions/runs/43568160808), 배포 run [43568705268](https://github.com/memtomem/tracegraph/actions/runs/43568705268), 둘 다 success. wheel `64071fc141e9b3d0faf8e65487ba32aef36ef88be25cc6fae1ca1fca4e4c5b82`, sdist `a4a79a40d2d3d78b281783e377f7e91618f5e85fd5da1fdd828a605259a67678`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200(wheel·sdist). PyPI 파일을 받아 digest를 확인한 뒤 깨끗한 Python 3.12.11 core·cypher 설치에서 `uv pip check` 통과, `tracegraph --version` 0.10.0, `verify_wheel` PASS(cypher는 backend parity도 PASS). 이 unlocked 설치는 `uv.lock`(4.3.1, 1.12.2)보다 새 `langgraph-checkpoint` 4.3.2와 `ormsgpack` 1.13.1을 받았다(`langgraph-checkpoint-sqlite`는 lock과 같은 3.1.3) |
+| 0.10.0 뒤 lock 갱신 | PR 본문 기준. #202: 두 lockfile을 `tomllib`로 비교해 바뀐 패키지는 `tornado` 하나, `uv lock --check` 통과, 새 lock의 venv에서 `suite-run` 3379 passed / 12 skipped CLEAN, `tests/test_notebooks.py` 2 passed(skip 아님, tornado 6.6.1 import), golden은 CLI가 tornado를 import하지 않아 생략, 커밋 리뷰 1라운드 SHIP |
 
 ### 남은 결정과 후속 항목
 
-1. **다음 릴리스:** 0.10.0 이후 바뀐 것은 이 배포 기록 문서뿐이다. 릴리스 절차는 [릴리스 런북](releasing.md)이고,
-   `pypi` 환경 승인은 소유자만 할 수 있다.
+1. **다음 릴리스:** 0.10.0 이후 바뀐 것은 이 문서(#201)와 dev group 의존성의 lock(#202)뿐이라, 배포 패키지의 소스와 의존성
+   범위는 0.10.0과 같다. 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은 소유자만 할 수 있다.
 2. **권고문:** GHSA-8hc3-mf6m-fh5r은 2026-11-14 07:18:52Z에 공개했다. upstream(LangGraph ext hook·ormsgpack) 보고 여부는
    미정이다.
-3. **등록하지 않은 후속 항목(소유자 결정 전):**
-   - `_JSON_TEXTS`의 JSON 미리 검사도 SQL로 행을 골라, GHSA 수정 때 찾은 것과 같은 collation 사각지대가 있다. JSON은 C
-     스택 붕괴가 아니라 버전 간 결과 차이로 보이나 측정하지 않았다.
-   - 디렉터리 입력 안에서 `--out`과 hardlink인 artifact는 경고 없이 빠지고 exit 0으로 끝난다(#192·#193 이후, 측정).
-   - #195의 선택지 C(opt-in `check` 규칙).
+3. **후속 이슈 3개(2026-11-14 등록, 소유자 결정 전).** 측정 조건과 결과, 선택지는 각 이슈 본문에 있다.
+   - #203: `_JSON_TEXTS`의 JSON 미리 검사가 thread 컬럼의 collation을 거쳐 saver가 읽는 write를 놓친다.
+   - #204: 디렉터리 입력 안에서 `--out`과 hardlink인 artifact가 경고 없이 run에서 빠진다(`summarize`에서 측정).
+   - #205: #195의 선택지 C(opt-in `check` 규칙).
 
 ---
 
