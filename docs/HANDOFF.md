@@ -1,13 +1,19 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-11-14, 0.10.0 준비 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-11-14, `263f980`(v0.10.0) 기준 (Asia/Seoul)
 
-0.9.1(`89c80c2`) 뒤에 제품 PR 4건(#192·#196·#197·#198), 문서 PR 3건(#190·#191·#199), 보안 권고 수정 1건이 착지했고, 이 절은 0.10.0 준비 PR을 기준으로 쓴다. 0.9.1 절은
-아래 "이전 전달 상태"로 내렸다.
+0.9.1(`89c80c2`) 뒤에 제품 PR 4건(#192·#196·#197·#198), 문서 PR 3건(#190·#191·#199), 보안 권고 수정 1건이 착지했고,
+0.10.0 준비 PR(#200, `263f980`)로 배포했다. 이 절은 준비 PR이 쓴 내용에 배포 기록을 덧붙였다. 0.9.1 절은 아래 "이전 전달
+상태"로 내렸다.
 
 - **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `0f03081`(GHSA-8hc3-mf6m-fh5r 수정 병합)이다.
   시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. 0.9.1 뒤 `uv.lock`의 의존성은 바뀌지 않았고, 0.10.0
-  준비 PR은 그 안의 프로젝트 버전만 0.10.0으로 바꿨다.
+  준비 PR(#200)은 그 안의 프로젝트 버전만 0.10.0으로 바꿨다.
+- **0.10.0 공개 완료(2026-11-14).** `agent-tracegraph` 0.10.0이 PyPI 최신이다. `test-v0.10.0`과 `v0.10.0`이 모두
+  `263f980`(PR #200)을 가리킨다. 업그레이드 주의는
+  [GitHub Release v0.10.0](https://github.com/memtomem/tracegraph/releases/tag/v0.10.0)의 "Before you upgrade"에 있다.
+  GitHub Release를 만든 직후(07:18:52Z) 권고문 GHSA-8hc3-mf6m-fh5r을 공개했다(영향 `<= 0.9.1`, 수정 `0.10.0`, severity
+  low). 검증은 아래 "검증 증거"의 "0.10.0 배포" 행.
 - **0.10.0은 minor다.** #195가 `ingest`의 stderr `note:`와 `analyze` 경고를 더해 CLI 출력이 바뀌었으므로, 0.8.0·0.9.0과 같은
   기준(출력 문구가 바뀌면 patch가 아니라 minor)을 따른다. artifact·report·review-candidate schema 버전은 그대로다. 전체
   목록은 `CHANGELOG.md`의 `## 0.10.0`이다. 놓치기 쉬운 동작 변경:
@@ -43,6 +49,7 @@
 | #198 | `bffe1a4` | #194: 기존 timeout 검사를 `except OverflowError`로 감싼다. CHANGELOG는 #192의 timeout 검사와 묶어 0.9.1 대비로 썼다 |
 | #199 | `67449a3` | #192의 CHANGELOG 항목(문서만). 문장마다 v0.9.1과 측정해 비교했다 |
 | 권고문 fork PR #1 | `0f03081` | GHSA-8hc3-mf6m-fh5r: `check_msgpack_depth`와 `_scanning_serde`. 권고문 화면에서 병합해 커밋 하나("Merge commit from fork")로 들어왔고, 트리는 리뷰한 브랜치 끝(`0124afa`)과 같다 |
+| #200 | `263f980` | 0.10.0 준비: 버전·lock, `CHANGELOG.md` `## 0.10.0 - 2026-11-14`(릴리스 claims review 4라운드, 3라운드 지적은 이 PR에서 반영), 이 절 |
 
 ### 이번 구간의 결정(2026-11-09~14)
 
@@ -71,7 +78,8 @@
 
 ### 검증 증거
 
-PR별 수치는 각 PR 본문에 적힌 것만 옮겼다.
+PR별 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.10.0 배포" 행은 배포 run 로그, 두 인덱스의 JSON API와 provenance 응답,
+배포 후 깨끗한 설치에서 옮겼다.
 
 | 검증 | 결과 |
 | --- | --- |
@@ -79,13 +87,14 @@ PR별 수치는 각 PR 본문에 적힌 것만 옮겼다.
 | 골든 | #198·GHSA 수정: golden 265개가 `ba4ea4f`와 바이트 단위로 같다. #197: LangGraph report 4개는 경고 한 줄만 추가, OTLP 10개·Phoenix 1개는 바이트 동일 |
 | 회귀 테스트 판별력 | #192·#196·#197·#198·GHSA 수정 모두 PR 본문에 변이 결과가 있다. GHSA 수정: 변이 17종(walker 9, 직렬화기 8)을 새 테스트가 모두 잡고, 수정을 뺀 코드에서는 CLI 테스트가 SIGSEGV(-11)를 잡는다 |
 | 리뷰 게이트 | #198: plan 2·diff 2, 최소 수정으로 바꾼 뒤 커밋 후 리뷰 **SHIP**. GHSA 수정: plan 2, diff 1라운드는 리뷰어 쪽 콘텐츠 필터로 중단(마지막 단계가 collation 문제로 이어짐), 재시도 1라운드 NEEDS-FIX, 2라운드 **SHIP**. #199: claims review 2라운드 **SHIP**. 릴리스 claims review: 4라운드, 마지막 **SHIP**. #192·#196·#197 본문에는 리뷰 기록이 없다 |
+| 0.10.0 배포 | 리허설 run [43568160808](https://github.com/memtomem/tracegraph/actions/runs/43568160808), 배포 run [43568705268](https://github.com/memtomem/tracegraph/actions/runs/43568705268), 둘 다 success. wheel `64071fc141e9b3d0faf8e65487ba32aef36ef88be25cc6fae1ca1fca4e4c5b82`, sdist `a4a79a40d2d3d78b281783e377f7e91618f5e85fd5da1fdd828a605259a67678`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200(wheel·sdist). PyPI 파일을 받아 digest를 확인한 뒤 깨끗한 Python 3.12.11 core·cypher 설치에서 `uv pip check` 통과, `tracegraph --version` 0.10.0, `verify_wheel` PASS(cypher는 backend parity도 PASS). 이 unlocked 설치는 `uv.lock`(4.3.1, 1.12.2)보다 새 `langgraph-checkpoint` 4.3.2와 `ormsgpack` 1.13.1을 받았다(`langgraph-checkpoint-sqlite`는 lock과 같은 3.1.3) |
 
 ### 남은 결정과 후속 항목
 
-1. **0.10.0 릴리스(소유자):** 이 준비 PR 병합 → `test-v0.10.0` 리허설 → `v0.10.0` 태그 → `pypi` 환경 승인. 절차는
-   [릴리스 런북](releasing.md). `CHANGELOG.md` 제목의 날짜는 준비 PR 날짜(2026-11-14)다.
-2. **권고문 공개(소유자):** GHSA-8hc3-mf6m-fh5r의 영향 범위는 `<= 0.9.1`, 수정 버전은 `0.10.0`으로 이미 고쳤다(draft).
-   수정은 `0f03081`로 이미 공개 브랜치에 있으니 배포 직후 공개한다. upstream(LangGraph ext hook·ormsgpack) 보고 여부는 미정.
+1. **다음 릴리스:** 0.10.0 이후 바뀐 것은 이 배포 기록 문서뿐이다. 릴리스 절차는 [릴리스 런북](releasing.md)이고,
+   `pypi` 환경 승인은 소유자만 할 수 있다.
+2. **권고문:** GHSA-8hc3-mf6m-fh5r은 2026-11-14 07:18:52Z에 공개했다. upstream(LangGraph ext hook·ormsgpack) 보고 여부는
+   미정이다.
 3. **등록하지 않은 후속 항목(소유자 결정 전):**
    - `_JSON_TEXTS`의 JSON 미리 검사도 SQL로 행을 골라, GHSA 수정 때 찾은 것과 같은 collation 사각지대가 있다. JSON은 C
      스택 붕괴가 아니라 버전 간 결과 차이로 보이나 측정하지 않았다.
