@@ -26,6 +26,15 @@ explicitly.
 
 ### Fixed
 
+- **`ingest_snapshot` refuses a `timeout` it cannot use with `ValueError`** (#192, #194).
+  In 0.9.1 the library function did not check `timeout`. A NaN was accepted and the read
+  never expired, `True` was taken as one second, a string or `None` raised `TypeError`, and an
+  int too large for a float, such as `10**400`, raised `OverflowError`. Each of these now
+  raises `ValueError("SQLite snapshot deadline exceeded")`, which a caller catching
+  `ValueError` sees. `float("inf")` is still accepted and means no deadline, and a finite int
+  or float bounds the read as before. The CLI never passes `timeout`, so only library callers
+  were affected.
+
 - **An output path that is the file stdin reads from is refused** (#193). Commands already
   refuse an output that is one of their input paths, but two ways of naming stdin slipped past
   that check, and the input was replaced with exit 0:

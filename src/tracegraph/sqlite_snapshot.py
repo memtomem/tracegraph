@@ -102,7 +102,15 @@ def ingest_snapshot(
 ) -> RawTrace:
     from langgraph.checkpoint.sqlite import SqliteSaver
 
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or math.isnan(timeout):
+    try:
+        unusable = (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or math.isnan(timeout)
+        )
+    except OverflowError:  # an int too large for a float
+        unusable = True
+    if unusable:
         raise ValueError("SQLite snapshot deadline exceeded")
     source = Path(source)
     try:
