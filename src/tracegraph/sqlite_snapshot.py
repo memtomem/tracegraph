@@ -24,16 +24,11 @@ from tracegraph.adapters.langgraph_checkpoint import LangGraphCheckpointAdapter
 from tracegraph.input_validation import check_msgpack_depth, check_text_depth
 from tracegraph.model import RawTrace
 
-# Every JSON text `SqliteSaver` parses while listing one thread: each checkpoint's metadata,
-# its body when serialized as JSON, and its JSON-serialized writes. The saver reads writes per
-# listed checkpoint, so a write whose checkpoint is missing is never parsed and is not scanned.
-_JSON_TEXTS = (
-    "SELECT metadata FROM checkpoints WHERE thread_id = ?",
-    "SELECT checkpoint FROM checkpoints WHERE thread_id = ? AND type = 'json'",
-    """SELECT value FROM writes AS w WHERE w.thread_id = ? AND w.type = 'json' AND EXISTS (
-        SELECT 1 FROM checkpoints AS c WHERE c.thread_id = w.thread_id
-        AND c.checkpoint_ns = w.checkpoint_ns AND c.checkpoint_id = w.checkpoint_id)""",
-)
+# The JSON texts `SqliteSaver` parses outside its serializer while listing one thread: each
+# checkpoint's metadata, which it hands to plain `json.loads`. JSON checkpoint bodies and writes
+# go through `loads_typed` and are checked there (`_scanning_serde`). This is the saver's own
+# listing predicate on the same column, so it selects the rows the listing does.
+_JSON_TEXTS = ("SELECT metadata FROM checkpoints WHERE thread_id = ?",)
 
 
 def _inert_serde():
@@ -51,23 +46,27 @@ def _inert_serde():
 
 
 _MSGPACK_REFUSED = "checkpoint history cannot be decoded (msgpack nesting too deep)"
+_JSON_REFUSED = "checkpoint history cannot be decoded (JSON nesting too deep)"
 _DEADLINE_EXCEEDED = "SQLite snapshot deadline exceeded"
 
 
 def _scanning_serde(deadline: float) -> tuple[Any, list[str]]:
-    """``_inert_serde`` that walks every msgpack value before decoding it, and its refusal.
+    """``_inert_serde`` that measures every msgpack and JSON value before decoding it, and its refusal.
 
     LangGraph's decoder unpacks each extension payload with a new call, so stacked extensions
     nest past ormsgpack's per-call limit until the C stack overflows, with no Python exception
-    (``check_msgpack_depth``). The walk runs in ``loads_typed`` so that it covers exactly the
+    (``check_msgpack_depth``). Python 3.12 and 3.13's ``json`` refuse deep nesting and 3.14's
+    parses it, so a JSON text is measured first (``check_text_depth``) to refuse it the same
+    way on every interpreter. Both checks run in ``loads_typed`` so that they cover exactly the
     values the saver decodes: SQL written to select the same rows can be steered elsewhere by a
     crafted schema's collations. The adapter reports any decode failure as ``cannot be decoded
     (<type>)``, so the reason is also kept in the returned list, which ``ingest_snapshot``
     raises instead. The list is shared by reference with any copy the saver makes
     (``with_msgpack_allowlist`` copies the serializer), and once set every later decode is
-    refused too, so a caller that swallows one failure cannot decode on past it. The walk is
-    charged to ``deadline`` before it starts, every 65,536 objects, and once it ends; depth
-    found during the walk is reported as depth even if the deadline has also passed.
+    refused too, so a caller that swallows one failure cannot decode on past it. Each check is
+    charged to ``deadline`` before it starts and once it ends, and the msgpack walk also every
+    65,536 objects; depth found during a check is reported as depth even if the deadline has
+    also passed.
     """
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -90,16 +89,27 @@ def _scanning_serde(deadline: float) -> tuple[Any, list[str]]:
                     nested = str(exc) == "msgpack nesting too deep"
                     refusal.append(_MSGPACK_REFUSED if nested else str(exc))
                     raise ValueError(refusal[0]) from None
+            elif data[0] == "json" and isinstance(data[1], (str, bytes)):
+                try:
+                    tick()
+                    check_text_depth(data[1])
+                    tick()
+                except ValueError as exc:
+                    nested = str(exc) == "JSON nesting too deep"
+                    refusal.append(_JSON_REFUSED if nested else str(exc))
+                    raise ValueError(refusal[0]) from None
             return super().loads_typed(data)
 
     return _Scanning(allowed_msgpack_modules=()), refusal
 
 
 def _check_json_depth(conn: sqlite3.Connection, thread: str, deadline: float) -> None:
-    """Refuse the thread if any JSON text the saver will parse is nested too deep.
+    """Refuse the thread if any checkpoint metadata the saver will parse is nested too deep.
 
     Python 3.12 and 3.13's ``json`` refuse deep nesting and 3.14's parses it, so the text is
-    measured here, before the saver decodes it, the same way on every interpreter. Charged to
+    measured here, before the saver decodes it, the same way on every interpreter. The saver
+    parses metadata with plain ``json.loads``, outside the serializer ``_scanning_serde``
+    checks, which is why this one text is selected with SQL (``_JSON_TEXTS``). Charged to
     the snapshot deadline before each value, once the scan ends, and inside SQLite while a
     query runs. A value found too deep while the deadline passes is reported as too deep:
     either refuses the input, and the nesting is a property of it.
@@ -124,9 +134,7 @@ def _check_json_depth(conn: sqlite3.Connection, thread: str, deadline: float) ->
                     try:
                         check_text_depth(text)
                     except ValueError as exc:
-                        raise ValueError(
-                            "checkpoint history cannot be decoded (JSON nesting too deep)"
-                        ) from exc
+                        raise ValueError(_JSON_REFUSED) from exc
         check_deadline()
     except sqlite3.OperationalError:
         if expired:

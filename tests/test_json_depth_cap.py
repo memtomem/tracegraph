@@ -306,12 +306,13 @@ def test_scan_is_charged_to_the_snapshot_deadline(tmp_path):
         past = time.monotonic() - 1
         with pytest.raises(ValueError, match="deadline exceeded"):
             _check_json_depth(conn, "t", past)
-        # A query that runs long before its first row is interrupted inside SQLite.
+        # A query that runs long before its first row is interrupted inside SQLite: without the
+        # primary-key index, finding thread `t` scans 20,000 rows of another thread.
+        conn.execute("DROP TABLE checkpoints")
+        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, metadata BLOB)")
         conn.executemany(
-            "INSERT INTO writes (thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value) VALUES ('t', '', ?, 'task', 0, 'c', 'json', '[]')",
-            [(f"orphan-{i}",) for i in range(20_000)],
+            "INSERT INTO checkpoints VALUES ('other', ?)", [("{}",) for _ in range(20_000)]
         )
-        conn.execute("DELETE FROM checkpoints")
         with pytest.raises(ValueError, match="deadline exceeded") as raised:
             _check_json_depth(conn, "t", past)
         assert isinstance(raised.value.__context__, sqlite3.OperationalError)
@@ -355,6 +356,103 @@ def test_deadline_passing_during_the_last_scan_is_reported(tmp_path, monkeypatch
             _check_json_depth(conn, "t", deadline)
     finally:
         conn.close()
+
+
+# --- JSON bodies and writes are checked where the saver decodes them ---------------------------
+
+
+def _nocase_threads_with_json_write(path: Path, value: str) -> None:
+    """The fixture rewritten under thread ``T`` with a ``COLLATE NOCASE`` thread column.
+
+    Asked for thread ``t``, the saver lists these checkpoints and then reads their writes by the
+    stored ``T``. A check that selected writes by the requested ``t`` would miss ``value``.
+    """
+    src = sqlite3.connect(CHECKPOINTS)
+    dst = sqlite3.connect(path)
+    try:
+        dst.execute(
+            "CREATE TABLE checkpoints (thread_id TEXT NOT NULL COLLATE NOCASE, checkpoint_ns TEXT "
+            "NOT NULL DEFAULT '', checkpoint_id TEXT NOT NULL, parent_checkpoint_id TEXT, type "
+            "TEXT, checkpoint BLOB, metadata BLOB, PRIMARY KEY (thread_id, checkpoint_ns, "
+            "checkpoint_id))")
+        dst.execute(
+            "CREATE TABLE writes (thread_id TEXT NOT NULL, checkpoint_ns TEXT NOT NULL DEFAULT '', "
+            "checkpoint_id TEXT NOT NULL, task_id TEXT NOT NULL, idx INTEGER NOT NULL, channel "
+            "TEXT NOT NULL, type TEXT, value BLOB, PRIMARY KEY (thread_id, checkpoint_ns, "
+            "checkpoint_id, task_id, idx))")
+        dst.executemany(
+            "INSERT INTO checkpoints VALUES ('T', ?, ?, ?, ?, ?, ?)",
+            src.execute("SELECT checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, "
+                        "checkpoint, metadata FROM checkpoints"))
+        dst.executemany(
+            "INSERT INTO writes VALUES ('T', ?, ?, ?, ?, ?, ?, ?)",
+            src.execute("SELECT checkpoint_ns, checkpoint_id, task_id, idx, channel, type, value "
+                        "FROM writes"))
+        ns, cid, task = dst.execute(
+            "SELECT checkpoint_ns, checkpoint_id, task_id FROM writes LIMIT 1").fetchone()
+        dst.execute("INSERT INTO writes VALUES ('T', ?, ?, ?, 999, 'extra', 'json', ?)",
+                    (ns, cid, task, value.encode()))
+        dst.commit()
+    finally:
+        src.close()
+        dst.close()
+
+
+def test_a_json_write_reached_through_a_collation_is_still_capped(tmp_path):
+    # Before the check moved into the serializer, 3.12 and 3.13 reported RecursionError here and
+    # 3.14 parsed the write and reported no checkpoints for `t`.
+    db = tmp_path / "nocase.sqlite"
+    _nocase_threads_with_json_write(db, nested(OVER_CAP + 1))
+    _refused(db)
+    result = CliRunner().invoke(
+        cli.app, ["ingest", "--sqlite", str(db), "--thread", "t", "--out", str(tmp_path / "a.json")]
+    )
+    assert result.exit_code == 2, result.output
+    assert "JSON nesting too deep" in result.output
+
+
+def test_the_serializer_caps_json_and_keeps_the_refusal():
+    serde, refusal = sqlite_snapshot._scanning_serde(time.monotonic() + 3600)
+    serde.loads_typed(("json", nested(MAX_JSON_DEPTH).encode()))  # at the cap: decoded
+    assert refusal == []
+    with pytest.raises(ValueError, match=r"^checkpoint history cannot be decoded \(JSON nesting too deep\)$"):
+        serde.loads_typed(("json", nested(MAX_JSON_DEPTH + 1)))
+    assert refusal == ["checkpoint history cannot be decoded (JSON nesting too deep)"]
+    # Sticky, and shared with the copies the saver makes.
+    clone = serde.with_msgpack_allowlist([("some.module", "Thing")])
+    for s in (serde, clone):
+        with pytest.raises(ValueError, match=r"\(JSON nesting too deep\)$"):
+            s.loads_typed(("json", b"[]"))
+
+
+def test_a_json_value_that_is_not_text_is_left_to_the_decoder():
+    serde, refusal = sqlite_snapshot._scanning_serde(time.monotonic() + 3600)
+    with pytest.raises(TypeError, match="JSON object must be str, bytes or bytearray"):
+        serde.loads_typed(("json", 12345))
+    assert refusal == []
+
+
+def test_the_json_check_reports_an_expired_deadline_as_the_deadline():
+    for value in (b"[]", nested(OVER_CAP + 1)):  # passed before the check: not reported as depth
+        serde, refusal = sqlite_snapshot._scanning_serde(time.monotonic() - 1)
+        with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+            serde.loads_typed(("json", value))
+        assert refusal == ["SQLite snapshot deadline exceeded"]
+
+
+def test_a_deadline_passing_during_the_json_check_is_reported_as_the_deadline(monkeypatch):
+    deadline = time.monotonic() + 3600
+    serde, refusal = sqlite_snapshot._scanning_serde(deadline)
+    real = sqlite_snapshot.check_text_depth
+
+    def scan(text):
+        real(text)
+        monkeypatch.setattr(sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: deadline + 1))
+
+    monkeypatch.setattr(sqlite_snapshot, "check_text_depth", scan)
+    with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+        serde.loads_typed(("json", b"[]"))
+    assert refusal == ["SQLite snapshot deadline exceeded"]
 
 
 def test_undecodable_bytes_keep_the_savers_own_error(tmp_path):
