@@ -8,6 +8,7 @@ one the checkpoint serializer revives into an object, still counts.
 
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import shutil
 import sqlite3
@@ -23,7 +24,8 @@ from typer.testing import CliRunner
 from tracegraph import artifact, cli, sqlite_snapshot
 from tracegraph.adapters import OTLPSpanAdapter, PhoenixExportAdapter
 from tracegraph.input_validation import MAX_JSON_DEPTH, check_text_depth, loads
-from tracegraph.sqlite_snapshot import _check_json_depth, _inert_serde, ingest_snapshot
+from tracegraph.sqlite_snapshot import _JSON_REFUSED
+from tracegraph.sqlite_snapshot import _inert_serde, _scanning_rows, ingest_snapshot
 
 FIXTURES = Path(__file__).parent / "fixtures"
 CHECKPOINTS = FIXTURES / "langgraph" / "native-failure.sqlite"
@@ -227,6 +229,9 @@ def test_metadata_column_is_capped(tmp_path):
     _execute(db, f"UPDATE checkpoints SET metadata = ? WHERE {newest}",
              with_key('{"source": "loop", "step": 2}', "x", nested(OVER_CAP)))
     _refused(db)
+    _execute(db, f"UPDATE checkpoints SET metadata = ? WHERE {newest}",
+             with_key('{"source": "loop", "step": 2}', "x", nested(OVER_CAP)).encode())
+    _refused(db)
 
 
 def test_metadata_duplicate_key_is_capped(tmp_path):
@@ -298,64 +303,212 @@ def test_every_namespace_is_scanned(tmp_path):
     _refused(db)
 
 
-def test_scan_is_charged_to_the_snapshot_deadline(tmp_path):
+DEEP_NEWEST = with_key('{"source": "loop", "step": 2}', "x", nested(OVER_CAP))
+NEWEST = "rowid = (SELECT max(rowid) FROM checkpoints)"
+
+
+def _expire_after_setup(monkeypatch) -> None:
+    """Move the snapshot clock past every deadline once the saver has set up the private copy."""
+    real_setup = SqliteSaver.setup
+
+    def setup(self):
+        real_setup(self)
+        monkeypatch.setattr(sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: float("inf")))
+
+    monkeypatch.setattr(SqliteSaver, "setup", setup)
+
+
+def _never_scanned(monkeypatch) -> list:
+    scanned: list = []
+    real = sqlite_snapshot.check_text_depth
+    monkeypatch.setattr(sqlite_snapshot, "check_text_depth", lambda t: (scanned.append(t), real(t)))
+    return scanned
+
+
+def test_an_expired_deadline_is_reported_before_any_value_is_scanned(tmp_path, monkeypatch):
     db = _db(tmp_path)
+    _execute(db, f"UPDATE checkpoints SET metadata = ? WHERE {NEWEST}", DEEP_NEWEST)
+    scanned = _never_scanned(monkeypatch)
+    _expire_after_setup(monkeypatch)
+    with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+        _ingest(db)
+    assert scanned == []
+
+
+def test_a_thread_with_no_rows_still_reports_an_expired_deadline(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    with pytest.raises(KeyError, match="no checkpoints"):  # within the deadline
+        ingest_snapshot(db, "no-such-thread", error_channel="error")
+    _expire_after_setup(monkeypatch)
+    with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+        ingest_snapshot(db, "no-such-thread", error_channel="error")
+
+
+def test_a_deadline_passing_during_an_empty_listing_is_reported(tmp_path, monkeypatch):
+    # An empty listing reaches no row to check, and a short query can run long without reaching
+    # the progress handler, so the deadline is checked when the adapter finds no checkpoints.
+    db = _db(tmp_path)
+    real_list = SqliteSaver.list
+
+    def slow_list(self, *args, **kwargs):
+        monkeypatch.setattr(sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: float("inf")))
+        yield from real_list(self, *args, **kwargs)
+
+    monkeypatch.setattr(SqliteSaver, "list", slow_list)
+    with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+        ingest_snapshot(db, "no-such-thread", error_channel="error")
+
+
+def _rows(conn: sqlite3.Connection, factory, sql: str):
+    conn.row_factory = factory
+    return conn.execute(sql).fetchall()
+
+
+def test_the_row_check_reports_an_expired_deadline_as_the_deadline():
+    with closing(sqlite3.connect(":memory:")) as conn:
+        for value in ("'[]'", repr(nested(OVER_CAP + 1))):  # passed before the check
+            refusal: list[str] = []
+            factory = _scanning_rows(time.monotonic() - 1, refusal)
+            with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+                _rows(conn, factory, f"SELECT {value} AS metadata")
+            assert refusal == ["SQLite snapshot deadline exceeded"]
+
+
+def test_a_deadline_passing_during_the_row_check_is_reported_as_the_deadline(monkeypatch):
+    deadline = time.monotonic() + 3600
+    refusal: list[str] = []
+    factory = _scanning_rows(deadline, refusal)
+    real = sqlite_snapshot.check_text_depth
+
+    def scan(text):
+        real(text)
+        monkeypatch.setattr(sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: deadline + 1))
+
+    monkeypatch.setattr(sqlite_snapshot, "check_text_depth", scan)
+    with closing(sqlite3.connect(":memory:")) as conn:
+        with pytest.raises(ValueError, match="^SQLite snapshot deadline exceeded$"):
+            _rows(conn, factory, "SELECT '[]' AS metadata")
+    assert refusal == ["SQLite snapshot deadline exceeded"]
+
+
+def test_the_row_check_keeps_its_refusal_and_shares_it_with_the_serializer():
+    deadline = time.monotonic() + 3600
+    with closing(sqlite3.connect(":memory:")) as conn:
+        serde, refusal = sqlite_snapshot._scanning_serde(deadline)
+        factory = _scanning_rows(deadline, refusal)
+        deep = repr(nested(OVER_CAP + 1))
+        assert _rows(conn, factory, "SELECT '[]' AS metadata, 'x' AS other") == [("[]", "x")]
+        with pytest.raises(ValueError, match=r"^checkpoint history cannot be decoded \(JSON nesting too deep\)$"):
+            _rows(conn, factory, f"SELECT {deep} AS metadata")
+        assert refusal == [_JSON_REFUSED]
+        # A caller that swallowed the refusal cannot read on past it, by rows or by decoding.
+        with pytest.raises(ValueError, match=r"\(JSON nesting too deep\)$"):
+            _rows(conn, factory, "SELECT 1 AS unrelated")
+        with pytest.raises(ValueError, match=r"\(JSON nesting too deep\)$"):
+            serde.loads_typed(("json", b"[]"))
+
+        # And a refusal from the serializer stops the rows too.
+        serde, refusal = sqlite_snapshot._scanning_serde(deadline)
+        factory = _scanning_rows(deadline, refusal)
+        with pytest.raises(ValueError):
+            serde.loads_typed(("json", nested(OVER_CAP + 1)))
+        with pytest.raises(ValueError, match=r"\(JSON nesting too deep\)$"):
+            _rows(conn, factory, "SELECT '[]' AS metadata")
+
+
+@pytest.mark.parametrize("name", ["metadata", "METADATA", "MetaData", '"metadata"', "[Metadata]"])
+def test_the_metadata_column_is_found_by_any_spelling_sqlite_resolves(name):
+    with closing(sqlite3.connect(":memory:")) as conn:
+        factory = _scanning_rows(time.monotonic() + 3600, [])
+        with pytest.raises(ValueError, match=r"\(JSON nesting too deep\)$"):
+            _rows(conn, factory, f"SELECT {nested(OVER_CAP + 1)!r} AS {name}")
+        # Only that column: the same text under another name is not metadata.
+        _rows(conn, _scanning_rows(time.monotonic() + 3600, []),
+              f"SELECT {nested(OVER_CAP + 1)!r} AS metadata_copy")
+
+
+def _redefine_checkpoints(db: Path, kind: str) -> None:
+    """Serve ``checkpoints`` through ``kind`` over the real rows, the newest metadata nested too deep."""
     conn = sqlite3.connect(db)
     try:
-        SqliteSaver(conn).setup()
-        past = time.monotonic() - 1
-        with pytest.raises(ValueError, match="deadline exceeded"):
-            _check_json_depth(conn, "t", past)
-        # A query that runs long before its first row is interrupted inside SQLite: without the
-        # primary-key index, finding thread `t` scans 20,000 rows of another thread.
-        conn.execute("DROP TABLE checkpoints")
-        conn.execute("CREATE TABLE checkpoints (thread_id TEXT, metadata BLOB)")
-        conn.executemany(
-            "INSERT INTO checkpoints VALUES ('other', ?)", [("{}",) for _ in range(20_000)]
+        conn.execute(f"UPDATE checkpoints SET metadata = ? WHERE {NEWEST}", (DEEP_NEWEST,))
+        if kind == "declared-upper":
+            conn.execute("ALTER TABLE checkpoints RENAME COLUMN metadata TO METADATA")
+        else:
+            conn.execute("ALTER TABLE checkpoints RENAME TO cp_real")
+            columns = ("thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id, type, "
+                       "checkpoint, metadata AS MetaData")
+            if kind == "view":
+                conn.execute(f"CREATE VIEW checkpoints AS SELECT {columns} FROM cp_real")
+            else:
+                conn.execute(f"CREATE VIEW cp_view AS SELECT rowid, {columns} FROM cp_real")
+                conn.execute(
+                    "CREATE VIRTUAL TABLE checkpoints USING fts5(thread_id, checkpoint_ns, "
+                    "checkpoint_id, parent_checkpoint_id, type, checkpoint, MetaData, "
+                    "content='cp_view', content_rowid='rowid')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("kind", ["declared-upper", "view", "fts5"])
+def test_metadata_served_by_any_checkpoints_object_is_capped(tmp_path, kind):
+    db = _db(tmp_path)
+    _redefine_checkpoints(db, kind)
+    _refused(db)
+
+
+class _JsonSpy:
+    """``json`` for the saver's module, recording the objects ``loads`` is handed."""
+
+    def __init__(self, events: list):
+        self._events = events
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+    def loads(self, text, *args, **kwargs):
+        self._events.append(("parsed", text))
+        return json.loads(text, *args, **kwargs)
+
+
+@pytest.mark.parametrize("kind", ["table", "view"])
+def test_the_saver_parses_only_the_metadata_object_just_measured(tmp_path, monkeypatch, kind):
+    import langgraph.checkpoint.sqlite as saver_module
+
+    db = _db(tmp_path)
+    if kind == "view":
+        _redefine_checkpoints(db, "view")
+        _execute(db, "UPDATE cp_real SET metadata = '{\"source\": \"loop\", \"step\": 2}' "
+                     "WHERE rowid = (SELECT max(rowid) FROM cp_real)")
+    events: list = []
+    real = sqlite_snapshot.check_text_depth
+
+    def measure(text):
+        events.append(("measured", text))
+        return real(text)
+
+    monkeypatch.setattr(sqlite_snapshot, "check_text_depth", measure)
+    monkeypatch.setattr(saver_module, "json", _JsonSpy(events))
+
+    def assert_each_parse_follows_its_measurement():
+        parsed = [i for i, (what, _) in enumerate(events) if what == "parsed"]
+        assert parsed  # the saver did parse metadata
+        for i in parsed:
+            last = next(e for e in reversed(events[:i]) if e[0] == "measured")
+            assert last[1] is events[i][1]
+
+    _ingest(db)  # the saver's `list`
+    assert_each_parse_follows_its_measurement()
+    # `get_tuple`, which `get_state` reaches when a graph is supplied.
+    events.clear()
+    with closing(sqlite3.connect(db)) as conn:
+        serde, refusal = sqlite_snapshot._scanning_serde(time.monotonic() + 3600)
+        conn.row_factory = _scanning_rows(time.monotonic() + 3600, refusal)
+        assert SqliteSaver(conn, serde=serde).get_tuple(
+            {"configurable": {"thread_id": "t", "checkpoint_ns": ""}}
         )
-        with pytest.raises(ValueError, match="deadline exceeded") as raised:
-            _check_json_depth(conn, "t", past)
-        assert isinstance(raised.value.__context__, sqlite3.OperationalError)
-    finally:
-        conn.close()
-
-
-def test_an_expired_deadline_is_reported_before_any_value_is_scanned(tmp_path):
-    db = _db(tmp_path)
-    _execute(db, "UPDATE checkpoints SET metadata = ? WHERE rowid = (SELECT max(rowid) FROM checkpoints)",
-             with_key('{"source": "loop", "step": 2}', "x", nested(OVER_CAP)))
-    conn = sqlite3.connect(db)
-    try:
-        with pytest.raises(ValueError, match="deadline exceeded"):
-            _check_json_depth(conn, "t", time.monotonic() - 1)
-        # A thread with no rows at all still reports the expired deadline.
-        with pytest.raises(ValueError, match="deadline exceeded"):
-            _check_json_depth(conn, "no-such-thread", time.monotonic() - 1)
-    finally:
-        conn.close()
-
-
-def test_deadline_passing_during_the_last_scan_is_reported(tmp_path, monkeypatch):
-    db = _db(tmp_path)
-    conn = sqlite3.connect(db)
-    try:
-        SqliteSaver(conn).setup()
-        deadline = time.monotonic() + 3600
-        real = sqlite_snapshot.check_text_depth
-        scanned = {"n": 0}
-        total = sum(1 for q in sqlite_snapshot._JSON_TEXTS for _ in conn.execute(q, ("t",)))
-
-        def scan(text):
-            real(text)
-            scanned["n"] += 1
-            if scanned["n"] == total:  # the clock runs out while the last value is scanned
-                monkeypatch.setattr(sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: deadline + 1))
-
-        monkeypatch.setattr(sqlite_snapshot, "check_text_depth", scan)
-        with pytest.raises(ValueError, match="deadline exceeded"):
-            _check_json_depth(conn, "t", deadline)
-    finally:
-        conn.close()
+    assert_each_parse_follows_its_measurement()
 
 
 # --- JSON bodies and writes are checked where the saver decodes them ---------------------------

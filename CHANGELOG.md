@@ -31,6 +31,18 @@ explicitly.
 
 ### Fixed
 
+- **`ingest --sqlite` measures checkpoint metadata in the rows the saver reads** (#207). The
+  saver parses metadata with its own `json`, so its depth was checked beforehand by a separate
+  query. When `checkpoints` is a view or a virtual table that returns a different value on each
+  read, that query could see a shallow value and the saver a too-deep one: Python 3.12 then
+  reported `cannot be decoded (RecursionError)` and 3.14 parsed it and read the thread (exit 0).
+  The separate query is gone; each metadata value is measured in the row the saver fetches,
+  before the saver parses it, and refused as `checkpoint history cannot be decoded (JSON
+  nesting too deep)` on every interpreter. A thread holding a too-deep metadata value and a
+  too-deep msgpack value now reports whichever the saver reads first, newest checkpoint first;
+  before, the metadata one was always reported. A deadline that passes while an empty thread
+  is listed is still reported as `SQLite snapshot deadline exceeded`.
+
 - **`ingest --sqlite` measures JSON checkpoint bodies and writes where the saver decodes them**
   (#203). Their depth was checked beforehand with SQL that selected writes by the requested
   thread id, while the saver reads each checkpoint's writes by the thread id stored with it.
@@ -40,8 +52,8 @@ explicitly.
   parsed it and reported no checkpoints for that thread (exit 2 either way). Bodies and writes
   are now measured in the serializer, as msgpack values already are, and refused as
   `checkpoint history cannot be decoded (JSON nesting too deep)` on every interpreter.
-  Checkpoint metadata, which the saver parses outside the serializer, is still measured
-  beforehand. A thread holding both a too-deep msgpack value and a too-deep JSON body or write
+  Checkpoint metadata, which the saver parses outside the serializer, is covered by #207
+  above. A thread holding both a too-deep msgpack value and a too-deep JSON body or write
   now reports whichever the saver decodes first; before, the JSON one was always reported.
 
 ## 0.10.0 - 2026-11-14
