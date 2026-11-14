@@ -32,8 +32,8 @@ explicitly.
   int too large for a float, such as `10**400`, raised `OverflowError`. Each of these now
   raises `ValueError("SQLite snapshot deadline exceeded")`, which a caller catching
   `ValueError` sees. `float("inf")` is still accepted and means no deadline, and a finite int
-  or float bounds the read as before. The CLI never passes `timeout`, so only library callers
-  were affected.
+  or float is still accepted, though the deadline it sets now bounds more of the read (#192,
+  below). The CLI never passes `timeout`, so only library callers were affected.
 
 - **An output path that is the file stdin reads from is refused** (#193). Commands already
   refuse an output that is one of their input paths, but two ways of naming stdin slipped past
@@ -51,10 +51,12 @@ explicitly.
   before.
 
 - **Output paths and a few library inputs give clean errors** (#192).
-  - An output path whose name is too long for the filesystem made a command exit 1 with a
-    traceback (measured on Python 3.12 and 3.13), and so did an output path that is a symlink
-    loop on 3.12. Both are now usage errors, exit 2. On 3.13 and later a looping output path
-    does not raise: the output replaces the dangling link, as in 0.9.1.
+  - A path whose name is too long for the filesystem made a command exit 1 with a traceback,
+    whether it was an output path or an artifact given to `query` or `summarize` (measured on
+    Python 3.12 and 3.13). On 3.12 so did an output path that is a symlink loop, and an input
+    that is one when `summarize` or `export-review-candidates` also has an `--out`. All of these
+    are now usage errors, exit 2. On 3.13 and later a looping output path does not raise: the
+    output replaces the dangling link, as in 0.9.1.
   - `summarize` and `export-review-candidates` refuse an `--out` that is a hardlink to an
     artifact named on the command line, exit 2. In 0.9.1 the report replaced that name. The
     input file itself was left as it was, because the output is written to a new file and
