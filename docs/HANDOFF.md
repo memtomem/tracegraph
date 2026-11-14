@@ -1,6 +1,100 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-11-05, `89c80c2`(v0.9.1) 기준 (Asia/Seoul)
+## 현재 전달 상태 — 2026-11-14, 0.10.0 준비 기준 (Asia/Seoul)
+
+0.9.1(`89c80c2`) 뒤에 제품 PR 4건(#192·#196·#197·#198), 문서 PR 3건(#190·#191·#199), 보안 권고 수정 1건이 착지했고, 이 절은 0.10.0 준비 PR을 기준으로 쓴다. 0.9.1 절은
+아래 "이전 전달 상태"로 내렸다.
+
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `0f03081`(GHSA-8hc3-mf6m-fh5r 수정 병합)이다.
+  시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. 0.9.1 뒤 `uv.lock`의 의존성은 바뀌지 않았고, 0.10.0
+  준비 PR은 그 안의 프로젝트 버전만 0.10.0으로 바꿨다.
+- **0.10.0은 minor다.** #195가 `ingest`의 stderr `note:`와 `analyze` 경고를 더해 CLI 출력이 바뀌었으므로, 0.8.0·0.9.0과 같은
+  기준(출력 문구가 바뀌면 patch가 아니라 minor)을 따른다. artifact·report·review-candidate schema 버전은 그대로다. 전체
+  목록은 `CHANGELOG.md`의 `## 0.10.0`이다. 놓치기 쉬운 동작 변경:
+  - **조작된 checkpoint DB의 프로세스 붕괴 방지(GHSA-8hc3-mf6m-fh5r).** LangGraph 직렬화기는 msgpack 확장 payload마다
+    `ormsgpack.unpackb`를 새로 부르고 ormsgpack의 1022단계 한도는 호출마다 따로라, 확장을 겹겹이 쌓으면 C 스택이 넘쳐
+    Python 예외 없이 프로세스가 죽었다(8 MiB 스택에서 3.12·3.13은 누적 약 7.6만 단계부터 SIGSEGV, 3.14는 더 깊이에서
+    SIGABRT). `input_validation.check_msgpack_depth`가 디코딩 전에 값을 한 번 선형으로 훑어, 한 경로의 컨테이너가 확장을
+    가로질러 2048단계(`MAX_MSGPACK_DEPTH`)를 넘거나 확장이 256단계(`MAX_MSGPACK_EXT_DEPTH`)를 넘으면
+    `checkpoint history cannot be decoded (msgpack nesting too deep)`(exit 2)로 거부한다. 검사는
+    `sqlite_snapshot._scanning_serde`의 `loads_typed` 안에서 돌아 saver가 실제로 디코딩하는 값만 정확히 본다. 상한 2048/256은
+    소유자가 측정표를 보고 정했다(배열·맵·깊은 맵 키·확장 code 0–7·NumPy 분기가 Linux 3.12·3.13·3.14에서 1 MiB 스택에도
+    디코딩됨). 직접 만든 saver를 `LangGraphCheckpointAdapter`에 넘기는 라이브러리 호출자는 보호되지 않는다(`SECURITY.md`).
+  - **stdin이 읽는 파일을 출력으로 쓰지 않음(#193, PR #196).** 입력이 `-`이거나 `/dev/stdin`·`/dev/fd/0` 같은 descriptor
+    경로일 때도 출력과 같은 파일인지 device·inode로 비교해 exit 2로 거부한다. 경로를 열지 않고 metadata만 본다.
+  - **`--graph` 없는 LangGraph 읽기의 공시(#195, PR #197).** `ingest`는 stderr `note:`를, `analyze`는
+    `LANGGRAPH_NO_SCHEDULE_GRAPH_WARNING`을 더한다. 멈춘 실행이 끝난 실행처럼 읽힐 수 있다는 문구다.
+  - **경로·입력 오류 정리(#192, #194).** 명령줄에 준 너무 긴 경로나 3.12의 symlink loop가 대부분 traceback(exit 1) 대신
+    usage error(exit 2)가 된다. 예외: `validate`는 너무 긴 이름을 `INVALID`(exit 1)로 보고하고, 디렉터리 안의 loop `*.json`은
+    경고 후 건너뛰어 성공할 수 있다. `ingest_snapshot`은 쓸 수 없는 `timeout`(NaN·bool·숫자 아님·float으로 바꿀 수 없을
+    만큼 큰 int)을 `ValueError`로 거부하고, 그 마감 시간이 어댑터 쿼리까지 덮는다. 측정한 경우 목록은 `CHANGELOG.md`의 해당 항목에 있다.
+- **열린 이슈 0개.** #194는 PR #198로 닫혔고, #180·#181은 2026-11-14에 소유자 결정으로 not planned로 닫았다(아래 "이번
+  구간의 결정" 4·5번).
+
+### `89c80c2` 이후 착지한 변경
+
+| PR | merge | 내용 |
+| --- | --- | --- |
+| #190 | `5df1c1c` | 0.9.1 배포 기록(문서만) |
+| #191 | `08139e5` | #188을 닫은 기록(문서만) |
+| #192 | `646f5de` | 경로·마감 시간·입력 검증 강화와 OTLP 부모 탐색·LangGraph 이름 해석·normalize·check·motif의 반복 작업 제거. artifact·report 바이트 불변. CHANGELOG 항목은 #199로 따로 썼다 |
+| #196 | `76abee6` | #193: `_file_identity`(st_dev, st_ino)로 `-`와 descriptor 경로까지 출력 충돌을 비교한다. 경로는 열지 않는다 |
+| #197 | `ba4ea4f` | #195: `--graph` 없는 LangGraph `ingest`의 stderr `note:`와 `analyze` 경고 |
+| #198 | `bffe1a4` | #194: 기존 timeout 검사를 `except OverflowError`로 감싼다. CHANGELOG는 #192의 timeout 검사와 묶어 0.9.1 대비로 썼다 |
+| #199 | `67449a3` | #192의 CHANGELOG 항목(문서만). 문장마다 v0.9.1과 측정해 비교했다 |
+| 권고문 fork PR #1 | `0f03081` | GHSA-8hc3-mf6m-fh5r: `check_msgpack_depth`와 `_scanning_serde`. 권고문 화면에서 병합해 커밋 하나("Merge commit from fork")로 들어왔고, 트리는 리뷰한 브랜치 끝(`0124afa`)과 같다 |
+
+### 이번 구간의 결정(2026-11-09~14)
+
+1. **#193(PR #196):** 처음 버전은 경로를 열어 `fstat`했는데, FIFO를 열면 기다리던 writer가 깨어 pipe가 끊기고 terminal을
+   열면 controlling terminal이 될 수 있어서, metadata만 보는 방식으로 바꿨다.
+2. **#195(PR #197):** 소유자가 선택지 A+B를 골랐다. C(opt-in `check` 규칙)는 후속으로 남기고(이슈 미등록), D(capture gap)는
+   하지 않는다.
+3. **#194(PR #198):** 소유자가 `inf`를 "마감 없음"으로 계속 받기로 했다. `float()`로 바꾸는 도우미를 두었더니 리뷰마다
+   `__float__`·`__radd__`를 바꾼 숫자 subclass에서 새 지적이 나와(roadmap 계획 리뷰 2라운드와 그 설계의 diff 리뷰 2라운드
+   모두 이 함수에 지적), 도우미를 지우고 기존 검사를
+   `except OverflowError`로 감싸는 최소 수정으로 줄였다. dunder를 바꾼 subclass는 범위 밖이다(HEAD와 같은 동작).
+4. **#180:** 소유자가 선택지 1(`tool_key`를 raw로 두고 공시 유지)을 골라 not planned로 닫았다. 두 소비자 reader가
+   `^\S+::\S+$`로 검증하고 UUIDv5 id에 넣으므로 값 전체를 alias로 바꾸면 거부되고 id도 바뀐다.
+5. **#181:** 소유자가 가설 검증만 먼저 하기로 했다. golden 픽스처 14개에서 `summarize`가 매치를 거의 묶지 못했고(`error`
+   9개 → 8그룹), 픽스처가 일부러 서로 다른 시나리오라 이 코호트로는 가설을 판단할 수 없어 not planned로 닫았다. 같은
+   에이전트를 여러 번 돌린 실제 코호트나 사용자 요청이 생기면 다시 연다.
+6. **GHSA-8hc3:** 계획 리뷰에서 "확장 payload가 깨지면 그 확장만 버리고 다음 형제로 이어서 훑는다"(decoder가 그렇게
+   읽으므로), "확장 code 0–7만이 아니라 모든 code로 내려간다"(`langgraph-checkpoint` 하한에 상한이 없음)로 정했다. 첫
+   구현은 `_JSON_TEXTS`처럼 saver의 쿼리를 흉내 낸 SQL로 행을 골랐는데, `checkpoints.thread_id TEXT COLLATE NOCASE`인 DB에서
+   saver가 저장된 `T`로 writes를 읽는 동안 SQL은 요청한 `t`로 골라 쓰기 하나를 놓쳤다(재현: 수정 후에도 SIGSEGV). 그래서
+   검사를 직렬화기의 `loads_typed` 안으로 옮겼다. 어댑터는 디코딩 실패를 `cannot be decoded (<type>)`으로만 알리므로
+   거부 사유를 복사본과 공유하는 목록에 남기고 `ingest_snapshot`이 그 사유로 다시 던진다.
+7. **#192의 CHANGELOG(PR #199)와 릴리스 claims review:** #192가 CHANGELOG 없이 병합되어 따로 썼다. 릴리스 단위 claims
+   review 4라운드(2026-11-14)에서 나온 누락(입력 경로, `validate`, 3.12 디렉터리 loop, 더 많은 명령의 loop 입력, 성능
+   항목)과 #194 항목의 "as before" 문장을 모두 bash로 측정한 뒤 반영했다.
+
+### 검증 증거
+
+PR별 수치는 각 PR 본문에 적힌 것만 옮겼다.
+
+| 검증 | 결과 |
+| --- | --- |
+| 전체 테스트 | #192: `-m "not perf"` `[cypher]` 3222 passed / 12 skipped(3.12·3.13), perf 14 passed. #196: `suite-run`(not perf) 3258 passed / 12 skipped CLEAN. #197: 3223 passed / 12 skipped CLEAN. #198: `suite-run` 3283 passed / 12 skipped CLEAN. GHSA 수정: `suite-run` 3379 passed / 12 skipped CLEAN(#198·#199 위로 rebase 후), 새 테스트는 3.13.2·3.14.4에서 각 142 passed |
+| 골든 | #198·GHSA 수정: golden 265개가 `ba4ea4f`와 바이트 단위로 같다. #197: LangGraph report 4개는 경고 한 줄만 추가, OTLP 10개·Phoenix 1개는 바이트 동일 |
+| 회귀 테스트 판별력 | #192·#196·#197·#198·GHSA 수정 모두 PR 본문에 변이 결과가 있다. GHSA 수정: 변이 17종(walker 9, 직렬화기 8)을 새 테스트가 모두 잡고, 수정을 뺀 코드에서는 CLI 테스트가 SIGSEGV(-11)를 잡는다 |
+| 리뷰 게이트 | #198: plan 2·diff 2, 최소 수정으로 바꾼 뒤 커밋 후 리뷰 **SHIP**. GHSA 수정: plan 2, diff 1라운드는 리뷰어 쪽 콘텐츠 필터로 중단(마지막 단계가 collation 문제로 이어짐), 재시도 1라운드 NEEDS-FIX, 2라운드 **SHIP**. #199: claims review 2라운드 **SHIP**. 릴리스 claims review: 4라운드, 마지막 **SHIP**. #192·#196·#197 본문에는 리뷰 기록이 없다 |
+
+### 남은 결정과 후속 항목
+
+1. **0.10.0 릴리스(소유자):** 이 준비 PR 병합 → `test-v0.10.0` 리허설 → `v0.10.0` 태그 → `pypi` 환경 승인. 절차는
+   [릴리스 런북](releasing.md). `CHANGELOG.md` 제목의 날짜는 준비 PR 날짜(2026-11-14)다.
+2. **권고문 공개(소유자):** GHSA-8hc3-mf6m-fh5r의 영향 범위는 `<= 0.9.1`, 수정 버전은 `0.10.0`으로 이미 고쳤다(draft).
+   수정은 `0f03081`로 이미 공개 브랜치에 있으니 배포 직후 공개한다. upstream(LangGraph ext hook·ormsgpack) 보고 여부는 미정.
+3. **등록하지 않은 후속 항목(소유자 결정 전):**
+   - `_JSON_TEXTS`의 JSON 미리 검사도 SQL로 행을 골라, GHSA 수정 때 찾은 것과 같은 collation 사각지대가 있다. JSON은 C
+     스택 붕괴가 아니라 버전 간 결과 차이로 보이나 측정하지 않았다.
+   - 디렉터리 입력 안에서 `--out`과 hardlink인 artifact는 경고 없이 빠지고 exit 0으로 끝난다(#192·#193 이후, 측정).
+   - #195의 선택지 C(opt-in `check` 규칙).
+
+---
+
+## 이전 전달 상태 — 2026-11-05, `89c80c2`(v0.9.1) 기준 (Asia/Seoul)
 
 v0.9.1은 0.9.0 위에 의존성 하한만 바꾼 patch다. 이 절의 0.9.0 기록(2026-10-24, `c3c3896`)은 그대로 두고, 그 뒤의 변경과
 0.9.1 배포를 덧붙였다.
