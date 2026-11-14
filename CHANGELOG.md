@@ -6,6 +6,23 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
+## Unreleased
+
+### Fixed
+
+- **`ingest --sqlite` measures JSON checkpoint bodies and writes where the saver decodes them**
+  (#203). Their depth was checked beforehand with SQL that selected writes by the requested
+  thread id, while the saver reads each checkpoint's writes by the thread id stored with it.
+  When the `checkpoints` thread column compares case-insensitively and the stored id differs
+  in case from the requested one, a too-deep JSON write went unchecked, and the saver's own
+  `json` decided: Python 3.12 and 3.13 reported `cannot be decoded (RecursionError)` and 3.14
+  parsed it and reported no checkpoints for that thread (exit 2 either way). Bodies and writes
+  are now measured in the serializer, as msgpack values already are, and refused as
+  `checkpoint history cannot be decoded (JSON nesting too deep)` on every interpreter.
+  Checkpoint metadata, which the saver parses outside the serializer, is still measured
+  beforehand. A thread holding both a too-deep msgpack value and a too-deep JSON body or write
+  now reports whichever the saver decodes first; before, the JSON one was always reported.
+
 ## 0.10.0 - 2026-11-14
 
 ### Changed
