@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from tracegraph.adapters.langgraph_checkpoint import LangGraphCheckpointAdapter
-from tracegraph.input_validation import check_text_depth
+from tracegraph.input_validation import check_msgpack_depth, check_text_depth
 from tracegraph.model import RawTrace
 
 # Every JSON text `SqliteSaver` parses while listing one thread: each checkpoint's metadata,
@@ -48,6 +48,51 @@ def _inert_serde():
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     return JsonPlusSerializer(allowed_msgpack_modules=())
+
+
+_MSGPACK_REFUSED = "checkpoint history cannot be decoded (msgpack nesting too deep)"
+_DEADLINE_EXCEEDED = "SQLite snapshot deadline exceeded"
+
+
+def _scanning_serde(deadline: float) -> tuple[Any, list[str]]:
+    """``_inert_serde`` that walks every msgpack value before decoding it, and its refusal.
+
+    LangGraph's decoder unpacks each extension payload with a new call, so stacked extensions
+    nest past ormsgpack's per-call limit until the C stack overflows, with no Python exception
+    (``check_msgpack_depth``). The walk runs in ``loads_typed`` so that it covers exactly the
+    values the saver decodes: SQL written to select the same rows can be steered elsewhere by a
+    crafted schema's collations. The adapter reports any decode failure as ``cannot be decoded
+    (<type>)``, so the reason is also kept in the returned list, which ``ingest_snapshot``
+    raises instead. The list is shared by reference with any copy the saver makes
+    (``with_msgpack_allowlist`` copies the serializer), and once set every later decode is
+    refused too, so a caller that swallows one failure cannot decode on past it. The walk is
+    charged to ``deadline`` before it starts, every 65,536 objects, and once it ends; depth
+    found during the walk is reported as depth even if the deadline has also passed.
+    """
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+    refusal: list[str] = []
+
+    def tick() -> None:
+        if time.monotonic() >= deadline:
+            raise ValueError(_DEADLINE_EXCEEDED)
+
+    class _Scanning(JsonPlusSerializer):
+        def loads_typed(self, data: tuple[str, bytes]) -> Any:
+            if refusal:
+                raise ValueError(refusal[0])
+            if data[0] == "msgpack":
+                try:
+                    tick()
+                    check_msgpack_depth(data[1], tick)
+                    tick()
+                except ValueError as exc:
+                    nested = str(exc) == "msgpack nesting too deep"
+                    refusal.append(_MSGPACK_REFUSED if nested else str(exc))
+                    raise ValueError(refusal[0]) from None
+            return super().loads_typed(data)
+
+    return _Scanning(allowed_msgpack_modules=()), refusal
 
 
 def _check_json_depth(conn: sqlite3.Connection, thread: str, deadline: float) -> None:
@@ -139,7 +184,8 @@ def ingest_snapshot(
             # will call whatever the payload names. `check_same_thread=False` mirrors what
             # that helper does.
             with closing(sqlite3.connect(str(snapshot), check_same_thread=False)) as conn:
-                saver = SqliteSaver(conn, serde=_inert_serde())
+                serde, refusal = _scanning_serde(deadline)
+                saver = SqliteSaver(conn, serde=serde)
                 # Creates the tables in this private copy when absent, as the saver's first
                 # listing would, so a database without them still reads as "no checkpoints".
                 saver.setup()
@@ -159,10 +205,14 @@ def ingest_snapshot(
                         schedule_graph=graph,
                         include_error_messages=include_error_messages,
                     ).ingest(thread)
+                    if refusal:  # a decode failure the adapter did not let through
+                        raise ValueError(refusal[0])
                     if time.monotonic() >= deadline:
                         raise ValueError("SQLite snapshot deadline exceeded")
                     return raw
                 except ValueError as exc:
+                    if refusal:
+                        raise ValueError(refusal[0]) from None
                     if expired and isinstance(exc.__cause__, sqlite3.OperationalError):
                         raise ValueError("SQLite snapshot deadline exceeded") from None
                     raise

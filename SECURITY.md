@@ -116,6 +116,17 @@ Two limits on that guarantee:
 - It is a hardening measure over a third-party deserializer, not a sandbox. Prefer to treat a
   checkpoint database from an untrusted source the way you would treat a script from one.
 
+The same path also walks every msgpack value as the saver decodes it, before decoding. The
+serializer unpacks each extension payload with a new call, and the msgpack library's nesting
+limit applies per call, so stacked extensions could nest until the C stack overflowed and the
+process died with no Python exception. A value with more than 2048 nested containers on one
+path, counted across extensions, or more than 256 nested extensions is refused with exit 2.
+At those limits every shape we measured still decoded on a 1 MiB stack (Python 3.12-3.14 on
+Linux; macOS was measured at its default stacks); a thread with a smaller stack is outside
+that envelope. Like the allowlist,
+this covers the `ingest` path only: **a saver you pass to `LangGraphCheckpointAdapter`
+yourself decodes unscanned.**
+
 ### `ingest --graph` runs the Python code you name
 
 `tracegraph ingest --graph path/to/file.py:attr` (or `pkg.module:attr`) loads the compiled graph

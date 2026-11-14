@@ -26,6 +26,27 @@ explicitly.
 
 ### Fixed
 
+- **A crafted checkpoint database can no longer crash `ingest --sqlite`** (GHSA-8hc3-mf6m-fh5r).
+  LangGraph's checkpoint serializer unpacks each msgpack extension payload with a new
+  `ormsgpack` call, and ormsgpack's limit of 1022 nested levels applies per call. So extensions
+  stacked inside each other could nest until the C stack overflowed and killed the process
+  with no Python exception and no error message. On an 8 MiB stack, 85 extensions each holding
+  1000 nested lists did this on Python 3.12 and 3.13 (SIGSEGV), and 170 did on 3.14 (SIGABRT).
+  `ingest --sqlite` and `ingest_snapshot` now walk each msgpack value the saver decodes, at the
+  point it decodes it, so the walk covers exactly the values read, whatever rows the saver's
+  queries select. A value with more than 2048 nested containers on one path (counted across
+  extension payloads, map keys included) or more than 256 nested extensions is refused with
+  `checkpoint history cannot be decoded (msgpack nesting too deep)`, exit 2. A long walk is
+  charged to the snapshot deadline.
+
+  Some values that decoded before are now refused: anything past either limit, e.g. 10
+  extensions each holding 1000 nested lists. A value without extensions that ormsgpack can
+  decode is never refused, since ormsgpack stops it at 1022 levels. At the limits, every shape
+  we measured decoded on a 1 MiB stack on Python 3.12, 3.13 and 3.14 (Linux; macOS was measured
+  at its default stacks). A saver you pass to `LangGraphCheckpointAdapter` yourself is not
+  scanned. JSON values keep their limit and their `JSON nesting too deep` message, and are
+  checked first.
+
 - **`ingest_snapshot` refuses a `timeout` it cannot use with `ValueError`** (#192, #194).
   In 0.9.1 the library function did not check `timeout`. A NaN was accepted and the read
   never expired, `True` was taken as one second, a string or `None` raised `TypeError`, and an
