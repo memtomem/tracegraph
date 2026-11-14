@@ -56,7 +56,12 @@ explicitly.
     Python 3.12 and 3.13). On 3.12 so did an output path that is a symlink loop, and an input
     that is one when `summarize` or `export-review-candidates` also has an `--out`. All of these
     are now usage errors, exit 2. On 3.13 and later a looping output path does not raise: the
-    output replaces the dangling link, as in 0.9.1.
+    output replaces the dangling link, as in 0.9.1. `validate` given a name that is too long
+    now reports the file as `INVALID` (exit 1, as for any invalid file) instead of a traceback.
+  - On Python 3.12, a directory input holding a `*.json` symlink loop made `summarize` and
+    `export-review-candidates` with an `--out` exit 1 with a traceback. The file is now skipped
+    with a warning like any other unreadable file (`--strict` refuses it, exit 2), as 3.13
+    already did.
   - `summarize` and `export-review-candidates` refuse an `--out` that is a hardlink to an
     artifact named on the command line, exit 2. In 0.9.1 the report replaced that name. The
     input file itself was left as it was, because the output is written to a new file and
