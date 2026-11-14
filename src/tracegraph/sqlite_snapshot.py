@@ -18,18 +18,11 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 
 from tracegraph.adapters.langgraph_checkpoint import LangGraphCheckpointAdapter
 from tracegraph.input_validation import check_msgpack_depth, check_text_depth
 from tracegraph.model import RawTrace
-
-# The JSON texts `SqliteSaver` parses outside its serializer while listing one thread: each
-# checkpoint's metadata, which it hands to plain `json.loads`. JSON checkpoint bodies and writes
-# go through `loads_typed` and are checked there (`_scanning_serde`). This is the saver's own
-# listing predicate on the same column, so it selects the rows the listing does.
-_JSON_TEXTS = ("SELECT metadata FROM checkpoints WHERE thread_id = ?",)
-
 
 def _inert_serde():
     """A checkpoint deserializer that revives data but never invokes an arbitrary callable.
@@ -48,6 +41,14 @@ def _inert_serde():
 _MSGPACK_REFUSED = "checkpoint history cannot be decoded (msgpack nesting too deep)"
 _JSON_REFUSED = "checkpoint history cannot be decoded (JSON nesting too deep)"
 _DEADLINE_EXCEEDED = "SQLite snapshot deadline exceeded"
+
+
+def _deadline_tick(deadline: float) -> Callable[[], None]:
+    def tick() -> None:
+        if time.monotonic() >= deadline:
+            raise ValueError(_DEADLINE_EXCEEDED)
+
+    return tick
 
 
 def _scanning_serde(deadline: float) -> tuple[Any, list[str]]:
@@ -71,10 +72,7 @@ def _scanning_serde(deadline: float) -> tuple[Any, list[str]]:
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     refusal: list[str] = []
-
-    def tick() -> None:
-        if time.monotonic() >= deadline:
-            raise ValueError(_DEADLINE_EXCEEDED)
+    tick = _deadline_tick(deadline)
 
     class _Scanning(JsonPlusSerializer):
         def loads_typed(self, data: tuple[str, bytes]) -> Any:
@@ -103,45 +101,36 @@ def _scanning_serde(deadline: float) -> tuple[Any, list[str]]:
     return _Scanning(allowed_msgpack_modules=()), refusal
 
 
-def _check_json_depth(conn: sqlite3.Connection, thread: str, deadline: float) -> None:
-    """Refuse the thread if any checkpoint metadata the saver will parse is nested too deep.
+def _scanning_rows(deadline: float, refusal: list[str]) -> Callable[[sqlite3.Cursor, tuple], tuple]:
+    """A row factory that measures each checkpoint's metadata in the row the saver fetches.
 
-    Python 3.12 and 3.13's ``json`` refuse deep nesting and 3.14's parses it, so the text is
-    measured here, before the saver decodes it, the same way on every interpreter. The saver
-    parses metadata with plain ``json.loads``, outside the serializer ``_scanning_serde``
-    checks, which is why this one text is selected with SQL (``_JSON_TEXTS``). Charged to
-    the snapshot deadline before each value, once the scan ends, and inside SQLite while a
-    query runs. A value found too deep while the deadline passes is reported as too deep:
-    either refuses the input, and the nesting is a property of it.
+    ``SqliteSaver`` parses metadata with plain ``json.loads``, outside the serializer
+    ``_scanning_serde`` checks, so the text is measured here, in the row object the saver then
+    unpacks and parses: SQL written to read "the same" rows first can be handed different
+    values by a ``checkpoints`` view or virtual table. The result column carries the spelling
+    the schema declared (``METADATA``, a view's ``AS MetaData``), not the query's, so it is
+    matched as SQLite matches identifiers, ignoring case. Shares ``refusal`` with
+    ``_scanning_serde``: once either refuses, every later row is refused too. Each check is
+    charged to ``deadline`` before it starts and once it ends.
     """
-    expired = False
+    tick = _deadline_tick(deadline)
 
-    def interrupt() -> int:
-        nonlocal expired
-        expired = time.monotonic() >= deadline
-        return expired
+    def factory(cursor: sqlite3.Cursor, row: tuple) -> tuple:
+        if refusal:
+            raise ValueError(refusal[0])
+        for column, value in zip(cursor.description, row, strict=True):
+            if isinstance(value, (str, bytes)) and column[0].lower() == "metadata":
+                try:
+                    tick()
+                    check_text_depth(value)
+                    tick()
+                except ValueError as exc:
+                    nested = str(exc) == "JSON nesting too deep"
+                    refusal.append(_JSON_REFUSED if nested else str(exc))
+                    raise ValueError(refusal[0]) from None
+        return row
 
-    def check_deadline() -> None:
-        if time.monotonic() >= deadline:
-            raise ValueError("SQLite snapshot deadline exceeded")
-
-    conn.set_progress_handler(interrupt, 10_000)
-    try:
-        for query in _JSON_TEXTS:
-            for (text,) in conn.execute(query, (thread,)):
-                check_deadline()
-                if isinstance(text, (str, bytes)):
-                    try:
-                        check_text_depth(text)
-                    except ValueError as exc:
-                        raise ValueError(_JSON_REFUSED) from exc
-        check_deadline()
-    except sqlite3.OperationalError:
-        if expired:
-            raise ValueError("SQLite snapshot deadline exceeded") from None
-        raise
-    finally:
-        conn.set_progress_handler(None, 0)
+    return factory
 
 
 def ingest_snapshot(
@@ -193,11 +182,11 @@ def ingest_snapshot(
             # that helper does.
             with closing(sqlite3.connect(str(snapshot), check_same_thread=False)) as conn:
                 serde, refusal = _scanning_serde(deadline)
+                conn.row_factory = _scanning_rows(deadline, refusal)
                 saver = SqliteSaver(conn, serde=serde)
                 # Creates the tables in this private copy when absent, as the saver's first
                 # listing would, so a database without them still reads as "no checkpoints".
                 saver.setup()
-                _check_json_depth(conn, thread, deadline)
                 expired = False
 
                 def interrupt() -> int:
@@ -218,6 +207,12 @@ def ingest_snapshot(
                     if time.monotonic() >= deadline:
                         raise ValueError("SQLite snapshot deadline exceeded")
                     return raw
+                except KeyError:
+                    # No checkpoints: no row reached the factory's deadline check, and a short
+                    # query can run long without reaching the progress handler.
+                    if time.monotonic() >= deadline:
+                        raise ValueError(_DEADLINE_EXCEEDED) from None
+                    raise
                 except ValueError as exc:
                     if refusal:
                         raise ValueError(refusal[0]) from None

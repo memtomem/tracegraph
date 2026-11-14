@@ -644,8 +644,7 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     with pytest.raises(ValueError, match="deadline"):
         ingest_snapshot(db, "t", error_channel="error", timeout=float("nan"))
 
-    # The deadline also bounds the adapter's own queries (saver.list, get_state), not only
-    # _check_json_depth. Every connection records its progress-handler calls, and the handler
+    # The deadline also bounds the adapter's own queries (saver.list, get_state). Every connection records its progress-handler calls, and the handler
     # runs on every VM step instead of every 10 000, so even this small fixture's queries
     # reach it.
     fixture = ROOT / "tests" / "fixtures" / "langgraph" / "native-failure.sqlite"
@@ -675,9 +674,9 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
         return raw
 
     monkeypatch.setattr(sqlite_snapshot.LangGraphCheckpointAdapter, "ingest", spy_ingest)
-    installed_then_removed = [(True, 10_000), (False, 0)] * 2  # _check_json_depth, then ingest
+    installed_then_removed = [(True, 10_000), (False, 0)]
 
-    # Within the deadline: the read completes and both handlers are removed afterwards.
+    # Within the deadline: the read completes and the handler is removed afterwards.
     assert ingest_snapshot(fixture, "t", error_channel="error").steps
     assert adapter_finished == [True]
     assert handler_calls == installed_then_removed
@@ -694,22 +693,34 @@ def test_sqlite_snapshot_symlink_loop_nan_timeout_and_ingest_deadline(tmp_path, 
     expire_after_ingest = False
     monkeypatch.setattr(sqlite_snapshot, "time", real_time)
 
-    # Expiring right after _check_json_depth interrupts the adapter's first query (it never
-    # returns), reports the deadline, and still removes the handler.
+    # Expiring once the handler is installed interrupts the adapter's first query inside SQLite
+    # (it never returns), reports the deadline, and still removes the handler.
     adapter_finished.clear()
     handler_calls.clear()
-    real_check = sqlite_snapshot._check_json_depth
+    interrupted: list[bool] = []
 
-    def expire_after_check(c, thread, deadline):
-        real_check(c, thread, deadline)
-        monkeypatch.setattr(
-            sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: deadline + 1)
-        )
+    class ExpiringConnection(RecordingConnection):
+        def set_progress_handler(self, handler, n):
+            if handler is not None:
+                def expire_then_handle():
+                    monkeypatch.setattr(
+                        sqlite_snapshot, "time", SimpleNamespace(monotonic=lambda: float("inf"))
+                    )
+                    interrupted.append(bool(handler()))
+                    return interrupted[-1]
 
-    monkeypatch.setattr(sqlite_snapshot, "_check_json_depth", expire_after_check)
-    with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded"):
+                super().set_progress_handler(expire_then_handle, n)
+            else:
+                super().set_progress_handler(handler, n)
+
+    monkeypatch.setattr(
+        sqlite3, "connect", lambda *a, **kw: real_connect(*a, **{"factory": ExpiringConnection, **kw})
+    )
+    with pytest.raises(ValueError, match="SQLite snapshot deadline exceeded") as raised:
         ingest_snapshot(fixture, "t", error_channel="error")
     assert adapter_finished == []
+    assert interrupted == [True]
+    assert isinstance(raised.value.__context__.__cause__, sqlite3.OperationalError)
     assert handler_calls == installed_then_removed
 
 
