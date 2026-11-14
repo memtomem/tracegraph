@@ -1,13 +1,13 @@
 # Tracegraph handoff
 
-## 현재 전달 상태 — 2026-11-14, `263f980`(v0.10.0) 기준, lock은 `cd1b83b`, 열린 이슈는 #203~#205 등록 뒤로 갱신 (Asia/Seoul)
+## 현재 전달 상태 — 2026-11-14, `263f980`(v0.10.0) 기준, 0.10.0 뒤 변경과 열린 이슈는 `a50b084`(#208)까지 갱신 (Asia/Seoul)
 
 0.9.1(`89c80c2`) 뒤에 제품 PR 4건(#192·#196·#197·#198), 문서 PR 3건(#190·#191·#199), 보안 권고 수정 1건이 착지했고,
-0.10.0 준비 PR(#200, `263f980`)로 배포했다. 이 절은 준비 PR이 쓴 내용에 배포 기록을 덧붙였다. 0.9.1 절은 아래 "이전 전달
-상태"로 내렸다.
+0.10.0 준비 PR(#200, `263f980`)로 배포했다. 이 절은 준비 PR이 쓴 내용에 배포 기록과 0.10.0 뒤의 변경(#201·#202·#206·#208)을
+덧붙였다. 0.9.1 절은 아래 "이전 전달 상태"로 내렸다.
 
-- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `0f03081`(GHSA-8hc3-mf6m-fh5r 수정 병합)이다.
-  시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. 0.9.1부터 0.10.0까지 `uv.lock`의 의존성은 바뀌지
+- **다음 세션 시작점:** `tracegraph-mvp`의 최신 커밋. 제품 코드의 기준은 `a50b084`(PR #208, #203 수정 병합)이다. 0.10.0에
+  들어간 제품 코드의 마지막 변경은 `0f03081`(GHSA-8hc3-mf6m-fh5r 수정 병합)이다. 시작 전에 `git switch tracegraph-mvp && git pull --ff-only`로 맞춘다. 0.9.1부터 0.10.0까지 `uv.lock`의 의존성은 바뀌지
   않았고, 0.10.0 준비 PR(#200)은 그 안의 프로젝트 버전만 0.10.0으로 바꿨다. 0.10.0 뒤에는 Dependabot 경고 1건을 `uv.lock`만
   바꿔 고쳤다(#202). 2026-11-14 병합 뒤 열린 Dependabot 경고는 0건이다. 새 lock으로 venv를 맞추려면
   `uv sync --locked --extra cypher --group dev`.
@@ -36,9 +36,17 @@
     usage error(exit 2)가 된다. 예외: `validate`는 너무 긴 이름을 `INVALID`(exit 1)로 보고하고, 디렉터리 안의 loop `*.json`은
     경고 후 건너뛰어 성공할 수 있다. `ingest_snapshot`은 쓸 수 없는 `timeout`(NaN·bool·숫자 아님·float으로 바꿀 수 없을
     만큼 큰 int)을 `ValueError`로 거부하고, 그 마감 시간이 어댑터 쿼리까지 덮는다. 측정한 경우 목록은 `CHANGELOG.md`의 해당 항목에 있다.
-- **열린 이슈 3개(#203·#204·#205, 2026-11-14 등록).** 이 구간의 미등록 후속 항목을 옮긴 것이다(아래 "남은 결정과 후속
-  항목" 3번). 그 전에 #194는 PR #198로 닫혔고, #180·#181은 2026-11-14에 소유자 결정으로 not planned로 닫았다(아래 "이번
-  구간의 결정" 4·5번).
+- **0.10.0 뒤 미배포 수정 1건(#203, PR #208).** `CHANGELOG.md`의 `## Unreleased` `### Fixed`에 항목이 있다. `ingest --sqlite`가
+  JSON checkpoint 본문과 write의 깊이를 SQL 미리 검사 대신 `_scanning_serde`의 `loads_typed` 안에서(msgpack 값과 같은 자리에서)
+  재므로, saver가 실제로 디코딩하는 값을 검사한다. thread 컬럼이 대소문자를 구분하지 않고 저장된 id와 요청한 id의 대소문자가
+  다를 때 놓치던 깊은 JSON write를 이제 모든 Python 버전에서
+  `checkpoint history cannot be decoded (JSON nesting too deep)`(exit 2)로 거부한다. 전에는 3.12·3.13이
+  `cannot be decoded (RecursionError)`, 3.14는 해당 thread에 checkpoint가 없다고 보고했다(둘 다 exit 2). saver가 직렬화기 밖에서
+  읽는 checkpoint metadata는 여전히 미리 검사한다. 너무 깊은 msgpack 값과 JSON 본문·write가 한 thread에 함께 있으면 saver가 먼저
+  디코딩하는 쪽의 사유를 보고한다(전에는 늘 JSON 쪽).
+- **열린 이슈 3개(#204·#205·#207).** #203~#205는 2026-11-14 이 구간의 미등록 후속 항목을 옮긴 것이고, #207은 #203의 계획
+  리뷰에서 나와 같은 날 따로 등록했다. #203은 PR #208로 닫혔다(아래 "남은 결정과 후속 항목" 3번). 그 전에 #194는 PR #198로
+  닫혔고, #180·#181은 2026-11-14에 소유자 결정으로 not planned로 닫았다(아래 "이번 구간의 결정" 4·5번).
 
 ### `89c80c2` 이후 착지한 변경
 
@@ -55,6 +63,8 @@
 | #200 | `263f980` | 0.10.0 준비: 버전·lock, `CHANGELOG.md` `## 0.10.0 - 2026-11-14`(릴리스 claims review 4라운드, 3라운드 지적은 이 PR에서 반영), 이 절 |
 | #201 | `5999602` | 0.10.0 배포 기록(문서만) |
 | #202 | `cd1b83b` | Dependabot 1건(GHSA-5cjw-f85j-cv6r low): `uv.lock`만 `tornado` 6.6→6.6.1. #185와 같이 `ipykernel`·`nbclient`를 거친 dev group 의존성이라 배포 패키지와 무관하다 |
+| #206 | `90d31e1` | 이 절을 #203~#205 등록과 #202 lock 갱신으로 고친 기록(문서만) |
+| #208 | `a50b084` | #203: JSON checkpoint 본문과 write의 깊이 검사를 `_scanning_serde`의 `loads_typed`로 옮기고, `_JSON_TEXTS`에는 metadata 쿼리만 남겼다. `CHANGELOG.md` `## Unreleased` 항목 포함 |
 
 ### 이번 구간의 결정(2026-11-09~14)
 
@@ -80,11 +90,16 @@
 7. **#192의 CHANGELOG(PR #199)와 릴리스 claims review:** #192가 CHANGELOG 없이 병합되어 따로 썼다. 릴리스 단위 claims
    review 4라운드(2026-11-14)에서 나온 누락(입력 경로, `validate`, 3.12 디렉터리 loop, 더 많은 명령의 loop 입력, 성능
    항목)과 #194 항목의 "as before" 문장을 모두 bash로 측정한 뒤 반영했다.
+8. **#203(PR #208):** writes 쿼리가 각 checkpoint에 저장된 키를 쓰도록 SQL만 고치는 쪽이 diff는 작았지만, saver의 쿼리를
+   손으로 흉내 내는 방식이 GHSA-8hc3 작업에 이어 이번에도 같은 경우를 놓쳤으므로 버리고, 검사를 직렬화기 안으로 옮겼다. 계획
+   리뷰 1라운드에서 마감 시간 오류가 깊이 거부로 고정될 문제와 재작성할 테스트, 그리고 `checkpoints`가 view일 때의 틈이 나왔고,
+   2라운드에서 제안한 view 검사가 FTS5 virtual table을 놓친다는 지적이 나왔다. 두 형태를 재현한 뒤 소유자가 view·virtual
+   table 검사를 이 PR에서 빼 #207로 등록하기로 했다.
 
 ### 검증 증거
 
 PR별 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.10.0 배포" 행은 배포 run 로그, 두 인덱스의 JSON API와 provenance 응답,
-배포 후 깨끗한 설치에서 옮겼다.
+배포 후 깨끗한 설치에서 옮겼다. #206·#208의 CI 결과는 `gh pr checks`에서 옮겼다.
 
 | 검증 | 결과 |
 | --- | --- |
@@ -94,17 +109,24 @@ PR별 수치는 각 PR 본문에 적힌 것만 옮겼다. "0.10.0 배포" 행은
 | 리뷰 게이트 | #198: plan 2·diff 2, 최소 수정으로 바꾼 뒤 커밋 후 리뷰 **SHIP**. GHSA 수정: plan 2, diff 1라운드는 리뷰어 쪽 콘텐츠 필터로 중단(마지막 단계가 collation 문제로 이어짐), 재시도 1라운드 NEEDS-FIX, 2라운드 **SHIP**. #199: claims review 2라운드 **SHIP**. 릴리스 claims review: 4라운드, 마지막 **SHIP**. #192·#196·#197 본문에는 리뷰 기록이 없다 |
 | 0.10.0 배포 | 리허설 run [43568160808](https://github.com/memtomem/tracegraph/actions/runs/43568160808), 배포 run [43568705268](https://github.com/memtomem/tracegraph/actions/runs/43568705268), 둘 다 success. wheel `64071fc141e9b3d0faf8e65487ba32aef36ef88be25cc6fae1ca1fca4e4c5b82`, sdist `a4a79a40d2d3d78b281783e377f7e91618f5e85fd5da1fdd828a605259a67678`가 리허설 build·TestPyPI·배포 build·PyPI에서 같다. 두 인덱스 모두 provenance 200(wheel·sdist). PyPI 파일을 받아 digest를 확인한 뒤 깨끗한 Python 3.12.11 core·cypher 설치에서 `uv pip check` 통과, `tracegraph --version` 0.10.0, `verify_wheel` PASS(cypher는 backend parity도 PASS). 이 unlocked 설치는 `uv.lock`(4.3.1, 1.12.2)보다 새 `langgraph-checkpoint` 4.3.2와 `ormsgpack` 1.13.1을 받았다(`langgraph-checkpoint-sqlite`는 lock과 같은 3.1.3) |
 | 0.10.0 뒤 lock 갱신 | PR 본문 기준. #202: 두 lockfile을 `tomllib`로 비교해 바뀐 패키지는 `tornado` 하나, `uv lock --check` 통과, 새 lock의 venv에서 `suite-run` 3379 passed / 12 skipped CLEAN, `tests/test_notebooks.py` 2 passed(skip 아님, tornado 6.6.1 import), golden은 CLI가 tornado를 import하지 않아 생략, 커밋 리뷰 1라운드 SHIP |
+| 0.10.0 뒤 #203 수정 | PR 본문 기준. #208: worktree venv(3.12.11)에서 `suite-run` 3384 passed / 12 skipped CLEAN(base 3379), `ruff@0.14.2`·`mypy`·`git diff --check` clean. 영향받은 테스트 파일 3개는 3.13.2·3.14.4에서 각 289 passed. 새 행동 테스트 4개는 base(`90d31e1`) 소스에서 3.12.11·3.13.2·3.14.4 모두 실패하고 이 브랜치에서 통과한다(str·bytes가 아닌 값의 테스트는 의도대로 base에서도 통과). 변이 7종(`PYTHONDONTWRITEBYTECODE=1`)을 모두 잡는다. 골든은 본문 미기재. 리뷰: plan 2라운드(1라운드 major 3, 2라운드 major 1), 커밋 `9aa91b8` 리뷰 1라운드 **SHIP**(지적 없음). PR check 19개 모두 success |
+| 0.10.0 뒤 문서 | #206: claims review 3라운드(NEEDS-FIX, NEEDS-FIX, **SHIP**), `git diff --check` clean. PR check 19개 모두 success |
 
 ### 남은 결정과 후속 항목
 
-1. **다음 릴리스:** 0.10.0 이후 바뀐 것은 이 문서(#201)와 dev group 의존성의 lock(#202)뿐이라, 배포 패키지의 소스와 의존성
-   범위는 0.10.0과 같다. 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은 소유자만 할 수 있다.
+1. **다음 릴리스:** 0.10.0 이후 배포 패키지의 소스에서 바뀐 것은 #208의 `src/tracegraph/sqlite_snapshot.py`이고,
+   `CHANGELOG.md`의 `## Unreleased`에 그 `### Fixed` 항목 하나가 있다. 나머지는 이 문서(#201·#206), 테스트(#208), dev group
+   의존성의 lock(#202)이고 `pyproject.toml`은 그대로라 의존성 범위는 0.10.0과 같다. 버전 번호는 정하지 않았다. #208은 새 문구를
+   더하지 않지만(`checkpoint history cannot be decoded (JSON nesting too deep)`은 0.10.0에도 있다) 위 "0.10.0 뒤 미배포 수정"
+   항목의 입력에서 보고하는 거부 사유가 바뀐다. 0.8.0·0.9.0·0.10.0은 출력 문구가 바뀌면 minor로 올렸다. 릴리스 절차는 [릴리스 런북](releasing.md)이고, `pypi` 환경 승인은 소유자만 할 수 있다.
 2. **권고문:** GHSA-8hc3-mf6m-fh5r은 2026-11-14 07:18:52Z에 공개했다. upstream(LangGraph ext hook·ormsgpack) 보고 여부는
    미정이다.
-3. **후속 이슈 3개(2026-11-14 등록, 소유자 결정 전).** 측정 조건과 결과, 선택지는 각 이슈 본문에 있다.
-   - #203: `_JSON_TEXTS`의 JSON 미리 검사가 thread 컬럼의 collation을 거쳐 saver가 읽는 write를 놓친다.
+3. **열린 후속 이슈 3개(2026-11-14 등록, 소유자 결정 전).** 측정 조건과 결과, 선택지는 각 이슈 본문에 있다. 같은 날 등록한
+   #203(`_JSON_TEXTS`의 JSON 미리 검사가 thread 컬럼의 collation을 거쳐 saver가 읽는 write를 놓침)은 PR #208로 닫혔다.
    - #204: 디렉터리 입력 안에서 `--out`과 hardlink인 artifact가 경고 없이 run에서 빠진다(`summarize`에서 측정).
    - #205: #195의 선택지 C(opt-in `check` 규칙).
+   - #207: `checkpoints`가 view나 virtual table이면 metadata 미리 검사와 saver가 서로 다른 행을 읽을 수 있다(#203 계획 리뷰에서
+     발견).
 
 ---
 
