@@ -906,29 +906,70 @@ def _resolves_to(path: Path, target: Path | None) -> bool:
         return False
 
 
+def _beside_out(path: Path, out: Path) -> bool:
+    """Whether ``path``, already known to be the ``--out`` file, is that file's own entry.
+
+    True when it resolves to ``out`` or into ``out``'s real directory. Only directories are
+    compared, never names, so a spelling alias on a case- or normalization-insensitive
+    filesystem counts as ``out`` itself. The cost is that a hardlink under another name in
+    ``out``'s directory counts too. When the directories cannot be compared, this answers
+    True, so every miss leaves the file out silently as before rather than warning. So does
+    a file with a single name (link count 1): whatever path reached it, such as a descriptor
+    alias (``/dev/fd/N``) or a bind mount, it cannot be ``out`` under another name.
+    """
+    try:
+        real = path.resolve()
+        if real == out or os.stat(path).st_nlink < 2:
+            return True
+        here, there = os.stat(real.parent), os.stat(out.parent)
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
+
+
+def _warn_linked(linked: list[Path]) -> None:
+    """Emit the stderr warning for directory files left out as ``--out`` under another name."""
+    if not linked:
+        return
+    detail = ", ".join(f.name for f in linked)
+    err_console.print(
+        f"[yellow]⚠ left out {len(linked)} file(s) that are the --out file under another "
+        f"name (a hardlink): {escape(detail)}[/]"
+    )
+
+
 def _discover_artifacts(
     paths: list[Path], *, exclude: Path | None = None
-) -> list[tuple[Path, bool]]:
-    """Expand files and directories into ``(path, explicitly_named)`` in load order."""
+) -> tuple[list[tuple[Path, bool]], list[Path]]:
+    """Expand files and directories into ``(path, explicitly_named)`` in load order.
+
+    A directory file that is the ``exclude`` (``--out``) file is left out. When it is that
+    file under another name in another directory (a hardlink), it is also returned in the
+    second list and named in a warning, which is printed even if discovery then fails.
+    """
     discovered: list[tuple[Path, bool]] = []
+    linked: list[Path] = []
     try:
         excluded = exclude.resolve() if exclude is not None else None
     except (OSError, RuntimeError) as exc:
         raise typer.BadParameter(f"cannot resolve a path: {_load_reason(exc)}") from exc
-    for p in paths:
-        if _is_dir_safe(p):
-            discovered.extend(
-                (f, False)
-                for f in sorted(p.glob("*.json"))
-                if not _resolves_to(f, excluded)
-            )
-        else:
-            if _resolves_to(p, excluded):
-                raise typer.BadParameter("--out must not overwrite an input artifact")
-            discovered.append((p, True))
+    try:
+        for p in paths:
+            if _is_dir_safe(p):
+                for f in sorted(p.glob("*.json")):
+                    if not _resolves_to(f, excluded):
+                        discovered.append((f, False))
+                    elif excluded is not None and not _beside_out(f, excluded):
+                        linked.append(f)
+            else:
+                if _resolves_to(p, excluded):
+                    raise typer.BadParameter("--out must not overwrite an input artifact")
+                discovered.append((p, True))
+    finally:
+        _warn_linked(linked)
     if not discovered:
         raise typer.BadParameter("no artifact files found")
-    return discovered
+    return discovered, linked
 
 
 def _no_valid_artifacts(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
@@ -942,6 +983,13 @@ def _strict_refused(skipped: list[tuple[Path, str]]) -> typer.BadParameter:
     return typer.BadParameter(
         f"--strict: {len(skipped)} discovered file(s) could not be loaded as tracegraph "
         "artifacts (listed above); fix or remove them, or drop --strict to skip them"
+    )
+
+
+def _strict_refused_linked(linked: list[Path]) -> typer.BadParameter:
+    return typer.BadParameter(
+        f"--strict: {len(linked)} discovered file(s) are the --out file under another name "
+        "(listed above); choose another --out, or drop --strict to leave them out"
     )
 
 
@@ -971,7 +1019,7 @@ def _load_many_evidence(
     chain, so silently keeping the last-loaded copy would attach matches from one artifact
     to a different artifact's causal graph.
     """
-    discovered = _discover_artifacts(paths, exclude=exclude)
+    discovered, linked = _discover_artifacts(paths, exclude=exclude)
     loaded: list[_LoadedArtifact] = []
     skipped: list[tuple[Path, str]] = []
     for f, explicit in discovered:
@@ -992,6 +1040,8 @@ def _load_many_evidence(
     _warn_skipped(skipped)
     if strict and skipped:
         raise _strict_refused(skipped)
+    if strict and linked:
+        raise _strict_refused_linked(linked)
     if not loaded:
         raise _no_valid_artifacts(skipped)
 
@@ -1158,7 +1208,7 @@ def _query_pass(
     ``MemoryError`` and interrupts propagate at once, after flushing the skip warnings
     collected so far.
     """
-    discovered = _discover_artifacts(paths)
+    discovered, _ = _discover_artifacts(paths)
     scan = _QueryPass()
     try:
         for f, explicit in discovered:
@@ -1878,7 +1928,8 @@ def summarize(
         False,
         "--strict",
         help="Fail (exit 2) if a directory holds a *.json file that is not a valid artifact, "
-             "instead of skipping it with a warning.",
+             "instead of skipping it with a warning, or holds the --out file under another "
+             "name (a hardlink), instead of leaving it out with a warning.",
     ),
 ) -> None:
     """Group a preset's matches across artifacts by observed shape. Exits 1 if none match."""
@@ -1892,7 +1943,7 @@ def summarize(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    discovered = _discover_artifacts(artifacts, exclude=out)
+    discovered, linked = _discover_artifacts(artifacts, exclude=out)
     # The same precedence as `query`: every input is loaded and validated first, so a load,
     # --strict, "no valid artifacts" or duplicate error wins over a failure while grouping.
     scan = _QueryPass()
@@ -1906,6 +1957,8 @@ def summarize(
         _warn_skipped(scan.skipped)
     if strict and scan.skipped:
         raise _strict_refused(scan.skipped)
+    if strict and linked:
+        raise _strict_refused_linked(linked)
     if not scan.seen:
         raise _no_valid_artifacts(scan.skipped)
     if scan.duplicate is not None:
@@ -2015,7 +2068,8 @@ def export_review_candidates(
         False,
         "--strict",
         help="Fail (exit 2) if a directory holds a *.json file that is not a valid artifact, "
-             "instead of skipping it with a warning.",
+             "instead of skipping it with a warning, or holds the --out file under another "
+             "name (a hardlink), instead of leaving it out with a warning.",
     ),
 ) -> None:
     """Export body-free, versioned governance review candidates. Empty matches succeed."""

@@ -8,6 +8,27 @@ explicitly.
 
 ## Unreleased
 
+### Changed
+
+- **`summarize` and `export-review-candidates` name a directory artifact left out as the
+  `--out` file** (#204). When a `*.json` file in a directory input is the `--out` file under
+  another name in another directory (a hardlink), it is left out of the run, as in 0.10.0, but
+  now with a stderr warning naming it: `⚠ left out 1 file(s) that are the --out file under
+  another name (a hardlink): a.json`. In 0.10.0 it was left out silently, also under
+  `--strict`, so the report covered fewer traces than the directory held. In 0.9.1 it was
+  loaded. `--strict` now refuses it, exit 2, after any skipped-file refusal and before
+  anything is written. The warning is printed even when the command then fails on another
+  input, such as an `--out` that is also named on the command line.
+
+  A file is reported only when it has more than one name on disk (a link count of 2 or more)
+  and the scanned name is in another directory than `--out`. Directories are compared, never
+  names. So the `--out` file's own entry stays silently left out however it is reached: by its
+  path, through a symlink, through a symlinked directory, or by a spelling the filesystem
+  treats as the same name (on macOS, case and Unicode normalization). For the same reason, a
+  hardlink under another name in the `--out` file's own directory is still left out silently.
+  A file with a single name is never reported, whatever path reaches it, such as a symlink to
+  a descriptor path like `/dev/fd/3`.
+
 ### Fixed
 
 - **`ingest --sqlite` measures JSON checkpoint bodies and writes where the saver decodes them**
