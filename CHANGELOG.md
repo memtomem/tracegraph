@@ -6,7 +6,7 @@ The **artifact** schema version and the **report**/**review-candidate** JSON sch
 separate contracts from this version number; changes to any of them are called out
 explicitly.
 
-## Unreleased
+## 0.10.0 - 2026-11-14
 
 ### Changed
 
@@ -73,11 +73,13 @@ explicitly.
 
 - **Output paths and a few library inputs give clean errors** (#192).
   - A path whose name is too long for the filesystem made a command exit 1 with a traceback,
-    whether it was an output path or an artifact given to `query` or `summarize` (measured on
-    Python 3.12 and 3.13). On 3.12 so did an output path that is a symlink loop, and an input
-    that is one when `summarize` or `export-review-candidates` also has an `--out`. All of these
-    are now usage errors, exit 2. On 3.13 and later a looping output path does not raise: the
-    output replaces the dangling link, as in 0.9.1. `validate` given a name that is too long
+    whether it was an output path or an artifact given to `query`, `summarize` or
+    `export-review-candidates` (measured on Python 3.12 and 3.13). On 3.12 so did a symlink
+    loop given as an output path, or as an input to a command that also writes one: `analyze`
+    with `--json-out` (the input or its `--baseline`), `export-incident-memo`,
+    `ingest --sqlite`, and `summarize` or `export-review-candidates` with `--out`. All of these
+    are now usage errors, exit 2, and nothing is written. On 3.13 and later a looping output
+    path does not raise: the output replaces the dangling link, as in 0.9.1. `validate` given a name that is too long
     now reports the file as `INVALID` (exit 1, as for any invalid file) instead of a traceback.
   - On Python 3.12, a directory input holding a `*.json` symlink loop made `summarize` and
     `export-review-candidates` with an `--out` exit 1 with a traceback. The file is now skipped
@@ -99,7 +101,8 @@ explicitly.
   - Faster on large inputs, with the same output: OTLP and Phoenix parents chosen among many
     executions of one graph node are found by binary search instead of a scan of every
     candidate, and LangGraph task names on a checkpoint with a wide `Send` fan-out are
-    resolved once per checkpoint instead of once per task.
+    resolved once per checkpoint instead of once per task. Normalizing and validating a trace,
+    `check` with several pattern rules, and motif summaries also do less repeated work.
 
 ## 0.9.1 - 2026-11-04
 
