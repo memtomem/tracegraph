@@ -32,8 +32,8 @@ explicitly.
   int too large for a float, such as `10**400`, raised `OverflowError`. Each of these now
   raises `ValueError("SQLite snapshot deadline exceeded")`, which a caller catching
   `ValueError` sees. `float("inf")` is still accepted and means no deadline, and a finite int
-  or float bounds the read as before. The CLI never passes `timeout`, so only library callers
-  were affected.
+  or float is still accepted, though the deadline it sets now bounds more of the read (#192,
+  below). The CLI never passes `timeout`, so only library callers were affected.
 
 - **An output path that is the file stdin reads from is refused** (#193). Commands already
   refuse an output that is one of their input paths, but two ways of naming stdin slipped past
@@ -49,6 +49,36 @@ explicitly.
   to the input. The command exits 2 with the usual "must not overwrite" error and leaves the
   input unchanged. A pipe or a terminal has no file to compare, so piped input behaves as
   before.
+
+- **Output paths and a few library inputs give clean errors** (#192).
+  - A path whose name is too long for the filesystem made a command exit 1 with a traceback,
+    whether it was an output path or an artifact given to `query` or `summarize` (measured on
+    Python 3.12 and 3.13). On 3.12 so did an output path that is a symlink loop, and an input
+    that is one when `summarize` or `export-review-candidates` also has an `--out`. All of these
+    are now usage errors, exit 2. On 3.13 and later a looping output path does not raise: the
+    output replaces the dangling link, as in 0.9.1. `validate` given a name that is too long
+    now reports the file as `INVALID` (exit 1, as for any invalid file) instead of a traceback.
+  - On Python 3.12, a directory input holding a `*.json` symlink loop made `summarize` and
+    `export-review-candidates` with an `--out` exit 1 with a traceback. The file is now skipped
+    with a warning like any other unreadable file (`--strict` refuses it, exit 2), as 3.13
+    already did.
+  - `summarize` and `export-review-candidates` refuse an `--out` that is a hardlink to an
+    artifact named on the command line, exit 2. In 0.9.1 the report replaced that name. The
+    input file itself was left as it was, because the output is written to a new file and
+    renamed over the link. Found inside a directory input instead, such an artifact is now
+    left out of the run, as a directory already left out the `--out` file itself by path,
+    and the command goes on with the other artifacts.
+  - `ingest_snapshot` accepts a `str` source (0.9.1 raised `AttributeError`). On Python 3.12 a
+    source that is a symlink loop raises `OSError` (`ELOOP`) instead of `RuntimeError`. Its
+    deadline now also bounds the adapter's own queries, and is checked once more after they
+    return; in 0.9.1 it covered only the snapshot copy and the JSON scan. The `timeout` checks
+    have their own entry above.
+  - `build_incident_memo` refuses an `artifact_digest` that is not a `str` with `ValueError`
+    (0.9.1 raised `TypeError`).
+  - Faster on large inputs, with the same output: OTLP and Phoenix parents chosen among many
+    executions of one graph node are found by binary search instead of a scan of every
+    candidate, and LangGraph task names on a checkpoint with a wide `Send` fan-out are
+    resolved once per checkpoint instead of once per task.
 
 ## 0.9.1 - 2026-11-04
 
